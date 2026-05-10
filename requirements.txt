@@ -1,0 +1,6 @@
+streamlit
+supabase
+stripe
+googlemaps
+pandas
+openpyxl
