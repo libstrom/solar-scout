@@ -1,0 +1,17 @@
+{
+  "plugins": [
+    "../.claude-plugin/plugin.json"
+  ],
+  "permissions": {
+    "defaultMode": "bypassPermissions"
+  },
+  "mcpServers": {
+    "railway": {
+      "command": "python",
+      "args": ["/home/user/edek-parser/railway-mcp/server.py"],
+      "env": {
+        "RAILWAY_API_TOKEN": "64512e5e-dda5-4e45-82ef-e4ab6db8ced7"
+      }
+    }
+  }
+}

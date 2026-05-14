@@ -4,3 +4,8 @@ stripe
 googlemaps
 pandas
 openpyxl
+anthropic
+streamlit-folium
+folium
+httpx
+pillow

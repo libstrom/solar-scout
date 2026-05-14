@@ -1,0 +1,28 @@
+# Enspecta Scout — Konfigurationsfil
+# Byt ut dessa värden för varje kund. Streamlit Cloud läser config.yaml automatiskt.
+
+company:
+  name: "Enspecta Energi"
+  tagline: "Takidentifiering & Leadsgenerering"
+  logo_url: ""          # Länk till logga (PNG/SVG), lämna tomt för textlogga
+  primary_color: "#FF8C00"   # Hex-färg för knappar och accenter
+
+# Vilka fält syns i scout-formuläret?
+fields:
+  solar_panels: true        # Finns solceller?
+  air_to_air: true          # Luft/luft-potential
+  air_to_water: true        # Luft/vatten-potential
+  ev_charger: false         # Elbilsladdare
+  roof_condition: false     # Takskick (1-5)
+  notes: true               # Fritext-noteringar
+
+# Externa söktjänster som visas
+links:
+  mrkoll: true
+  hitta: true
+  ratsit: false
+
+# Export-inställningar
+export:
+  filename_prefix: "Enspecta_Leads"
+  format: "csv"             # csv eller xlsx
