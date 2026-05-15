@@ -1,10 +1,10 @@
-# edek-parser
+# solar-scout
 
 ## Agent skills
 
 ### Issue tracker
 
-Issues live in GitHub Issues (`libstrom/edek-parser`). See `docs/agents/issue-tracker.md`.
+Issues live in GitHub Issues (`libstrom/solar-scout`). See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

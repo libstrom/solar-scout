@@ -1,168 +1,141 @@
 """
-Testskript — kör tre kända solcellsadresser mot Claude Vision.
-Primär bild: Lantmäteriet minkarta WMS (gratis). Fallback: Mapbox.
+Smoke-test för solar-scout pipelinen.
+
+Kör pipelinen end-to-end mot ett urval kända adresser och rapporterar
+hur AI:n presterar (precision, recall, F1).
+
+Usage:
+    python test_scanner.py <ANTHROPIC_API_KEY>
+
+Bilden hämtas via Lantmäteriet minkarta WMS (gratis). AI-bedömningen körs via
+samma _analyze_building som produktionsappen — så denna test verifierar exakt
+samma kodväg som AI Scanner-fliken använder.
 """
 
-import base64
-import math
 import sys
+import time
 import httpx
 import anthropic
 
-MAPBOX_TOKEN  = "pk.eyJ1IjoibGlic3Ryb20iLCJhIjoiY21wMmxsN3ZwMDJnejJzc2hhMGJicHZuMiJ9.K1GhO9yhO1EYbwzvmrJ3vQ"
-ANTHROPIC_KEY = sys.argv[1] if len(sys.argv) > 1 else ""
+from scanner import _analyze_building, _fetch_lm_wms, _fetch_mapbox
 
-TEST_ADDRESSES = [
-    "Rågången 81, Nässjö",
-    "Körsbärsstigen 1, Nässjö",
-    "Hultgatan 1, Nässjö",
+MAPBOX_TOKEN_FALLBACK = (
+    "pk.eyJ1IjoibGlic3Ryb20iLCJhIjoiY21wMmxsN3ZwMDJnejJzc2hhMGJicHZuMiJ9."
+    "K1GhO9yhO1EYbwzvmrJ3vQ"
+)
+
+# Kända test-fall. Lägg till fler i takt med att ni granskar leads i produktionsappen.
+#   expected_has_solar = True  → vi vet det finns solpaneler på taket
+#   expected_has_solar = False → vi vet att huset INTE har solpaneler
+#   expected_is_house  = False → strukturen är inte en bostad (carport, lager, kyrka...)
+TEST_CASES = [
+    # Nässjö — solcellsfastigheter enligt befintlig data
+    {"address": "Rågången 81, Nässjö",       "expected_is_house": True,  "expected_has_solar": True},
+    {"address": "Körsbärsstigen 1, Nässjö",  "expected_is_house": True,  "expected_has_solar": True},
+    {"address": "Hultgatan 1, Nässjö",       "expected_is_house": True,  "expected_has_solar": True},
+
+    # Negativa kontroll-fall — fyll på här när ni hittar falska positiv i appen
+    # {"address": "...", "expected_is_house": False, "expected_has_solar": False},
 ]
 
 
-def geocode(address: str) -> tuple[float, float] | None:
+def geocode_mapbox(address: str, token: str) -> tuple[float, float] | None:
     import urllib.parse
     query = urllib.parse.quote(address)
     resp = httpx.get(
         f"https://api.mapbox.com/geocoding/v5/mapbox.places/{query}.json",
-        params={"access_token": MAPBOX_TOKEN, "country": "se", "limit": 1},
+        params={"access_token": token, "country": "se", "limit": 1},
         timeout=10,
     )
-    data = resp.json()
-    features = data.get("features", [])
+    features = resp.json().get("features", [])
     if not features:
         return None
     lng, lat = features[0]["center"]
     return lat, lng
 
 
-def fetch_lm_wms(lat: float, lng: float, size_m: float = 50) -> bytes | None:
-    d_lat = (size_m / 2) / 111_000
-    d_lng = d_lat / math.cos(math.radians(lat))
-    bbox = f"{lng-d_lng},{lat-d_lat},{lng+d_lng},{lat+d_lat}"
-    url = (
-        "https://minkarta.lantmateriet.se/map/ortofoto"
-        "?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap"
-        "&LAYERS=Ortofoto_0.25,Ortofoto_0.16"
-        "&FORMAT=image/jpeg&WIDTH=640&HEIGHT=640"
-        f"&SRS=EPSG:4326&BBOX={bbox}"
-    )
-    try:
-        resp = httpx.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
-        if resp.status_code == 200 and "image" in resp.headers.get("content-type", ""):
-            return resp.content
-        print(f"  LM WMS {resp.status_code}: {resp.text[:80]}")
-    except Exception as e:
-        print(f"  LM WMS fel: {e}")
-    return None
-
-
-def fetch_mapbox(lat: float, lng: float, zoom: int = 20) -> bytes | None:
-    url = (
-        f"https://api.mapbox.com/styles/v1/mapbox/satellite-v9/static"
-        f"/{lng},{lat},{zoom}/640x640"
-        f"?access_token={MAPBOX_TOKEN}"
-    )
-    resp = httpx.get(url, timeout=20)
-    if resp.status_code != 200:
-        print(f"  Mapbox {resp.status_code}: {resp.text[:100]}")
-        return None
-    return resp.content
-
-
-def fetch_image(lat: float, lng: float) -> tuple[bytes | None, str]:
-    img = fetch_lm_wms(lat, lng)
+def fetch_image(lat: float, lng: float, mapbox_token: str) -> tuple[bytes | None, str]:
+    img = _fetch_lm_wms(lat, lng)
     if img:
         return img, "LM WMS"
-    img = fetch_mapbox(lat, lng, zoom=20)
+    img = _fetch_mapbox(mapbox_token, lat, lng, zoom=20)
     if img:
         return img, "Mapbox"
     return None, ""
 
 
-def ask_claude(client: anthropic.Anthropic, img: bytes) -> tuple[str, str]:
-    b64 = base64.standard_b64encode(img).decode()
-    msg = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=120,
-        messages=[{
-            "role": "user",
-            "content": [
-                {
-                    "type": "image",
-                    "source": {"type": "base64", "media_type": "image/jpeg", "data": b64},
-                },
-                {
-                    "type": "text",
-                    "text": (
-                        "You are looking at a Swedish aerial orthophoto (top-down, ~50m wide) "
-                        "centred on a residential building.\n\n"
-                        "From directly above, PV solar panels appear as:\n"
-                        "- Uniformly flat, very dark (dark blue/black/charcoal) rectangular patches\n"
-                        "- Distinctly flatter and more uniform than surrounding roof tiles\n"
-                        "- Arranged in a rectangular array on part of the roof\n"
-                        "- Often slightly shinier or more reflective than the rest of the roof\n\n"
-                        "Does any part of the central building's roof look like solar panels? "
-                        "Answer YES or NO, then one sentence explaining what you see."
-                    ),
-                },
-            ],
-        }],
-    )
-    text = msg.content[0].text.strip()
-    clean = text.lstrip("*_ ").upper()
-    verdict = "YES" if clean.startswith("YES") else "NO"
-    return verdict, text
-
-
 def main():
-    if not ANTHROPIC_KEY:
-        print("Usage: python test_scanner.py <ANTHROPIC_API_KEY>")
+    if len(sys.argv) < 2:
+        print("Usage: python test_scanner.py <ANTHROPIC_API_KEY> [MAPBOX_TOKEN]")
         sys.exit(1)
 
-    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-    correct = 0
+    anthropic_key = sys.argv[1]
+    mapbox_token = sys.argv[2] if len(sys.argv) > 2 else MAPBOX_TOKEN_FALLBACK
+    client = anthropic.Anthropic(api_key=anthropic_key)
 
-    print(f"\n{'='*60}")
-    print("SOLCELLSTEST — 3 kända adresser")
-    print(f"{'='*60}\n")
+    print(f"\n{'='*70}")
+    print(f"SOLAR-SCOUT — smoke-test ({len(TEST_CASES)} adresser)")
+    print(f"{'='*70}\n")
 
-    for addr in TEST_ADDRESSES:
-        print(f"Adress: {addr}")
+    tp = fp = tn = fn = errors = 0
 
-        coords = geocode(addr)
+    for case in TEST_CASES:
+        addr = case["address"]
+        expected_house = case["expected_is_house"]
+        expected_solar = case["expected_has_solar"]
+        print(f"Adress:   {addr}")
+        print(f"Förväntat: HOUSE={'YES' if expected_house else 'NO'}  "
+              f"SOLAR={'YES' if expected_solar else 'NO'}")
+
+        coords = geocode_mapbox(addr, mapbox_token)
         if not coords:
-            print("  Kunde inte geokoda adressen\n")
+            print("  ✗ Kunde inte geokoda — hoppar över\n")
+            errors += 1
             continue
         lat, lng = coords
-        print(f"  Koordinater: {lat:.5f}, {lng:.5f}")
+        print(f"  Koord:   {lat:.5f}, {lng:.5f}")
 
-        img, source = fetch_image(lat, lng)
+        img, src = fetch_image(lat, lng, mapbox_token)
         if not img:
-            print("  Kunde inte hämta satellitbild\n")
+            print("  ✗ Kunde inte hämta satellitbild — hoppar över\n")
+            errors += 1
             continue
-        print(f"  Bild: {len(img)//1024} KB ({source})")
+        print(f"  Bild:    {len(img)//1024} KB ({src})")
 
-        verdict, explanation = ask_claude(client, img)
-        icon = "YES" if verdict == "YES" else "NO"
-        print(f"  Claude: {icon}")
-        print(f"  Förklaring: {explanation}")
+        is_house, has_solar = _analyze_building(client, img)
+        print(f"  AI svar: HOUSE={'YES' if is_house else 'NO'}  "
+              f"SOLAR={'YES' if has_solar else 'NO'}")
 
-        if verdict == "YES":
-            correct += 1
-        print()
+        truth = expected_house and expected_solar
+        pred  = is_house and has_solar
+        if   truth and pred:       tp += 1; verdict = "✓ TRUE POSITIVE"
+        elif truth and not pred:   fn += 1; verdict = "✗ FALSE NEGATIVE (missade)"
+        elif not truth and pred:   fp += 1; verdict = "✗ FALSE POSITIVE (felaktig träff)"
+        else:                       tn += 1; verdict = "✓ TRUE NEGATIVE"
+        print(f"  Verdikt: {verdict}\n")
 
-    print(f"{'='*60}")
-    print(f"Resultat: {correct}/{len(TEST_ADDRESSES)} korrekt detekterade")
-    accuracy = correct / len(TEST_ADDRESSES) * 100
-    print(f"Träffsäkerhet: {accuracy:.0f}%")
+        time.sleep(0.5)
 
-    if accuracy < 67:
-        print("\nLåg träffsäkerhet — promoten behöver justeras eller zoom är fel")
-    elif accuracy < 100:
-        print("\nDelvis OK — en adress missades, kolla zoom/geocoding för den")
-    else:
-        print("\nPerfekt — AI hittar alla kända solcellstak!")
-    print(f"{'='*60}\n")
+    total = tp + fp + tn + fn
+    precision = tp / (tp + fp) if (tp + fp) else None
+    recall    = tp / (tp + fn) if (tp + fn) else None
+    f1        = (2 * precision * recall / (precision + recall)
+                 if precision and recall else None)
+
+    print(f"{'='*70}")
+    print(f"Resultat över {total} fall (errors={errors}):")
+    print(f"  TP={tp}  TN={tn}  FP={fp}  FN={fn}")
+    if precision is not None:
+        print(f"  Precision: {precision:.0%}   (av träffarna, så många var korrekta)")
+    if recall is not None:
+        print(f"  Recall:    {recall:.0%}   (av sanna fall, så många hittades)")
+    if f1 is not None:
+        print(f"  F1:        {f1:.0%}")
+    print(f"{'='*70}\n")
+
+    if f1 is not None and f1 < 0.8:
+        print("⚠  F1 < 80% — gå igenom falska positiv/negativ ovan och justera prompt eller filter.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
