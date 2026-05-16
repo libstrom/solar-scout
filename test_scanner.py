@@ -34,8 +34,18 @@ TEST_CASES = [
     {"address": "Körsbärsstigen 1, Nässjö",  "expected_is_house": True,  "expected_has_solar": True},
     {"address": "Hultgatan 1, Nässjö",       "expected_is_house": True,  "expected_has_solar": True},
 
-    # Negativa kontroll-fall — fyll på här när ni hittar falska positiv i appen
-    # {"address": "...", "expected_is_house": False, "expected_has_solar": False},
+    # Användarverifierade — Småland/Skåne, mix av positiv/negativ
+    {"address": "Plommonvägen 1, Lund",      "expected_is_house": True,  "expected_has_solar": True},
+    {"address": "Östra Ringvägen 34, Växjö", "expected_is_house": True,  "expected_has_solar": False},
+    {"address": "Vilhelmsrogatan 3, Nässjö", "expected_is_house": True,  "expected_has_solar": False},
+
+    # Edge case — solpaneler på garaget, inte huvudbyggnad. Sätt true för att mäta
+    # affärsmissen "vi flaggar denna som lead trots att fastigheten redan har sol".
+    # {"address": "Skatgatan 5, Jönköping",  "expected_is_house": True,  "expected_has_solar": True},
+
+    # Inväntar labels:
+    # {"address": "Plommonvägen 3, Lund",        ...},
+    # {"address": "Handskmakaregatan 1A, Lund",  ...},
 ]
 
 
