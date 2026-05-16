@@ -334,7 +334,7 @@ def _fetch_mapbox(mapbox_key: str, lat: float, lng: float, zoom: int = ZOOM_BUIL
         return None
 
 
-def _fetch_lm_wms(lat: float, lng: float, size_m: float = 50) -> bytes | None:
+def _fetch_lm_wms(lat: float, lng: float, size_m: float = 18) -> bytes | None:
     """Lantmäteriet minkarta WMS — free, no key, high-res Swedish orthophoto."""
     d_lat = (size_m / 2) / 111_000
     d_lng = d_lat / math.cos(math.radians(lat))
@@ -399,7 +399,7 @@ def _analyze_building(client: anthropic.Anthropic, img_bytes: bytes) -> tuple[bo
     try:
         msg = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=80,
+            max_tokens=180,
             messages=[{
                 "role": "user",
                 "content": [
@@ -417,22 +417,27 @@ def _analyze_building(client: anthropic.Anthropic, img_bytes: bytes) -> tuple[bo
                             "parking shed, garage, barn, industrial building, warehouse, "
                             "church, school, kiosk, construction site, or bare ground.\n\n"
                             "Q2 — Only if Q1=YES: does its roof have photovoltaic solar panels?\n\n"
-                            "Solar PV signatures seen from directly above:\n"
-                            "- Strongest signal: VISIBLE GRID LINES between individual modules "
-                            "form a regular rectangular pattern on the roof surface.\n"
-                            "- Surface is flat and geometrically uniform, distinctly different "
-                            "from the bumpy texture of clay tiles or asphalt shingles.\n"
-                            "- Colour varies with sun angle: typically dark blue / black / "
-                            "charcoal, but can also appear as lighter blue-grey, brownish, or "
-                            "mirror-bright when sunlight reflects off the panels.\n"
-                            "- Installation may be a partial rectangular array on part of the "
-                            "roof, OR cover the entire south-facing slope. Full-roof installs "
-                            "lack contrast with the rest of the same building — in that case "
-                            "compare against neighbouring houses' rougher tile/shingle roofs.\n\n"
-                            "If you see a clear rectangular grid pattern, answer SOLAR=YES. "
-                            "If the roof is just uniformly dark without visible panel grid "
-                            "lines and looks like ordinary asphalt/tile, answer SOLAR=NO.\n\n"
-                            "Output exactly two lines, nothing else:\n"
+                            "Solar PV from directly above appears as:\n"
+                            "- RECTANGULAR FLAT PATCHES on the roof that are SMOOTHER and more "
+                            "UNIFORM than the bumpy texture of surrounding clay tiles or asphalt "
+                            "shingles. This is the primary signal — even when grid lines between "
+                            "individual modules are too thin to see in compressed imagery, the "
+                            "smoothness contrast remains visible.\n"
+                            "- Colour can vary with sun angle: dark blue, black, charcoal, "
+                            "lighter blue-grey, brownish, or mirror-bright reflections.\n"
+                            "- Installation may be a partial array (one or several rectangles "
+                            "on part of the roof) OR cover an entire south-facing slope.\n"
+                            "- Supporting signal when visible: regular grid lines / module seams.\n\n"
+                            "First, briefly describe the central building's roof in 1–2 "
+                            "sentences: roof shape, surface texture, any rectangular patches "
+                            "or smooth flat areas you notice. Be specific.\n\n"
+                            "Then commit to a verdict. If the description mentions rectangular "
+                            "smooth patches, flat sections distinct from tile texture, modular "
+                            "segments, or any plausible solar-panel features — answer SOLAR=YES. "
+                            "Only answer SOLAR=NO if the roof is uniformly tile/shingle-textured "
+                            "across the entire surface with no plausible panel features. When "
+                            "uncertain between the two, prefer SOLAR=YES.\n\n"
+                            "End with exactly two lines, on their own, nothing after:\n"
                             "HOUSE=YES or HOUSE=NO\n"
                             "SOLAR=YES or SOLAR=NO\n\n"
                             "If HOUSE=NO, set SOLAR=NO."
