@@ -303,7 +303,7 @@ def page_paywall(user, lead_count: int = 0):
         st.rerun()
 
 
-ANTHROPIC_API_KEY = _secret("ANTHROPIC_API_KEY")
+ANTHROPIC_API_KEY = _secret("SOLAR_SCOUT_ANTHROPIC_KEY") or _secret("ANTHROPIC_API_KEY")
 
 
 def page_scanner(user):
