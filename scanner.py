@@ -40,6 +40,8 @@ class Lead:
     tile_key: str = ""      # for dedup
     building_type: str = "" # OSM building tag value
     zoom: int = 20          # zoom used when fetching satellite image
+    samtomt_solar_extra: bool = False  # extra solar found on same property
+    solar_location: str = "roof"       # "roof" | "samtomt"
 
 
 # ── Tile helpers (kept for UI bbox display) ────────────────────────────────────
@@ -139,25 +141,42 @@ def scan_area_osm(south: float, west: float, north: float, east: float) -> list[
     return leads
 
 
+# Residential building types we want to KEEP. Note: `farm` here is a residential
+# farm-house, not a lantbruksbyggnad (which would be `farm_auxiliary`/`barn`).
 _RESIDENTIAL_TYPES = (
-    "house|detached|semidetached_house|terrace|bungalow|residential|apartments|yes"
+    "house|detached|semidetached_house|terrace|bungalow|cabin|residential|"
+    "static_caravan|farm|yes"
 )
 
-# Building tag values that are NEVER homes — used as an explicit deny-list because
-# Swedish OSM heavily uses "building=yes" for everything.
+# Building tag values that are NEVER single-family homes — explicit deny-list
+# because Swedish OSM heavily uses "building=yes" for everything. Includes
+# flerfamiljshus (apartments/dormitory), commerce, industry, agriculture and
+# civic/utility structures.
 _NON_RESIDENTIAL_TYPES = {
-    "industrial", "warehouse", "garage", "garages", "carport", "shed", "hangar",
-    "stable", "barn", "silo", "greenhouse", "service", "commercial", "retail",
-    "supermarket", "hotel", "hospital", "school", "university", "kindergarten",
-    "church", "chapel", "cathedral", "mosque", "synagogue", "public", "government",
-    "train_station", "transportation", "fire_station", "kiosk", "hut", "cabin",
-    "farm_auxiliary", "office", "roof", "construction",
+    # Flerfamiljshus / collective housing
+    "apartments", "dormitory", "hotel",
+    # Commerce / office
+    "office", "retail", "commercial", "supermarket", "kiosk",
+    # Industry / utility
+    "industrial", "warehouse", "shed", "garage", "garages", "carport",
+    "hangar", "service", "transformer_tower", "construction",
+    "train_station", "transportation", "fire_station",
+    # Civic / public
+    "church", "cathedral", "chapel", "mosque", "synagogue",
+    "school", "university", "kindergarten", "hospital",
+    "civic", "government", "public",
+    # Agriculture (lantbruksbyggnader, NOT residential farm-houses)
+    "barn", "cowshed", "stable", "farm_auxiliary", "greenhouse", "silo",
+    # Misc non-home
+    "hut", "roof",
 }
 
 # Reject buildings outside this footprint (m²). Excludes garden sheds, carports,
-# industrial warehouses, school complexes etc.
+# industrial warehouses, school complexes etc. Upper bound tightened in V1.5 —
+# most Swedish villor are 80-300 m²; 400+ m² is more likely a parhus-cluster or
+# multi-unit residence we don't want.
 MIN_BUILDING_AREA_M2 = 40
-MAX_BUILDING_AREA_M2 = 600
+MAX_BUILDING_AREA_M2 = 400
 
 # Max distance (m) to snap a building centroid to a nearby OSM address node.
 ADDRESS_SNAP_RADIUS_M = 25
@@ -242,6 +261,15 @@ def _get_osm_buildings(south: float, west: float, north: float,
         if btype in _NON_RESIDENTIAL_TYPES:
             continue
 
+        # Flerfamiljshus often tagged as residential but carry building:flats.
+        # >1 flats means it's not a single-family villa.
+        flats_raw = tags.get("building:flats", "")
+        try:
+            if flats_raw and int(flats_raw) > 1:
+                continue
+        except ValueError:
+            pass
+
         area = _building_area_m2(bounds, lat)
         if area < MIN_BUILDING_AREA_M2 or area > MAX_BUILDING_AREA_M2:
             continue
@@ -258,6 +286,114 @@ def _get_osm_buildings(south: float, west: float, north: float,
             "area_m2": round(area),
         })
     return buildings
+
+
+# ── Samtomt-Sol-Flagga (V1.5 Slice 7) ─────────────────────────────────────────
+
+def _has_extra_solar_nearby(lat: float, lng: float, radius_m: int = 30,
+                             exclude_self_m: int = 8) -> dict:
+    """
+    Check whether the property around (lat, lng) carries additional OSM solar
+    tags beyond the central building, and whether a villa-type building sits
+    within ~30 m (confirming we're on a villa-tomt, not a lantbruk).
+
+    Returns a dict:
+      - extra_solar_found: bool — True if extra solar tags found beyond the centre
+      - solar_locations:   list[dict] — [{lat, lng, type}, ...] for each extra solar
+      - villa_nearby:      bool — True if a villa-type building exists within
+                                  ~30 m (= exclude_self_m * 4)
+    """
+    # Bounding box for the solar tag scan (radius_m around the centre)
+    d_lat = radius_m / 111_000
+    d_lng = d_lat / max(math.cos(math.radians(lat)), 1e-6)
+    south, west = lat - d_lat, lng - d_lng
+    north, east = lat + d_lat, lng + d_lng
+
+    solar_q = f"""
+    [out:json][timeout:60];
+    (
+      node["generator:source"="solar"]({south},{west},{north},{east});
+      way["generator:source"="solar"]({south},{west},{north},{east});
+      node["power"="generator"]["generator:source"="solar"]({south},{west},{north},{east});
+      way["power"="generator"]["generator:source"="solar"]({south},{west},{north},{east});
+      node["roof:solar_panel"="yes"]({south},{west},{north},{east});
+      way["roof:solar_panel"="yes"]({south},{west},{north},{east});
+    );
+    out center;
+    """
+
+    # Villa-confirmation bbox — exclude_self_m * 4 (default 32 m)
+    villa_radius_m = exclude_self_m * 4
+    vd_lat = villa_radius_m / 111_000
+    vd_lng = vd_lat / max(math.cos(math.radians(lat)), 1e-6)
+    v_south, v_west = lat - vd_lat, lng - vd_lng
+    v_north, v_east = lat + vd_lat, lng + vd_lng
+
+    building_q = f"""
+    [out:json][timeout:60];
+    (
+      way["building"~"^({_RESIDENTIAL_TYPES})$"]({v_south},{v_west},{v_north},{v_east});
+    );
+    out center;
+    """
+
+    solar_elements = _overpass(solar_q)
+    building_elements = _overpass(building_q)
+
+    cos_lat = math.cos(math.radians(lat))
+
+    solar_locations: list[dict] = []
+    for el in solar_elements:
+        if el.get("type") == "node":
+            e_lat, e_lng = el.get("lat"), el.get("lon")
+        elif el.get("type") == "way" and "center" in el:
+            e_lat, e_lng = el["center"]["lat"], el["center"]["lon"]
+        else:
+            continue
+        if e_lat is None or e_lng is None:
+            continue
+        d_lat_m = (e_lat - lat) * 111_000
+        d_lng_m = (e_lng - lng) * 111_000 * cos_lat
+        dist = math.sqrt(d_lat_m * d_lat_m + d_lng_m * d_lng_m)
+        if dist <= exclude_self_m:
+            # That's the central building itself — skip
+            continue
+        if dist > radius_m:
+            continue
+        tags = el.get("tags", {}) or {}
+        if tags.get("roof:solar_panel") == "yes":
+            stype = "roof"
+        elif tags.get("generator:source") == "solar":
+            stype = "generator"
+        else:
+            stype = "solar"
+        solar_locations.append({"lat": e_lat, "lng": e_lng, "type": stype})
+
+    villa_nearby = False
+    for el in building_elements:
+        btype = (el.get("tags") or {}).get("building", "")
+        if btype in _NON_RESIDENTIAL_TYPES:
+            continue
+        if el.get("type") == "way" and "center" in el:
+            e_lat, e_lng = el["center"]["lat"], el["center"]["lon"]
+        elif el.get("type") == "node":
+            e_lat, e_lng = el.get("lat"), el.get("lon")
+        else:
+            continue
+        if e_lat is None or e_lng is None:
+            continue
+        d_lat_m = (e_lat - lat) * 111_000
+        d_lng_m = (e_lng - lng) * 111_000 * cos_lat
+        dist = math.sqrt(d_lat_m * d_lat_m + d_lng_m * d_lng_m)
+        if dist <= villa_radius_m:
+            villa_nearby = True
+            break
+
+    return {
+        "extra_solar_found": len(solar_locations) > 0,
+        "solar_locations": solar_locations,
+        "villa_nearby": villa_nearby,
+    }
 
 
 # ── Lantmäteriet ortofoto ──────────────────────────────────────────────────────
@@ -468,8 +604,33 @@ def _process_building(
     if img is None:
         return None
     is_house, has_solar = _analyze_building(anthropic_client, img)
-    if not (is_house and has_solar):
+    if not is_house:
         return None
+
+    # Samtomt-Sol-Flagga (V1.5 Slice 7): look for extra solar on the same
+    # property beyond the central building, plus a villa-nearby check.
+    samtomt = _has_extra_solar_nearby(lat, lng)
+    extra_solar = samtomt.get("extra_solar_found", False)
+    villa_nearby = samtomt.get("villa_nearby", False)
+
+    samtomt_solar_extra = False
+    solar_location = "roof"
+
+    if has_solar:
+        # AI confirmed roof solar — extra solar on tomten is a bonus flag.
+        if extra_solar:
+            samtomt_solar_extra = True
+    else:
+        # No roof solar per AI. Only keep as a Lead if there's solar elsewhere
+        # on the property AND a villa context confirms it.
+        if extra_solar and villa_nearby:
+            samtomt_solar_extra = True
+            solar_location = "samtomt"
+        else:
+            # Either no extra solar (= no solar on property → drop), or extra
+            # solar without villa context (= markställning on lantbruk, V2).
+            return None
+
     address = building["address"]
     if not address:
         return None
@@ -482,6 +643,8 @@ def _process_building(
         tile_key=f"bld/{building['osm_id']}",
         building_type=building.get("building_type", ""),
         zoom=zoom,
+        samtomt_solar_extra=samtomt_solar_extra,
+        solar_location=solar_location,
     )
 
 

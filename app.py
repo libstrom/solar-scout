@@ -31,6 +31,16 @@ MAPBOX_TOKEN          = _secret("MAPBOX_TOKEN")
 
 stripe.api_key = STRIPE_SECRET_KEY
 
+# CSV-attribution-header — krav från OSM ODbL § 4.3 (attribution) och
+# Lantmäteriets CC-BY-villkor. Se docs/adr/0001-osm-odbl-csv.md för tolkning.
+CSV_ATTRIBUTION_HEADER = (
+    "# Genererad av solar-scout · "
+    "Geodata © Lantmäteriet, CC-BY 4.0 · "
+    "Innehåller OSM-data © OpenStreetMap-bidragsgivare, ODbL 1.0\n"
+    "# https://www.openstreetmap.org/copyright · "
+    "https://creativecommons.org/licenses/by/4.0/\n"
+)
+
 @st.cache_resource
 def get_supabase() -> Client:
     return create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
@@ -474,9 +484,10 @@ def page_scanner(user):
     with col_dl:
         date_str = datetime.now().strftime("%y%m%d")
         export = pd.DataFrame(sb_rows).drop(columns=["lat", "lng"], errors="ignore")
+        csv_bytes = (CSV_ATTRIBUTION_HEADER + export.to_csv(index=False)).encode("utf-8")
         st.download_button(
             "⬇ Ladda ner CSV",
-            export.to_csv(index=False).encode("utf-8"),
+            csv_bytes,
             file_name=f"Scanner_Leads_{date_str}.csv",
             mime="text/csv",
             use_container_width=True,
@@ -618,9 +629,10 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
     st.divider()
     export_df = df.drop(columns=["id", "user_id"], errors="ignore")
     date_str  = datetime.now().strftime("%y%m%d")
+    csv_bytes = (CSV_ATTRIBUTION_HEADER + export_df.to_csv(index=False)).encode("utf-8")
     st.download_button(
         "⬇ Ladda ner CSV",
-        export_df.to_csv(index=False).encode("utf-8"),
+        csv_bytes,
         file_name=f"Scout_Leads_{date_str}.csv",
         mime="text/csv",
         type="primary",
@@ -683,6 +695,112 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
                     st.rerun()
 
 
+def do_cascading_delete(user_id: str):
+    """Radera all användardata kaskaderande.
+
+    Ordning:
+      1. scout_leads (alla rader för user_id)
+      2. profiles (raden för user_id)
+      3. Supabase auth-user (kräver service-role-nyckel)
+
+    Notera: sb.auth.admin.delete_user kräver en admin-klient med
+    service-role-nyckel. I produktion bör detta flyttas till en
+    serverside-funktion (Supabase Edge Function eller dedikerad backend)
+    eftersom anon-nyckeln inte har behörighet att radera auth-användare.
+    """
+    sb = get_supabase()
+
+    # 1. Radera leads
+    try:
+        sb.table("scout_leads").delete().eq("user_id", user_id).execute()
+    except Exception as e:
+        st.warning(f"Kunde inte radera alla leads: {e}")
+
+    # 2. Radera profilraden
+    try:
+        sb.table("profiles").delete().eq("user_id", user_id).execute()
+    except Exception as e:
+        st.warning(f"Kunde inte radera profilen: {e}")
+
+    # 3. Radera auth-användaren (kräver admin-rättigheter — kan misslyckas
+    #    med anon-nyckeln; bör flyttas till server-side i produktion)
+    auth_deleted = False
+    try:
+        sb.auth.admin.delete_user(user_id)
+        auth_deleted = True
+    except Exception as e:
+        st.info(
+            f"Auth-användaren kunde inte raderas automatiskt ({e}). "
+            "Du loggas ut nu — kontakta gdpr@solar-scout.example för att "
+            "fullfölja raderingen av inloggningsuppgifterna."
+        )
+
+    # 4. Logga ut oavsett
+    do_logout()
+    return auth_deleted
+
+
+def page_account(user, profile):
+    st.subheader("⚙ Konto")
+
+    st.markdown("**Kontouppgifter**")
+    st.write(f"**E-post:** {user.email}")
+
+    # Försök hämta registreringsdatum från profil eller user-objekt
+    signup_date = (
+        profile.get("created_at")
+        or getattr(user, "created_at", None)
+    )
+    if signup_date:
+        st.write(f"**Konto skapat:** {signup_date}")
+
+    st.divider()
+    st.markdown("### Radera mitt konto")
+    st.warning(
+        "Detta raderar **permanent** ditt konto, alla dina sparade leads "
+        "och din profil. Åtgärden kan inte ångras."
+    )
+
+    # Bekräftelseflöde via session_state
+    if not st.session_state.get("delete_account_confirm_open"):
+        if st.button(
+            "Radera mitt konto + all min data",
+            type="secondary",
+            use_container_width=True,
+        ):
+            st.session_state["delete_account_confirm_open"] = True
+            st.rerun()
+        return
+
+    st.error(
+        "**Bekräfta radering.** Skriv exakt **RADERA** i fältet nedan för "
+        "att bekräfta att du vill ta bort kontot och all data."
+    )
+    confirm_text = st.text_input(
+        "Skriv RADERA för att bekräfta",
+        key="delete_account_confirm_input",
+    )
+
+    col_cancel, col_delete = st.columns(2)
+    with col_cancel:
+        if st.button("Avbryt", use_container_width=True):
+            st.session_state.pop("delete_account_confirm_open", None)
+            st.session_state.pop("delete_account_confirm_input", None)
+            st.rerun()
+    with col_delete:
+        if st.button(
+            "Bekräfta radering",
+            type="primary",
+            use_container_width=True,
+            disabled=(confirm_text != "RADERA"),
+        ):
+            do_cascading_delete(str(user.id))
+            st.session_state.pop("delete_account_confirm_open", None)
+            st.session_state.pop("delete_account_confirm_input", None)
+            st.success("Ditt konto och all data har raderats. Hej då!")
+            st.rerun()
+
+
 def page_app(user, profile):
     with st.sidebar:
         st.markdown("**Scout**")
@@ -703,7 +821,9 @@ def page_app(user, profile):
             do_logout()
             st.rerun()
 
-    tab_scanner, tab_scout, tab_leads = st.tabs(["🔍 AI Scanner", "🏠 Scouta Tak", "📋 Leads"])
+    tab_scanner, tab_scout, tab_leads, tab_account = st.tabs(
+        ["🔍 AI Scanner", "🏠 Scouta Tak", "📋 Leads", "⚙ Konto"]
+    )
 
     with tab_scanner:
         page_scanner(user)
@@ -714,6 +834,9 @@ def page_app(user, profile):
     with tab_leads:
         page_leads(user)
 
+    with tab_account:
+        page_account(user, profile)
+
     st.divider()
     st.caption(
         "Geodata © Lantmäteriet, CC-BY 4.0 · "
@@ -721,6 +844,99 @@ def page_app(user, profile):
         "OpenStreetMap-data © OSM-bidragsgivare, ODbL · "
         "[Integritetspolicy](?page=privacy)"
     )
+
+
+# ── Integritetspolicy ─────────────────────────────────────────────────────────
+
+def page_privacy():
+    st.title("Integritetspolicy")
+    # TODO: Byt ut "Linus Bergström" mot det slutgiltiga företagsnamnet när
+    # bolagsregistrering är klar.
+    # TODO: Byt ut gdpr@solar-scout.example mot en riktig kontaktadress innan
+    # produktionssläpp.
+    st.markdown(
+        """
+Denna integritetspolicy beskriver hur Scout (”tjänsten”) behandlar
+personuppgifter i enlighet med EU:s dataskyddsförordning (GDPR), särskilt
+informationsplikten i Art. 13.
+
+### Personuppgiftsansvarig
+
+Personuppgiftsansvarig för behandlingen är **Linus Bergström**
+(placeholder — slutgiltigt företagsnamn fylls i innan produktionssläpp).
+Kontakt för förfrågningar från registrerade: **gdpr@solar-scout.example**
+(placeholder — byts ut före lansering).
+
+### Ändamål med behandlingen
+
+Tjänsten används för **AI-baserad detektion av solpaneler på fastigheter
+via satellitbilder** för att generera leads till batteri-uppsälj till
+fastigheter som redan har solceller. Behandlingen sker för att möjliggöra
+direktmarknadsföring av batterilösningar (B2C/B2B) via våra användare
+(batteri-säljare).
+
+### Kategorier av personuppgifter som behandlas
+
+- **Adresser** till fastigheter som scannats eller scoutats
+- **Geografiska koordinater** (latitud och longitud) för byggnader
+- **Satellitbild av byggnaden** (hämtad från Mapbox/Google)
+- Härledd information om huruvida solceller finns på taket samt
+  byggnadstyp
+
+Vi samlar normalt inte in namn eller personnummer; sådana uppgifter kan
+dock härledas av användaren via externa sökningar (Google, Hitta.se).
+
+### Rättslig grund
+
+Behandlingen sker med stöd av **berättigat intresse** (GDPR Art. 6.1 f) —
+att kunna marknadsföra relevanta energilösningar till fastighetsägare
+vars tak redan utrustats med solceller.
+
+### Mottagare av personuppgifterna
+
+Mottagare är **Scouts användare (batteri-säljare)** som loggar in i
+tjänsten. Ingen vidare-överföring till tredje part sker, utöver de
+tekniska underleverantörer som krävs för drift (Supabase, Stripe,
+Mapbox, Google Maps, Anthropic).
+
+### Lagringstid
+
+Personuppgifter (leads) lagras **tills användaren själv raderar dem**,
+eller upp till **12 månader vid inaktivitet** på kontot, varefter de kan
+komma att raderas automatiskt.
+
+### Dina rättigheter (GDPR Art. 15–22)
+
+Som registrerad har du rätt att:
+
+- **Tillgång** (Art. 15) — få information om vilka uppgifter vi har om dig
+- **Rättelse** (Art. 16) — få felaktiga uppgifter rättade
+- **Radering** (Art. 17) — bli ”bortglömd”
+- **Begränsning** (Art. 18) — begära att behandlingen begränsas
+- **Dataportabilitet** (Art. 20) — få ut dina uppgifter i läsbart format
+- **Invändning** (Art. 21) — invända mot behandling baserad på
+  berättigat intresse, särskilt vid direktmarknadsföring
+- **Undantag från automatiserat beslutsfattande** (Art. 22) — inte bli
+  föremål för enbart automatiserade beslut som har rättsliga följder
+
+Skicka din förfrågan till **gdpr@solar-scout.example**.
+
+### Direktmarknadsföring — Robinsonlistan / NIX
+
+Om du vill slippa direktmarknadsföring i allmänhet kan du registrera dig
+hos **Swedma/Robinsonlistan** (för postal direktreklam) eller
+**NIX-Telefon** (för telefonförsäljning). Notera dock att registrering
+där inte automatiskt påverkar behandlingen i denna tjänst — använd
+istället din invändningsrätt enligt ovan.
+
+### Klagomål
+
+Du har rätt att lämna klagomål till **Integritetsskyddsmyndigheten
+(IMY)** om du anser att behandlingen strider mot GDPR.
+        """
+    )
+    st.divider()
+    st.link_button("← Tillbaka", "/")
 
 
 # ── Huvudprogram ──────────────────────────────────────────────────────────────
@@ -731,6 +947,11 @@ def main():
         page_icon="🔍",
         layout="wide",
     )
+
+    # Hantera offentliga sidor (innan auth-check)
+    if st.query_params.get("page") == "privacy":
+        page_privacy()
+        return
 
     user = init_auth()
 
