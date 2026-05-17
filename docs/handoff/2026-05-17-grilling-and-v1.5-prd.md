@@ -186,3 +186,22 @@ Användaren pushade tillbaka på flera av mina premature optimerings-förslag (c
 Avslutade med 3D-flygvy-decision (V1.7), markställning-på-villatomt-spec (V1.5 inkluderat), lantbruk-defer (V2 egen produkt), PRD-format (fil ej GitHub-issue).
 
 Kompakt + branch-state: PR #2 är aktiv och cleant — kan merge:as till main efter pilot-validering. V1.5-arbete blir separat PR från main.
+
+## Gap-analys 2026-05-17 (via /prototype-skill)
+
+Throwaway-prototyp pushade en Lead genom 5-fas-lifecycle (scan → delivered → contacted → meeting → site_visited → sold/lost) inkl. hårda fall (dup, samtomt, NIX-klagomål, låg-konf-träff, no-answer-retry).
+
+**Pilot-blockerare:** INGEN. David kompenserar manuellt för alla luckor. Linus mäter konvertering manuellt under pilot.
+
+**V1.5-followup (post-pilot, ~1-2 dagars jobb):**
+1. `do_not_contact`-flagga i `scout_leads` + UI-knapp i `page_leads` (~1h) — KRITISK för repeterade scans, annars ringer David samma personer igen
+2. AI-konfidens-tröskel-filter (~30min) — låg-konf-leads (<0.7?) flaggas/exkluderas
+3. Auto-dup-droppning vid scan (~1h) — kolla nya leads mot befintliga `scout_leads` med samma koord
+4. Sales-pipeline-status-kolumn (~3h) — contacted/booked/sold/lost utöver befintlig `user_confirmed`
+5. Konverterings-dashboard i `page_leads` (~2h) — automatisera 14-dagars-rapport
+
+**V1.6 (efter pilot bevisat):**
+6. Phone-enrichment via Bisnode/Hitta-API (kräver avtal)
+7. Salessumma + TB-rapport per lead → ROI-dashboard för Ibrahim
+
+Prototypen ligger i `/tmp/solar-scout-prototype/lead_lifecycle.py` (throwaway, NOT i repo). Kör med `python3 /tmp/solar-scout-prototype/lead_lifecycle.py` för att reproducera gap-analysen.
