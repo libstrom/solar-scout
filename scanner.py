@@ -40,6 +40,8 @@ class Lead:
     tile_key: str = ""      # for dedup
     building_type: str = "" # OSM building tag value
     zoom: int = 20          # zoom used when fetching satellite image
+    samtomt_solar_extra: bool = False  # extra solar found on same property
+    solar_location: str = "roof"       # "roof" | "samtomt"
 
 
 # ── Tile helpers (kept for UI bbox display) ────────────────────────────────────
@@ -80,6 +82,10 @@ def _overpass(query: str, timeout: int = 90) -> list[dict]:
             "https://overpass-api.de/api/interpreter",
             data={"data": query},
             timeout=timeout,
+            headers={
+                "User-Agent": "solar-scout/1.0 (https://github.com/libstrom/solar-scout)",
+                "Accept": "application/json",
+            },
         )
         resp.raise_for_status()
         return resp.json().get("elements", [])
@@ -135,10 +141,67 @@ def scan_area_osm(south: float, west: float, north: float, east: float) -> list[
     return leads
 
 
+# Residential building types we want to KEEP. Note: `farm` here is a residential
+# farm-house, not a lantbruksbyggnad (which would be `farm_auxiliary`/`barn`).
 _RESIDENTIAL_TYPES = (
-    "yes|house|detached|residential|apartments|terrace|"
-    "semidetached_house|bungalow|farm|dormitory|block_of_flats"
+    "house|detached|semidetached_house|terrace|bungalow|cabin|residential|"
+    "static_caravan|farm|yes"
 )
+
+# Building tag values that are NEVER single-family homes — explicit deny-list
+# because Swedish OSM heavily uses "building=yes" for everything. Includes
+# flerfamiljshus (apartments/dormitory), commerce, industry, agriculture and
+# civic/utility structures.
+_NON_RESIDENTIAL_TYPES = {
+    # Flerfamiljshus / collective housing
+    "apartments", "dormitory", "hotel",
+    # Commerce / office
+    "office", "retail", "commercial", "supermarket", "kiosk",
+    # Industry / utility
+    "industrial", "warehouse", "shed", "garage", "garages", "carport",
+    "hangar", "service", "transformer_tower", "construction",
+    "train_station", "transportation", "fire_station",
+    # Civic / public
+    "church", "cathedral", "chapel", "mosque", "synagogue",
+    "school", "university", "kindergarten", "hospital",
+    "civic", "government", "public",
+    # Agriculture (lantbruksbyggnader, NOT residential farm-houses)
+    "barn", "cowshed", "stable", "farm_auxiliary", "greenhouse", "silo",
+    # Misc non-home
+    "hut", "roof",
+}
+
+# Reject buildings outside this footprint (m²). Excludes garden sheds, carports,
+# industrial warehouses, school complexes etc. Upper bound tightened in V1.5 —
+# most Swedish villor are 80-300 m²; 400+ m² is more likely a parhus-cluster or
+# multi-unit residence we don't want.
+MIN_BUILDING_AREA_M2 = 40
+MAX_BUILDING_AREA_M2 = 400
+
+# Max distance (m) to snap a building centroid to a nearby OSM address node.
+ADDRESS_SNAP_RADIUS_M = 25
+
+
+def _building_area_m2(bounds: dict, lat: float) -> float:
+    h = (bounds["maxlat"] - bounds["minlat"]) * 111_000
+    w = (bounds["maxlon"] - bounds["minlon"]) * 111_000 * math.cos(math.radians(lat))
+    return h * w
+
+
+def _nearest_addr_node(lat: float, lng: float, nodes: list[dict]) -> str:
+    """Return formatted address of nearest addr-node within ADDRESS_SNAP_RADIUS_M."""
+    best_d, best_addr = None, ""
+    cos_lat = math.cos(math.radians(lat))
+    for n in nodes:
+        d_lat = (n["lat"] - lat) * 111_000
+        d_lng = (n["lon"] - lng) * 111_000 * cos_lat
+        d = math.sqrt(d_lat * d_lat + d_lng * d_lng)
+        if d > ADDRESS_SNAP_RADIUS_M:
+            continue
+        if best_d is None or d < best_d:
+            best_d = d
+            best_addr = _tags_to_address(n.get("tags", {}))
+    return best_addr
 
 
 def _building_zoom(bounds: dict, lat: float) -> int:
@@ -154,33 +217,183 @@ def _building_zoom(bounds: dict, lat: float) -> int:
 def _get_osm_buildings(south: float, west: float, north: float,
                        east: float, max_count: int = 600) -> list[dict]:
     """
-    Return building centroids with addresses from OSM.
-    Only residential types. Each item: {lat, lng, address, osm_id, building_type, zoom}
+    Return building centroids from OSM, filtered for our use case:
+    - building type is a residential class (not industrial/commercial/utility)
+    - footprint area between MIN/MAX_BUILDING_AREA_M2
+    - an OSM address can be resolved (tag on the building, or addr-node within
+      ADDRESS_SNAP_RADIUS_M of its centroid)
+
+    Each item: {lat, lng, address, osm_id, building_type, zoom, area_m2}
     """
-    query = f"""
+    building_q = f"""
     [out:json][timeout:90];
     (
       way["building"~"^({_RESIDENTIAL_TYPES})$"]({south},{west},{north},{east});
     );
-    out bb center {max_count};
+    out geom {max_count};
     """
-    elements = _overpass(query, timeout=120)
+    addr_q = f"""
+    [out:json][timeout:60];
+    (
+      node["addr:street"]["addr:housenumber"]({south},{west},{north},{east});
+    );
+    out;
+    """
+    elements = _overpass(building_q, timeout=120)
+    addr_nodes = _overpass(addr_q, timeout=120)
+
     buildings = []
     for el in elements:
-        if "center" not in el:
+        geom = el.get("geometry") or []
+        if len(geom) < 3:
             continue
-        lat = el["center"]["lat"]
-        lng = el["center"]["lon"]
+        lats = [p["lat"] for p in geom]
+        lons = [p["lon"] for p in geom]
+        lat = sum(lats) / len(lats)
+        lng = sum(lons) / len(lons)
+        bounds = {
+            "minlat": min(lats), "maxlat": max(lats),
+            "minlon": min(lons), "maxlon": max(lons),
+        }
+
         tags = el.get("tags", {})
-        addr = _tags_to_address(tags)
-        osm_id = str(el.get("id", ""))
-        btype = tags.get("building", "yes")
-        zoom = _building_zoom(el["bounds"], lat) if "bounds" in el else ZOOM_BUILDING
+        btype = tags.get("building", "house")
+        if btype in _NON_RESIDENTIAL_TYPES:
+            continue
+
+        # Flerfamiljshus often tagged as residential but carry building:flats.
+        # >1 flats means it's not a single-family villa.
+        flats_raw = tags.get("building:flats", "")
+        try:
+            if flats_raw and int(flats_raw) > 1:
+                continue
+        except ValueError:
+            pass
+
+        area = _building_area_m2(bounds, lat)
+        if area < MIN_BUILDING_AREA_M2 or area > MAX_BUILDING_AREA_M2:
+            continue
+
+        addr = _tags_to_address(tags) or _nearest_addr_node(lat, lng, addr_nodes)
+        if not addr:
+            continue
+
         buildings.append({
             "lat": lat, "lng": lng, "address": addr,
-            "osm_id": osm_id, "building_type": btype, "zoom": zoom,
+            "osm_id": str(el.get("id", "")),
+            "building_type": btype,
+            "zoom": _building_zoom(bounds, lat),
+            "area_m2": round(area),
         })
     return buildings
+
+
+# ── Samtomt-Sol-Flagga (V1.5 Slice 7) ─────────────────────────────────────────
+
+def _has_extra_solar_nearby(lat: float, lng: float, radius_m: int = 30,
+                             exclude_self_m: int = 8) -> dict:
+    """
+    Check whether the property around (lat, lng) carries additional OSM solar
+    tags beyond the central building, and whether a villa-type building sits
+    within ~30 m (confirming we're on a villa-tomt, not a lantbruk).
+
+    Returns a dict:
+      - extra_solar_found: bool — True if extra solar tags found beyond the centre
+      - solar_locations:   list[dict] — [{lat, lng, type}, ...] for each extra solar
+      - villa_nearby:      bool — True if a villa-type building exists within
+                                  ~30 m (= exclude_self_m * 4)
+    """
+    # Bounding box for the solar tag scan (radius_m around the centre)
+    d_lat = radius_m / 111_000
+    d_lng = d_lat / max(math.cos(math.radians(lat)), 1e-6)
+    south, west = lat - d_lat, lng - d_lng
+    north, east = lat + d_lat, lng + d_lng
+
+    solar_q = f"""
+    [out:json][timeout:60];
+    (
+      node["generator:source"="solar"]({south},{west},{north},{east});
+      way["generator:source"="solar"]({south},{west},{north},{east});
+      node["power"="generator"]["generator:source"="solar"]({south},{west},{north},{east});
+      way["power"="generator"]["generator:source"="solar"]({south},{west},{north},{east});
+      node["roof:solar_panel"="yes"]({south},{west},{north},{east});
+      way["roof:solar_panel"="yes"]({south},{west},{north},{east});
+    );
+    out center;
+    """
+
+    # Villa-confirmation bbox — exclude_self_m * 4 (default 32 m)
+    villa_radius_m = exclude_self_m * 4
+    vd_lat = villa_radius_m / 111_000
+    vd_lng = vd_lat / max(math.cos(math.radians(lat)), 1e-6)
+    v_south, v_west = lat - vd_lat, lng - vd_lng
+    v_north, v_east = lat + vd_lat, lng + vd_lng
+
+    building_q = f"""
+    [out:json][timeout:60];
+    (
+      way["building"~"^({_RESIDENTIAL_TYPES})$"]({v_south},{v_west},{v_north},{v_east});
+    );
+    out center;
+    """
+
+    solar_elements = _overpass(solar_q)
+    building_elements = _overpass(building_q)
+
+    cos_lat = math.cos(math.radians(lat))
+
+    solar_locations: list[dict] = []
+    for el in solar_elements:
+        if el.get("type") == "node":
+            e_lat, e_lng = el.get("lat"), el.get("lon")
+        elif el.get("type") == "way" and "center" in el:
+            e_lat, e_lng = el["center"]["lat"], el["center"]["lon"]
+        else:
+            continue
+        if e_lat is None or e_lng is None:
+            continue
+        d_lat_m = (e_lat - lat) * 111_000
+        d_lng_m = (e_lng - lng) * 111_000 * cos_lat
+        dist = math.sqrt(d_lat_m * d_lat_m + d_lng_m * d_lng_m)
+        if dist <= exclude_self_m:
+            # That's the central building itself — skip
+            continue
+        if dist > radius_m:
+            continue
+        tags = el.get("tags", {}) or {}
+        if tags.get("roof:solar_panel") == "yes":
+            stype = "roof"
+        elif tags.get("generator:source") == "solar":
+            stype = "generator"
+        else:
+            stype = "solar"
+        solar_locations.append({"lat": e_lat, "lng": e_lng, "type": stype})
+
+    villa_nearby = False
+    for el in building_elements:
+        btype = (el.get("tags") or {}).get("building", "")
+        if btype in _NON_RESIDENTIAL_TYPES:
+            continue
+        if el.get("type") == "way" and "center" in el:
+            e_lat, e_lng = el["center"]["lat"], el["center"]["lon"]
+        elif el.get("type") == "node":
+            e_lat, e_lng = el.get("lat"), el.get("lon")
+        else:
+            continue
+        if e_lat is None or e_lng is None:
+            continue
+        d_lat_m = (e_lat - lat) * 111_000
+        d_lng_m = (e_lng - lng) * 111_000 * cos_lat
+        dist = math.sqrt(d_lat_m * d_lat_m + d_lng_m * d_lng_m)
+        if dist <= villa_radius_m:
+            villa_nearby = True
+            break
+
+    return {
+        "extra_solar_found": len(solar_locations) > 0,
+        "solar_locations": solar_locations,
+        "villa_nearby": villa_nearby,
+    }
 
 
 # ── Lantmäteriet ortofoto ──────────────────────────────────────────────────────
@@ -257,7 +470,7 @@ def _fetch_mapbox(mapbox_key: str, lat: float, lng: float, zoom: int = ZOOM_BUIL
         return None
 
 
-def _fetch_lm_wms(lat: float, lng: float, size_m: float = 50) -> bytes | None:
+def _fetch_lm_wms(lat: float, lng: float, size_m: float = 18) -> bytes | None:
     """Lantmäteriet minkarta WMS — free, no key, high-res Swedish orthophoto."""
     d_lat = (size_m / 2) / 111_000
     d_lng = d_lat / math.cos(math.radians(lat))
@@ -312,13 +525,17 @@ def _fetch_satellite(
         return None
 
 
-def _analyze_building(client: anthropic.Anthropic, img_bytes: bytes) -> bool:
-    """Return True only if THIS building clearly has PV solar panels on its roof."""
+def _analyze_building(client: anthropic.Anthropic, img_bytes: bytes) -> tuple[bool, bool]:
+    """
+    Returns (is_residential_house, has_solar_panels).
+    Only the centre structure is judged. Garages, carports, sheds, industrial
+    buildings and non-buildings return (False, False).
+    """
     b64 = base64.standard_b64encode(img_bytes).decode()
     try:
         msg = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=120,
+            max_tokens=180,
             messages=[{
                 "role": "user",
                 "content": [
@@ -329,40 +546,54 @@ def _analyze_building(client: anthropic.Anthropic, img_bytes: bytes) -> bool:
                     {
                         "type": "text",
                         "text": (
-                            "You are looking at a Swedish aerial orthophoto (top-down, ~50m wide) "
-                            "centred on a residential building.\n\n"
-                            "From directly above, PV solar panels appear as:\n"
-                            "- Uniformly flat, very dark (dark blue/black/charcoal) rectangular patches\n"
-                            "- Distinctly flatter and more uniform than surrounding roof tiles\n"
-                            "- Arranged in a rectangular array on part of the roof\n"
-                            "- Often slightly shinier or more reflective than the rest of the roof\n\n"
-                            "Does any part of the central building's roof look like solar panels? "
-                            "End your answer with exactly YES or NO."
+                            "Swedish aerial orthophoto, ~50m wide, top-down view.\n\n"
+                            "Look at the structure occupying the CENTRE of the image. Answer:\n\n"
+                            "Q1 — Is the central structure a single-family residential home "
+                            "(villa, parhus, radhus, fritidshus)? It must NOT be: carport, "
+                            "parking shed, garage, barn, industrial building, warehouse, "
+                            "church, school, kiosk, construction site, or bare ground.\n\n"
+                            "Q2 — Only if Q1=YES: does its roof have photovoltaic solar panels?\n\n"
+                            "Solar PV from directly above appears as:\n"
+                            "- RECTANGULAR FLAT PATCHES on the roof that are SMOOTHER and more "
+                            "UNIFORM than the bumpy texture of surrounding clay tiles or asphalt "
+                            "shingles. This is the primary signal — even when grid lines between "
+                            "individual modules are too thin to see in compressed imagery, the "
+                            "smoothness contrast remains visible.\n"
+                            "- Colour can vary with sun angle: dark blue, black, charcoal, "
+                            "lighter blue-grey, brownish, or mirror-bright reflections.\n"
+                            "- Installation may be a partial array (one or several rectangles "
+                            "on part of the roof) OR cover an entire south-facing slope.\n"
+                            "- Supporting signal when visible: regular grid lines / module seams.\n\n"
+                            "First, briefly describe the central building's roof in 1–2 "
+                            "sentences: roof shape, surface texture, any rectangular patches "
+                            "or smooth flat areas you notice. Be specific.\n\n"
+                            "Then commit to a verdict. If the description mentions rectangular "
+                            "smooth patches, flat sections distinct from tile texture, modular "
+                            "segments, or any plausible solar-panel features — answer SOLAR=YES. "
+                            "Only answer SOLAR=NO if the roof is uniformly tile/shingle-textured "
+                            "across the entire surface with no plausible panel features. When "
+                            "uncertain between the two, prefer SOLAR=YES.\n\n"
+                            "End with exactly two lines, on their own, nothing after:\n"
+                            "HOUSE=YES or HOUSE=NO\n"
+                            "SOLAR=YES or SOLAR=NO\n\n"
+                            "If HOUSE=NO, set SOLAR=NO."
                         ),
                     },
                 ],
             }],
         )
-        return msg.content[0].text.strip().lstrip("*_ ").upper().startswith("YES")
+        text = msg.content[0].text.upper()
+        is_house = "HOUSE=YES" in text
+        has_solar = is_house and "SOLAR=YES" in text
+        return is_house, has_solar
     except Exception:
-        return False
-
-
-def _reverse_geocode(gmaps: googlemaps.Client, lat: float, lng: float) -> str:
-    try:
-        results = gmaps.reverse_geocode((lat, lng))
-        if results:
-            return results[0].get("formatted_address", f"{lat:.5f}, {lng:.5f}")
-    except Exception:
-        pass
-    return f"{lat:.5f}, {lng:.5f}"
+        return False, False
 
 
 def _process_building(
     building: dict,
     google_key: str,
     anthropic_client: anthropic.Anthropic,
-    gmaps: googlemaps.Client,
     mapbox_key: str | None = None,
     lm_key: str | None = None,
     lm_layer: str = _LM_LAYERS[0],
@@ -372,9 +603,37 @@ def _process_building(
     img = _fetch_satellite(google_key, lat, lng, zoom=zoom, mapbox_key=mapbox_key, lm_key=lm_key, lm_layer=lm_layer)
     if img is None:
         return None
-    if not _analyze_building(anthropic_client, img):
+    is_house, has_solar = _analyze_building(anthropic_client, img)
+    if not is_house:
         return None
-    address = building["address"] or _reverse_geocode(gmaps, lat, lng)
+
+    # Samtomt-Sol-Flagga (V1.5 Slice 7): look for extra solar on the same
+    # property beyond the central building, plus a villa-nearby check.
+    samtomt = _has_extra_solar_nearby(lat, lng)
+    extra_solar = samtomt.get("extra_solar_found", False)
+    villa_nearby = samtomt.get("villa_nearby", False)
+
+    samtomt_solar_extra = False
+    solar_location = "roof"
+
+    if has_solar:
+        # AI confirmed roof solar — extra solar on tomten is a bonus flag.
+        if extra_solar:
+            samtomt_solar_extra = True
+    else:
+        # No roof solar per AI. Only keep as a Lead if there's solar elsewhere
+        # on the property AND a villa context confirms it.
+        if extra_solar and villa_nearby:
+            samtomt_solar_extra = True
+            solar_location = "samtomt"
+        else:
+            # Either no extra solar (= no solar on property → drop), or extra
+            # solar without villa context (= markställning on lantbruk, V2).
+            return None
+
+    address = building["address"]
+    if not address:
+        return None
     return Lead(
         lat=lat,
         lng=lng,
@@ -384,6 +643,8 @@ def _process_building(
         tile_key=f"bld/{building['osm_id']}",
         building_type=building.get("building_type", ""),
         zoom=zoom,
+        samtomt_solar_extra=samtomt_solar_extra,
+        solar_location=solar_location,
     )
 
 
@@ -401,7 +662,6 @@ def scan_buildings_ai(
         return []
 
     client = anthropic.Anthropic(api_key=anthropic_key)
-    gmaps  = googlemaps.Client(key=google_key)
     leads: list[Lead] = []
     total = len(buildings)
 
@@ -416,7 +676,7 @@ def scan_buildings_ai(
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
-            pool.submit(_process_building, b, google_key, client, gmaps, mapbox_key, lm_key, lm_layer): b
+            pool.submit(_process_building, b, google_key, client, mapbox_key, lm_key, lm_layer): b
             for b in buildings
         }
         done = 0

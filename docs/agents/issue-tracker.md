@@ -1,6 +1,6 @@
 # Issue Tracker
 
-Issues live in **GitHub Issues** for this repository (`libstrom/edek-parser`).
+Issues live in **GitHub Issues** for this repository (`libstrom/solar-scout`).
 
 ## CLI tool
 
