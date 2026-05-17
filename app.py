@@ -4,6 +4,7 @@ Linus Bergström
 """
 
 import os
+import urllib.parse
 import stripe
 import pandas as pd
 import streamlit as st
@@ -256,7 +257,7 @@ def page_paywall(user, lead_count: int = 0):
             "name": "Starter",
             "price": "499 kr/mån",
             "seats": "1 användare",
-            "features": ["Obegränsade fastighetssökningar", "Satellitvy", "Leadslista + CSV-export", "MrKoll & Hitta.se-länkar"],
+            "features": ["Obegränsade fastighetssökningar", "Satellitvy", "Leadslista + CSV-export", "Google & Hitta.se-länkar"],
             "price_id": STRIPE_PRICE_STARTER,
             "cta": "Starta Starter →",
         },
@@ -439,17 +440,18 @@ def page_scanner(user):
             "Lng":         round(lead.lng, 5),
         })
         sb_rows.append({
-            "address":       lead.address,
-            "has_solar":     "Ja",
-            "air_to_air":    "False",
-            "air_to_water":  "False",
-            "notes":         f"Detekterad via {lead.source.upper()} (konfidens {lead.confidence:.0%})",
-            "mrkoll_url":    f"https://mrkoll.se/resultat?address={lead.address.replace(' ', '+')}",
-            "maps_url":      f"https://www.google.com/maps/search/?api=1&query={lead.lat},{lead.lng}",
-            "lat":           lead.lat,
-            "lng":           lead.lng,
-            "scan_source":   lead.source,
-            "building_type": getattr(lead, "building_type", ""),
+            "address":           lead.address,
+            "has_solar":         "Ja",
+            "air_to_air":        "False",
+            "air_to_water":      "False",
+            "notes":             f"Detekterad via {lead.source.upper()} (konfidens {lead.confidence:.0%})",
+            "google_search_url": f"https://www.google.com/search?q=vem+bor+p%C3%A5+{urllib.parse.quote(lead.address)}",
+            "hitta_url":         f"https://www.hitta.se/s%C3%B6k?vad={urllib.parse.quote(lead.address)}",
+            "maps_url":          f"https://www.google.com/maps/search/?api=1&query={lead.lat},{lead.lng}",
+            "lat":               lead.lat,
+            "lng":               lead.lng,
+            "scan_source":       lead.source,
+            "building_type":     getattr(lead, "building_type", ""),
         })
 
     df = pd.DataFrame(rows)
@@ -547,24 +549,24 @@ def page_scout(user):
         air_to_water = st.checkbox("Potential Luft/Vatten-pump")
         notes        = st.text_area("Observationer (takskick, uppvärmning, mätarskåp...):")
 
-        search_enc = address.replace(" ", "+")
-        mrkoll_url = f"https://mrkoll.se/resultat?address={search_enc}"
-        hitta_url  = f"https://www.hitta.se/sök?vad={search_enc}"
+        google_search_url = f"https://www.google.com/search?q=vem+bor+p%C3%A5+{urllib.parse.quote(address)}"
+        hitta_url         = f"https://www.hitta.se/s%C3%B6k?vad={urllib.parse.quote(address)}"
 
         st.write("**Hämta ägarinfo:**")
         lc1, lc2 = st.columns(2)
-        lc1.link_button("MrKoll", mrkoll_url)
+        lc1.link_button("Google", google_search_url)
         lc2.link_button("Hitta.se", hitta_url)
 
         if st.button("💾 Spara lead", type="primary", use_container_width=True):
             save_lead(str(user.id), {
-                "address":      address,
-                "has_solar":    has_solar,
-                "air_to_air":   str(air_to_air),
-                "air_to_water": str(air_to_water),
-                "notes":        notes,
-                "mrkoll_url":   mrkoll_url,
-                "maps_url":     f"https://www.google.com/maps/search/?api=1&query={lat},{lng}",
+                "address":           address,
+                "has_solar":         has_solar,
+                "air_to_air":        str(air_to_air),
+                "air_to_water":      str(air_to_water),
+                "notes":             notes,
+                "google_search_url": google_search_url,
+                "hitta_url":         hitta_url,
+                "maps_url":          f"https://www.google.com/maps/search/?api=1&query={lat},{lng}",
             })
             st.success(f"Sparad: {address}")
             st.balloons()
@@ -711,6 +713,14 @@ def page_app(user, profile):
 
     with tab_leads:
         page_leads(user)
+
+    st.divider()
+    st.caption(
+        "Geodata © Lantmäteriet, CC-BY 4.0 · "
+        "Satellitbilder © Mapbox · "
+        "OpenStreetMap-data © OSM-bidragsgivare, ODbL · "
+        "[Integritetspolicy](?page=privacy)"
+    )
 
 
 # ── Huvudprogram ──────────────────────────────────────────────────────────────
