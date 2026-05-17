@@ -462,6 +462,8 @@ def page_scanner(user):
             "lng":               lead.lng,
             "scan_source":       lead.source,
             "building_type":     getattr(lead, "building_type", ""),
+            "samtomt_solar_extra": getattr(lead, "samtomt_solar_extra", False),
+            "solar_location":    getattr(lead, "solar_location", "roof"),
         })
 
     df = pd.DataFrame(rows)
