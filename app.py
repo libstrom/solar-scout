@@ -48,18 +48,33 @@ def get_supabase() -> Client:
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
 def init_auth():
-    """Återställ session från session_state om tokens finns."""
+    """Återställ session från session_state om tokens finns.
+
+    Försöker refresh innan vi kastar ut user — annars logoutas användaren
+    vid minsta JWT-expiration eller transient nätverksfel.
+    """
     sb = get_supabase()
-    if st.session_state.get("access_token"):
-        try:
-            sb.auth.set_session(
-                st.session_state["access_token"],
-                st.session_state["refresh_token"],
-            )
-            return sb.auth.get_user().user
-        except Exception:
-            st.session_state.pop("access_token", None)
-            st.session_state.pop("refresh_token", None)
+    access = st.session_state.get("access_token")
+    refresh = st.session_state.get("refresh_token")
+    if not access or not refresh:
+        return None
+    try:
+        sb.auth.set_session(access, refresh)
+        return sb.auth.get_user().user
+    except Exception:
+        pass
+    # Token förmodligen expired — försök refresh
+    try:
+        resp = sb.auth.refresh_session(refresh)
+        if resp.session and resp.user:
+            st.session_state["access_token"]  = resp.session.access_token
+            st.session_state["refresh_token"] = resp.session.refresh_token
+            return resp.user
+    except Exception:
+        pass
+    # Refresh failed → riktig logout
+    st.session_state.pop("access_token", None)
+    st.session_state.pop("refresh_token", None)
     return None
 
 
