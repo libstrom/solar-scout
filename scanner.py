@@ -773,12 +773,6 @@ def merge_leads(osm_leads: list[Lead], ai_leads: list[Lead], dedup_radius_m: int
     seen_keys: set[str] = set()
 
     def _too_close_cross_source(lead: Lead) -> bool:
-        """Distance check only against leads from the OTHER source.
-
-        Same-source leads (osm↔osm, ai↔ai) are never merged by distance —
-        two adjacent radhus from the same source are distinct buildings.
-        Cross-source (osm↔ai detecting the same roof) are merged.
-        """
         for existing in merged:
             if existing.source == lead.source:
                 continue
@@ -890,8 +884,6 @@ def scan_city(
     residential_areas = _get_residential_areas(south, west, north, east)
 
     if residential_areas:
-        # Cap areas to scan: no point queuing 50 Overpass calls for 10 leads.
-        # Assume ~5 AI leads per residential area as a rough conversion rate.
         max_areas = max(1, (max_leads // 5)) if max_leads else len(residential_areas)
         for area in residential_areas[:max_areas]:
             # Remaining lead budget for AI scan
@@ -977,7 +969,7 @@ def scan_bbox(
     osm_leads = scan_area_osm(south, west, north, east)
 
     if not anthropic_key:
-        return osm_leads
+        return osm_leads[:max_leads] if max_leads else osm_leads
 
     # Check if we've already hit max_leads from OSM alone
     if max_leads is not None and len(osm_leads) >= max_leads:
