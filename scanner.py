@@ -348,8 +348,10 @@ def _get_osm_buildings(south: float, west: float, north: float,
             continue
 
         addr = _tags_to_address(tags) or _nearest_addr_node(lat, lng, addr_nodes)
+        # Don't require an address — scan the building anyway and resolve via
+        # reverse geocode after AI confirms solar. Use coords as placeholder.
         if not addr:
-            continue
+            addr = f"{lat:.5f},{lng:.5f}"
 
         buildings.append({
             "lat": lat, "lng": lng, "address": addr,
@@ -713,8 +715,15 @@ def _process_building(
             return None
 
     address = building["address"]
-    if not address:
-        return None
+    # Resolve coordinate-placeholder addresses via reverse geocode
+    if address and "," in address and not any(c.isalpha() for c in address):
+        try:
+            gmaps = googlemaps.Client(key=google_key)
+            rev = gmaps.reverse_geocode((lat, lng))
+            if rev:
+                address = rev[0].get("formatted_address", address)
+        except Exception:
+            pass
     return Lead(
         lat=lat,
         lng=lng,
