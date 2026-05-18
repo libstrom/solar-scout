@@ -801,20 +801,32 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
             return "–"
 
     display_cols = [c for c in
-        ["address", "has_solar", "samtomt_solar_extra", "air_to_air", "air_to_water", "notes", "created_at"]
+        ["address", "has_solar", "samtomt_solar_extra", "air_to_air", "air_to_water", "notes", "image_url", "created_at"]
         if c in df.columns]
     rename_map = {
         "address": "Adress", "has_solar": "Solceller",
         "samtomt_solar_extra": "Samtomt sol",
         "air_to_air": "L/L", "air_to_water": "L/V",
-        "notes": "Noteringar", "created_at": "Sparad",
+        "notes": "Noteringar", "image_url": "Satellitbild",
+        "created_at": "Sparad",
     }
     display_df = df[display_cols].rename(columns=rename_map)
     if "Samtomt sol" in display_df.columns:
         display_df["Samtomt sol"] = display_df["Samtomt sol"].apply(_samtomt_icon)
+
+    column_config: dict = {}
+    if "Satellitbild" in display_df.columns:
+        column_config["Satellitbild"] = st.column_config.LinkColumn(
+            "Satellitbild",
+            display_text="🛰 Visa tak",
+            help="Öppnar LM WMS-bild direkt i webbläsaren",
+        )
+
     st.dataframe(
         display_df,
-        use_container_width=True, hide_index=True,
+        use_container_width=True,
+        hide_index=True,
+        column_config=column_config if column_config else None,
     )
 
     with st.expander("➕ Lägg till manuell lead"):
