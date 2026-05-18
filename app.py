@@ -495,6 +495,8 @@ def page_scanner(user):
             "building_type":     getattr(lead, "building_type", ""),
             "samtomt_solar_extra": getattr(lead, "samtomt_solar_extra", False),
             "solar_location":    getattr(lead, "solar_location", "roof"),
+            "needs_review":      getattr(lead, "needs_review", False),
+            "ai_reasoning":      getattr(lead, "ai_reasoning", ""),
         })
 
     df = pd.DataFrame(rows)
@@ -614,6 +616,84 @@ def page_scout(user):
             })
             st.success(f"Sparad: {address}")
             st.balloons()
+
+
+def page_review(user):
+    """Kort-för-kort granskning av UNSURE-leads — AI var osäker, du avgör."""
+    sb = get_supabase()
+    try:
+        resp = (
+            sb.table("scout_leads")
+            .select("id,address,lat,lng,ai_reasoning,building_type,maps_url")
+            .eq("user_id", str(user.id))
+            .eq("needs_review", True)
+            .is_("user_confirmed", "null")
+            .order("created_at", desc=False)
+            .execute()
+        )
+        queue = resp.data or []
+    except Exception:
+        # needs_review column may not exist yet in DB
+        queue = []
+
+    if not queue:
+        st.success("Inget att granska just nu!")
+        st.caption("Leads med SOLAR=UNSURE från AI-scanningar hamnar här.")
+        return
+
+    total = len(queue)
+    lead = queue[0]
+    done = max(0, total - len(queue))  # always 0 here — shown via badge elsewhere
+
+    st.markdown(f"### 🔍 Granska lead  &nbsp; <span style='color:grey;font-size:0.85em'>{total} kvar</span>", unsafe_allow_html=True)
+    st.progress(0.0 if total == 0 else (1 - total / (total + done)))
+
+    # Satellite image via LM WMS (free, no storage limit)
+    lat, lng = lead.get("lat"), lead.get("lng")
+    if lat and lng:
+        try:
+            from scanner import _fetch_lm_wms
+            img_bytes = _fetch_lm_wms(lat, lng)
+            if img_bytes:
+                st.image(img_bytes, use_container_width=True)
+            elif MAPBOX_TOKEN:
+                st.image(
+                    f"https://api.mapbox.com/styles/v1/mapbox/satellite-v9/static"
+                    f"/{lng},{lat},20/640x480?access_token={MAPBOX_TOKEN}",
+                    use_container_width=True,
+                )
+            else:
+                st.caption("(Bild ej tillgänglig)")
+        except Exception:
+            st.caption("(Kunde inte hämta bild)")
+
+    st.markdown(f"**{lead.get('address', '–')}**")
+
+    reasoning = lead.get("ai_reasoning", "")
+    if reasoning:
+        st.info(f"AI: *\"{reasoning}\"*")
+
+    if lead.get("maps_url"):
+        st.link_button("Öppna i Google Maps", lead["maps_url"])
+
+    st.write("")
+    col_ja, col_nej = st.columns(2)
+    lead_id = int(lead["id"])
+    with col_ja:
+        if st.button("✅ Ja, solceller", type="primary", use_container_width=True, key="review_yes"):
+            sb.table("scout_leads").update({
+                "user_confirmed": True,
+                "needs_review": False,
+                "has_solar": "Ja",
+            }).eq("id", lead_id).execute()
+            st.rerun()
+    with col_nej:
+        if st.button("❌ Nej, hoppa", use_container_width=True, key="review_no"):
+            sb.table("scout_leads").update({
+                "user_confirmed": False,
+                "needs_review": False,
+            }).eq("id", lead_id).execute()
+            st.rerun()
 
 
 def page_leads(user):  # noqa: keep user param for confirm_lead calls
@@ -872,8 +952,23 @@ def page_app(user, profile):
             do_logout()
             st.rerun()
 
-    tab_scanner, tab_scout, tab_leads, tab_account = st.tabs(
-        ["🔍 AI Scanner", "🏠 Scouta Tak", "📋 Leads", "⚙ Konto"]
+    # Count needs_review leads for badge
+    review_count = 0
+    try:
+        sb = get_supabase()
+        r = (sb.table("scout_leads")
+             .select("id", count="exact")
+             .eq("user_id", str(user.id))
+             .eq("needs_review", True)
+             .is_("user_confirmed", "null")
+             .execute())
+        review_count = r.count or 0
+    except Exception:
+        pass
+
+    review_label = f"👁 Granska ({review_count})" if review_count else "👁 Granska"
+    tab_scanner, tab_scout, tab_leads, tab_review, tab_account = st.tabs(
+        ["🔍 AI Scanner", "🏠 Scouta Tak", "📋 Leads", review_label, "⚙ Konto"]
     )
 
     with tab_scanner:
@@ -884,6 +979,9 @@ def page_app(user, profile):
 
     with tab_leads:
         page_leads(user)
+
+    with tab_review:
+        page_review(user)
 
     with tab_account:
         page_account(user, profile)
