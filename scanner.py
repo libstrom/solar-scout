@@ -875,8 +875,10 @@ def scan_city(
     residential_areas = _get_residential_areas(south, west, north, east)
 
     if residential_areas:
-        # Scan each residential area, largest first
-        for area in residential_areas:
+        # Cap areas to scan: no point queuing 50 Overpass calls for 10 leads.
+        # Assume ~5 AI leads per residential area as a rough conversion rate.
+        max_areas = max(1, (max_leads // 5)) if max_leads else len(residential_areas)
+        for area in residential_areas[:max_areas]:
             # Remaining lead budget for AI scan
             remaining = None
             if max_leads is not None:
