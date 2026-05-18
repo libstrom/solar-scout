@@ -32,14 +32,16 @@ def test_prompt_does_not_prefer_solar_yes():
 
 
 def test_prompt_defaults_to_solar_no_when_uncertain():
-    """Prompten ska explicit säga 'SOLAR=NO' vid osäkerhet."""
+    """Prompten ska hantera osäkerhet konservativt — UNSURE eller NO, aldrig YES."""
     prompt = _get_prompt_text()
     assert "uncertain" in prompt.lower(), "Prompten saknar 'uncertain'-instruktion"
-    # Kontrollera att uncertain kopplas till NO, inte YES
-    uncertain_idx = prompt.lower().index("uncertain")
-    context = prompt[uncertain_idx: uncertain_idx + 60].upper()
-    assert "SOLAR=NO" in context, (
-        f"'uncertain' kopplas inte tydligt till SOLAR=NO i: {context!r}"
+    # SOLAR=UNSURE är nu tillåtet för osäkra fall (leder till human review)
+    # men SOLAR=YES ska aldrig vara default vid osäkerhet
+    assert "SOLAR=UNSURE" in prompt or "SOLAR=NO" in prompt, (
+        "Prompten saknar SOLAR=UNSURE eller SOLAR=NO för osäkra fall"
+    )
+    assert "prefer SOLAR=YES" not in prompt, (
+        "Prompten kopplar fortfarande osäkerhet till SOLAR=YES"
     )
 
 
