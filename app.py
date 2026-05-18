@@ -466,13 +466,26 @@ def page_scanner(user):
         status_text   = st.empty()
         found_leads: list[Lead] = []
         found_count_ph = st.empty()
+        scan_debug: list[str] = []
 
         def on_progress(done: int, total: int, result):
             pct = done / total if total else 1.0
-            progress_bar.progress(pct, text=f"Analyserar bricka {done}/{total}...")
+            progress_bar.progress(pct, text=f"Analyserar byggnad {done}/{total}...")
             if result:
                 found_leads.append(result)
                 found_count_ph.info(f"Hittade hittills: {len(found_leads)} solcellstak")
+
+        def on_phase(phase: str, count: int):
+            if phase == "osm_leads":
+                scan_debug.append(f"OSM solar-taggade: {count}")
+            elif phase == "buildings_found":
+                scan_debug.append(f"Byggnader att AI-analysera: {count}")
+                if count == 0:
+                    status_text.warning("Inga villabyggnader hittades i OSM för detta område.")
+                else:
+                    status_text.info(f"Hittade {count} byggnader — AI-analyserar nu (kan ta flera min)...")
+            elif phase == "ai_done":
+                scan_debug.append(f"AI bekräftade solceller: {count}")
 
         anthr_key = ANTHROPIC_API_KEY if ai_available else None
         _log.info("scan start mode=%s ai=%s max_leads=%s", mode, bool(anthr_key), max_leads)
@@ -482,7 +495,7 @@ def page_scanner(user):
                 leads = scan_city(city_name, GOOGLE_API_KEY or "", anthr_key, on_progress, mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads)
             else:
                 status_text.info("Hämtar byggnadsdata från OSM (kan ta 20–60 s)...")
-                leads = scan_bbox(south, west, north, east, GOOGLE_API_KEY or "", anthr_key, on_progress, mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads)
+                leads = scan_bbox(south, west, north, east, GOOGLE_API_KEY or "", anthr_key, on_progress, mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads, phase_callback=on_phase)
         except ValueError as e:
             _log.error("scan ValueError: %s", e)
             st.error(str(e))
@@ -498,8 +511,16 @@ def page_scanner(user):
 
         if not leads:
             st.warning("Inga solcellstak hittades i det valda området.")
-            with st.expander("🔍 Debug-info (felsökning)"):
-                st.caption("Kontrollera Railway-loggarna för detaljerad info. Vanliga orsaker: 1) OSM saknar solar-taggar för området 2) Inga residential_areas hittades 3) AI-nyckel saknas eller tog slut 4) Alla byggnader filtrerades som icke-villor.")
+            with st.expander("🔍 Vad hände under scanningen?"):
+                if scan_debug:
+                    for line in scan_debug:
+                        st.caption(f"• {line}")
+                    if any("Byggnader att AI-analysera: 0" in l for l in scan_debug):
+                        st.info("Inga villabyggnader hittades av OSM. Prova ett tätare villaområde, eller ett område med fler OSM-taggade hus.")
+                    elif any("AI bekräftade solceller: 0" in l for l in scan_debug):
+                        st.info("AI analyserade byggnader men hittade inga solceller. Antingen har husen inga solpaneler, eller så är bildkvaliteten för låg.")
+                else:
+                    st.caption("Kontrollera Railway-loggarna. Möjliga orsaker: AI-nyckel saknas, Overpass-timeout, eller alla byggnader filtrerades.")
             return
 
         display_rows = []
