@@ -43,6 +43,17 @@ TEST_CASES = [
     # affärsmissen "vi flaggar denna som lead trots att fastigheten redan har sol".
     # {"address": "Skatgatan 5, Jönköping",  "expected_is_house": True,  "expected_has_solar": True},
 
+    # Malmö 2026-05-18: observerade falska positiver från Ljunggatan/Ligustergatan-scan.
+    # Ingen av dessa har solceller — ska ge FALSE NEGATIVE om de hittas.
+    {"address": "Ljunggatan 12, Malmö",    "expected_is_house": True, "expected_has_solar": False},
+    {"address": "Ljunggatan 20, Malmö",    "expected_is_house": True, "expected_has_solar": False},
+    {"address": "Ligustergatan 4, Malmö",  "expected_is_house": True, "expected_has_solar": False},
+    {"address": "Ligustergatan 13, Malmö", "expected_is_house": True, "expected_has_solar": False},
+
+    # Malmö 2026-05-18: solceller på garage/adjacent roof (samtomt-fall).
+    # Huvudhuset har INTE solceller — förväntat SOLAR=NO på central byggnad.
+    {"address": "Myrtengatan 11, Malmö",   "expected_is_house": True, "expected_has_solar": False},
+
     # Inväntar labels:
     # {"address": "Plommonvägen 3, Lund",        ...},
     # {"address": "Handskmakaregatan 1A, Lund",  ...},
