@@ -431,10 +431,10 @@ def page_scanner(user):
     anthr_key = ANTHROPIC_API_KEY if ai_available else None
     try:
         if mode == "Ort/stad (ange namn)":
-            status_text.info("Söker upp ort och startar scanning...")
+            status_text.info("Söker upp ort och hämtar byggnadsdata från OSM (kan ta 20–60 s)...")
             leads = scan_city(city_name, GOOGLE_API_KEY or "", anthr_key, on_progress, mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads)
         else:
-            status_text.info("Startar scanning av markerat område...")
+            status_text.info("Hämtar byggnadsdata från OSM (kan ta 20–60 s)...")
             leads = scan_bbox(south, west, north, east, GOOGLE_API_KEY or "", anthr_key, on_progress, mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads)
     except ValueError as e:
         st.error(str(e))
