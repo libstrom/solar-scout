@@ -20,6 +20,7 @@ import logging
 import httpx
 import googlemaps
 import anthropic
+import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Callable
@@ -656,23 +657,26 @@ def _analyze_building(client: anthropic.Anthropic, img_bytes: bytes) -> tuple[bo
                             "Solar PV from directly above appears as:\n"
                             "- RECTANGULAR FLAT PATCHES on the roof that are SMOOTHER and more "
                             "UNIFORM than the bumpy texture of surrounding clay tiles or asphalt "
-                            "shingles. This is the primary signal — even when grid lines between "
-                            "individual modules are too thin to see in compressed imagery, the "
-                            "smoothness contrast remains visible.\n"
-                            "- Colour can vary with sun angle: dark blue, black, charcoal, "
-                            "lighter blue-grey, brownish, or mirror-bright reflections.\n"
-                            "- Installation may be a partial array (one or several rectangles "
-                            "on part of the roof) OR cover an entire south-facing slope.\n"
+                            "shingles. The SMOOTHNESS CONTRAST vs adjacent roof material is the "
+                            "primary signal — if you cannot see a distinctly smoother patch "
+                            "against the surrounding roof texture, say SOLAR=NO.\n"
+                            "- Colour can vary: dark blue, black, charcoal, blue-grey, or "
+                            "mirror-bright reflections.\n"
                             "- Supporting signal when visible: regular grid lines / module seams.\n\n"
-                            "First, in ONE sentence describe the roof: shape, texture, and any "
-                            "rectangular patches or unusual smooth areas you notice.\n\n"
+                            "CRITICAL — these are NOT solar panels:\n"
+                            "- Dark clay tiles (tegelpannor), dark uniform papp/bitumen/EPDM roofs\n"
+                            "- Any dark uniform roof surface WITHOUT visible rectangular patch contrast\n"
+                            "- Shadows cast on rooftops\n"
+                            "- Skylights or dormer windows\n\n"
+                            "First, in ONE sentence describe the roof: shape, texture, and whether "
+                            "you see any smooth rectangular patches that contrast with adjacent tiles.\n\n"
                             "Then commit to a verdict:\n"
-                            "- SOLAR=YES   — clearly visible rectangular smooth panels, distinctly "
-                            "different from surrounding roof, plausibly photovoltaic.\n"
+                            "- SOLAR=YES   — clearly unambiguous rectangular smooth area, visibly "
+                            "different in texture from adjacent roof material. High confidence only.\n"
                             "- SOLAR=UNSURE — something that COULD be panels but image quality, "
                             "shadow, or angle makes you uncertain. Use this instead of guessing.\n"
-                            "- SOLAR=NO    — no panels visible, or surface is EPDM/felt/metal/"
-                            "asphalt/skylights/ambiguous. Default when uncertain.\n\n"
+                            "- SOLAR=NO    — no panels visible, or surface is dark tiles/EPDM/felt/"
+                            "metal/asphalt/skylights/ambiguous. DEFAULT when uncertain.\n\n"
                             "End with exactly two lines, nothing after:\n"
                             "HOUSE=YES or HOUSE=NO\n"
                             "SOLAR=YES or SOLAR=UNSURE or SOLAR=NO\n\n"
@@ -792,7 +796,7 @@ def scan_buildings_ai(
     google_key: str,
     anthropic_key: str,
     on_progress: Callable[[int, int, "Lead | None"], None] | None = None,
-    max_workers: int = 8,
+    max_workers: int = 4,
     mapbox_key: str | None = None,
     lm_key: str | None = None,
     max_leads: int | None = None,
@@ -828,7 +832,10 @@ def scan_buildings_ai(
         for future in as_completed(futures):
             done += 1
             try:
-                result = future.result()
+                result = future.result(timeout=60)
+            except concurrent.futures.TimeoutError:
+                _log.warning("_process_building timed out after 60s, skipping")
+                result = None
             except Exception:
                 result = None
             if result:
