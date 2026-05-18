@@ -588,38 +588,6 @@ def _fetch_lm_wms(lat: float, lng: float, size_m: float = 18) -> bytes | None:
     return None
 
 
-def lm_wms_url(lat: float, lng: float, size_m: float = 80, width: int = 640, height: int = 480) -> str:
-    """Return a directly clickable Lantmäteriet WMS URL for the given coordinates.
-
-    Opens a 640x480 satellite image centred on (lat, lng) in a web browser --
-    no API key required, free CC-BY ortofoto from Lantmäteriet minkarta.
-
-    Args:
-        lat: Latitude in decimal degrees (WGS-84).
-        lng: Longitude in decimal degrees (WGS-84).
-        size_m: Half-width of the bounding box in metres (default 80 m gives
-                ~160 m x 120 m coverage at a 4:3 aspect ratio).
-        width: Image pixel width (default 640).
-        height: Image pixel height (default 480).
-
-    Returns:
-        A plain URL string that can be opened directly in a browser.
-    """
-    d_lat = (size_m / 2) / 111_000
-    d_lng = d_lat / math.cos(math.radians(lat))
-    # Adjust vertical half-span to match the requested aspect ratio
-    d_lat_h = d_lat * height / width
-    bbox = f"{lng - d_lng},{lat - d_lat_h},{lng + d_lng},{lat + d_lat_h}"
-    return (
-        "https://minkarta.lantmateriet.se/map/ortofoto"
-        "?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap"
-        "&LAYERS=Ortofoto_0.25,Ortofoto_0.16"
-        "&FORMAT=image/jpeg"
-        f"&WIDTH={width}&HEIGHT={height}"
-        f"&SRS=EPSG:4326&BBOX={bbox}"
-    )
-
-
 def _fetch_satellite(
     google_key: str,
     lat: float,
@@ -629,7 +597,12 @@ def _fetch_satellite(
     lm_key: str | None = None,
     lm_layer: str = _LM_LAYERS[0],
 ) -> bytes | None:
-    # Priority: Lantmäteriet WMS (free, best for Sweden) → Mapbox → Google
+    # Priority: official LM API → free minkarta WMS → Mapbox → Google
+    if lm_key and _PIL_AVAILABLE:
+        img = _fetch_lantmateriet(lm_key, lat, lng, layer=lm_layer)
+        if img:
+            _log.debug("_fetch_satellite source=lm_tile lat=%s lng=%s", lat, lng)
+            return img
     img = _fetch_lm_wms(lat, lng)
     if img:
         _log.debug("_fetch_satellite source=lm_wms lat=%s lng=%s", lat, lng)
@@ -638,11 +611,6 @@ def _fetch_satellite(
         img = _fetch_mapbox(mapbox_key, lat, lng, zoom)
         if img:
             _log.debug("_fetch_satellite source=mapbox lat=%s lng=%s", lat, lng)
-            return img
-    if lm_key and _PIL_AVAILABLE:
-        img = _fetch_lantmateriet(lm_key, lat, lng, layer=lm_layer)
-        if img:
-            _log.debug("_fetch_satellite source=lm_tile lat=%s lng=%s", lat, lng)
             return img
     url = (
         f"https://maps.googleapis.com/maps/api/staticmap"

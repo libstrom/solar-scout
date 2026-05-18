@@ -39,6 +39,9 @@ STRIPE_SECRET_KEY     = _secret("STRIPE_SECRET_KEY")
 STRIPE_PRICE_STARTER  = _secret("STRIPE_PRICE_STARTER")   # 499 kr/mån  – 1 seat
 STRIPE_PRICE_TEAM     = _secret("STRIPE_PRICE_TEAM")       # 1 990 kr/mån – 5 seats
 STRIPE_PRICE_GROWTH   = _secret("STRIPE_PRICE_GROWTH")     # 3 990 kr/mån – 15 seats
+STRIPE_PRICE_PACK_BASIC   = _secret("STRIPE_PRICE_PACK_BASIC")   # 25-pack  1 250 kr
+STRIPE_PRICE_PACK_PREMIUM = _secret("STRIPE_PRICE_PACK_PREMIUM") # 50-pack  3 750 kr
+STRIPE_PRICE_PACK_PRO     = _secret("STRIPE_PRICE_PACK_PRO")     # 200-pack 12 000 kr
 APP_URL               = _secret("APP_URL", "http://localhost:8501")
 GOOGLE_API_KEY        = _secret("GOOGLE_API_KEY")
 MAPBOX_TOKEN          = _secret("MAPBOX_TOKEN")
@@ -166,7 +169,33 @@ def has_access(profile: dict, lead_count: int = 0) -> bool:
         return True
     if profile.get("scout_subscription_status") == "active":
         return True
+    if profile.get("credits_balance", 0) > 0:
+        return True
     return lead_count < 10
+
+def add_credits(user_id: str, amount: int):
+    """Add credits to user balance."""
+    sb = get_supabase()
+    try:
+        resp = sb.table("profiles").select("credits_balance").eq("user_id", user_id).maybe_single().execute()
+        current = (resp.data or {}).get("credits_balance", 0) or 0
+        sb.table("profiles").update({"credits_balance": current + amount}).eq("user_id", user_id).execute()
+    except Exception as exc:
+        _log.error("add_credits failed user=%s: %s", user_id, exc)
+
+
+def decrement_credits(user_id: str) -> int:
+    """Decrement credits by 1. Returns new balance, or -1 on error."""
+    sb = get_supabase()
+    try:
+        resp = sb.table("profiles").select("credits_balance").eq("user_id", user_id).maybe_single().execute()
+        current = (resp.data or {}).get("credits_balance", 0) or 0
+        new_bal = max(0, current - 1)
+        sb.table("profiles").update({"credits_balance": new_bal}).eq("user_id", user_id).execute()
+        return new_bal
+    except Exception as exc:
+        _log.error("decrement_credits failed user=%s: %s", user_id, exc)
+        return -1
 
 # ── Stripe ────────────────────────────────────────────────────────────────────
 
@@ -184,6 +213,19 @@ def create_checkout_url(email: str, user_id: str, price_id: str) -> str:
     return session.url
 
 
+def create_credit_checkout_url(email: str, user_id: str, price_id: str, credits: int) -> str:
+    session = stripe.checkout.Session.create(
+        customer_email=email,
+        mode="payment",
+        line_items=[{"price": price_id, "quantity": 1}],
+        success_url=f"{APP_URL}?paid_session={{CHECKOUT_SESSION_ID}}&credits={credits}",
+        cancel_url=f"{APP_URL}?canceled=true",
+        client_reference_id=user_id,
+        metadata={"user_id": user_id, "credits": str(credits)},
+    )
+    return session.url
+
+
 def create_portal_url(customer_id: str) -> str:
     session = stripe.billing_portal.Session.create(
         customer=customer_id,
@@ -193,10 +235,19 @@ def create_portal_url(customer_id: str) -> str:
 
 # ── Leads ─────────────────────────────────────────────────────────────────────
 
-def save_lead(user_id: str, data: dict):
+def save_lead(user_id: str, data: dict, profile: dict | None = None):
     sb = get_supabase()
     data["user_id"] = user_id
     sb.table("scout_leads").insert(data).execute()
+    # Deduct 1 credit if user is on credit plan (not admin or active subscription)
+    if profile is None:
+        profile = get_profile(user_id)
+    if isinstance(profile, dict):
+        _bal = profile.get("credits_balance") or 0
+        if (not is_admin(profile) and
+                profile.get("scout_subscription_status") != "active" and
+                _bal > 0):
+            decrement_credits(user_id)
 
 
 def load_leads(user_id: str) -> pd.DataFrame:
@@ -242,6 +293,27 @@ def get_accuracy_stats(user_id: str) -> dict:
     }
 
 # ── Sidor ─────────────────────────────────────────────────────────────────────
+
+def _handle_credit_redirect(user_id: str):
+    """Called after login — if ?paid_session= is in URL, verify Stripe payment and add credits."""
+    params = st.query_params
+    session_id = params.get("paid_session")
+    if not session_id or not STRIPE_SECRET_KEY:
+        return
+    credits_str = params.get("credits", "0")
+    try:
+        session = stripe.checkout.Session.retrieve(session_id)
+        if session.payment_status == "paid":
+            credits = int(credits_str)
+            if credits > 0:
+                add_credits(user_id, credits)
+                st.success(f"✅ {credits} credits tillagda på ditt konto!")
+    except Exception as exc:
+        _log.error("credit_redirect failed: %s", exc)
+    finally:
+        st.query_params.pop("paid_session", None)
+        st.query_params.pop("credits", None)
+
 
 def page_auth():
     st.title("Scout")
@@ -295,12 +367,16 @@ def page_paywall(user, lead_count: int = 0):
 
     if lead_count < 10:
         remaining = 10 - lead_count
-        st.info(f"Du har {remaining} gratis leads kvar av 10. Aktivera Scout för obegränsad tillgång.")
+        st.info(f"Du har {remaining} gratis leads kvar av 10. Köp ett credit-pack för fler leads.")
         st.progress(lead_count / 10)
 
     params = st.query_params
 
-    # Återvänd från lyckad betalning
+    if params.get("canceled") == "true":
+        st.query_params.clear()
+        st.warning("Betalningen avbröts — inget debiterades.")
+
+    # Legacy subscription return
     if params.get("subscribed") == "true":
         profile = get_profile(str(user.id))
         if has_access(profile):
@@ -310,62 +386,84 @@ def page_paywall(user, lead_count: int = 0):
             st.info("Betalning mottagen — aktiverar ditt konto (tar 10–30 sek)...")
             if st.button("Kontrollera igen", type="primary"):
                 st.rerun()
-            st.caption("Stäng inte webbläsaren.")
             return
 
-    if params.get("canceled") == "true":
-        st.query_params.clear()
-        st.warning("Betalningen avbröts — inget debiterades.")
-
-    st.markdown("### Välj plan — 14 dagar gratis, avsluta när som helst")
-    st.caption("Kreditkort krävs vid registrering. Inget debiteras förrän trialen löper ut.")
+    st.markdown("### Köp credit-pack — betala per lead")
+    st.caption("1 credit = 1 sparad lead. Credits förfaller inte. Ingen månadsavgift.")
     st.divider()
 
-    plans = [
+    packs = [
         {
-            "name": "Starter",
-            "price": "499 kr/mån",
-            "seats": "1 användare",
-            "features": ["Obegränsade fastighetssökningar", "Satellitvy", "Leadslista + CSV-export", "Google & Hitta.se-länkar"],
-            "price_id": STRIPE_PRICE_STARTER,
-            "cta": "Starta Starter →",
+            "name": "Basic",
+            "credits": 25,
+            "price": "1 250 kr",
+            "per_lead": "50 kr/lead",
+            "price_id": STRIPE_PRICE_PACK_BASIC,
+            "cta": "Köp 25 credits →",
         },
         {
-            "name": "Team",
-            "price": "1 990 kr/mån",
-            "seats": "Upp till 5 användare",
-            "features": ["Allt i Starter", "Delade leadlistor", "Teamöversikt", "Prioriterad support"],
-            "price_id": STRIPE_PRICE_TEAM,
-            "cta": "Starta Team →",
+            "name": "Premium",
+            "credits": 50,
+            "price": "3 750 kr",
+            "per_lead": "75 kr/lead",
+            "price_id": STRIPE_PRICE_PACK_PREMIUM,
+            "cta": "Köp 50 credits →",
+            "highlight": True,
         },
         {
-            "name": "Growth",
-            "price": "3 990 kr/mån",
-            "seats": "Upp till 15 användare",
-            "features": ["Allt i Team", "Territoriedelning per rep", "Statistik per användare", "Onboarding-samtal"],
-            "price_id": STRIPE_PRICE_GROWTH,
-            "cta": "Starta Growth →",
+            "name": "Pro",
+            "credits": 200,
+            "price": "12 000 kr",
+            "per_lead": "60 kr/lead",
+            "price_id": STRIPE_PRICE_PACK_PRO,
+            "cta": "Köp 200 credits →",
         },
     ]
 
     cols = st.columns(3)
-    for col, plan in zip(cols, plans):
+    for col, pack in zip(cols, packs):
         with col:
-            st.markdown(f"**{plan['name']}**")
-            st.markdown(f"### {plan['price']}")
-            st.caption(plan["seats"])
+            if pack.get("highlight"):
+                st.markdown("**⭐ Mest populär**")
+            st.markdown(f"**{pack['name']}**")
+            st.markdown(f"### {pack['credits']} credits")
+            st.markdown(f"**{pack['price']}** · {pack['per_lead']}")
             st.divider()
-            for f in plan["features"]:
-                st.markdown(f"✓ {f}")
+            st.caption("✓ Obegränsad giltighetstid")
+            st.caption("✓ Adress + satellitbild per lead")
+            st.caption("✓ CSV-export")
             st.divider()
-            if plan["price_id"] and STRIPE_SECRET_KEY:
+            if pack["price_id"] and STRIPE_SECRET_KEY:
                 try:
-                    url = create_checkout_url(user.email, str(user.id), plan["price_id"])
-                    st.link_button(plan["cta"], url, type="primary", use_container_width=True)
+                    url = create_credit_checkout_url(user.email, str(user.id), pack["price_id"], pack["credits"])
+                    st.link_button(pack["cta"], url, type="primary", use_container_width=True)
                 except Exception as e:
                     st.error(f"Stripe-fel: {e}")
             else:
-                st.button(plan["cta"], disabled=True, use_container_width=True)
+                st.button(pack["cta"], disabled=True, use_container_width=True, help="Stripe ej konfigurerat")
+
+    st.divider()
+
+    with st.expander("Månadsabonnemang (för team med hög volym)"):
+        st.caption("Obegränsade leads, flera seats, 14 dagars gratis trial.")
+        plans = [
+            {"name": "Starter", "price": "499 kr/mån", "seats": "1 användare", "price_id": STRIPE_PRICE_STARTER, "cta": "Starta Starter →"},
+            {"name": "Team", "price": "1 990 kr/mån", "seats": "Upp till 5 användare", "price_id": STRIPE_PRICE_TEAM, "cta": "Starta Team →"},
+            {"name": "Growth", "price": "3 990 kr/mån", "seats": "Upp till 15 användare", "price_id": STRIPE_PRICE_GROWTH, "cta": "Starta Growth →"},
+        ]
+        sub_cols = st.columns(3)
+        for col, plan in zip(sub_cols, plans):
+            with col:
+                st.markdown(f"**{plan['name']}** — {plan['price']}")
+                st.caption(plan["seats"])
+                if plan["price_id"] and STRIPE_SECRET_KEY:
+                    try:
+                        url = create_checkout_url(user.email, str(user.id), plan["price_id"])
+                        st.link_button(plan["cta"], url, use_container_width=True)
+                    except Exception as e:
+                        st.error(f"Stripe-fel: {e}")
+                else:
+                    st.button(plan["cta"], disabled=True, use_container_width=True)
 
     st.divider()
     if st.button("Logga ut", use_container_width=True):
@@ -376,7 +474,7 @@ def page_paywall(user, lead_count: int = 0):
 ANTHROPIC_API_KEY = _secret("SOLAR_SCOUT_ANTHROPIC_KEY") or _secret("ANTHROPIC_API_KEY")
 
 
-def page_scanner(user):
+def page_scanner(user, profile: dict | None = None):
     st.subheader("AI Scanner — Hitta solcellstak automatiskt")
 
     mode = st.radio(
@@ -384,6 +482,15 @@ def page_scanner(user):
         ["Ort/stad (ange namn)", "Rita område på karta"],
         horizontal=True,
     )
+
+    profile = profile or {}
+    credits = profile.get("credits_balance", 0) or 0
+    on_credit_plan = (not is_admin(profile) and
+                      profile.get("scout_subscription_status") != "active")
+    if on_credit_plan and credits == 0:
+        st.warning("Du har inga credits kvar. Köp ett credit-pack för att scanna.")
+        st.info("Gå till fliken **Konto** för att köpa credits.")
+        return
 
     south = west = north = east = None
     city_name = ""
@@ -1058,6 +1165,9 @@ def page_app(user, profile):
         st.caption("Linus Bergström")
         st.divider()
         st.caption(f"Inloggad som:\n{user.email}")
+        credits = profile.get("credits_balance", 0) or 0
+        if not is_admin(profile) and profile.get("scout_subscription_status") != "active":
+            st.metric("Credits kvar", credits)
         st.divider()
 
         customer_id = profile.get("scout_stripe_customer_id")
@@ -1092,7 +1202,7 @@ def page_app(user, profile):
     )
 
     with tab_scanner:
-        page_scanner(user)
+        page_scanner(user, profile)
 
     with tab_scout:
         page_scout(user)
@@ -1227,6 +1337,8 @@ def main():
     if not user:
         page_auth()
         return
+
+    _handle_credit_redirect(str(user.id))
 
     profile = get_profile(str(user.id))
     lead_count = len(load_leads(str(user.id)))
