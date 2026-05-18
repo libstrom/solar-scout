@@ -90,6 +90,28 @@ def test_generator_solar_with_building_tag_included():
     assert "Myrtengatan 11" in leads[0].address
 
 
+def test_non_residential_building_with_solar_excluded():
+    """Reningsverk, lager, kyrkor etc. med solpaneler ska inte bli leads.
+
+    VA SYD Sjölunda (Spillepengsgatan 15) är taggat roof:solar_panel=yes
+    men building=industrial — ska filtreras bort.
+    """
+    fake_elements = [
+        _osm_way(tags={
+            "roof:solar_panel": "yes",
+            "building": "industrial",
+            "name": "Sjölunda avloppsreningsverk",
+        }),
+        _osm_way(tags={
+            "roof:solar_panel": "yes",
+            "building": "church",
+        }),
+    ]
+    with patch("scanner._overpass", return_value=fake_elements):
+        leads = scan_area_osm(*_BBOX)
+    assert leads == [], "Industribyggnader och kyrkor ska filtreras bort"
+
+
 def test_duplicate_coordinates_deduplicated():
     """Samma koordinat från flera OSM-element ska bara ge ett lead."""
     fake_elements = [

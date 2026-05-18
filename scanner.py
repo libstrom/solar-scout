@@ -143,6 +143,10 @@ def scan_area_osm(south: float, west: float, north: float, east: float) -> list[
         has_generator_solar = tags.get("generator:source") == "solar"
         if not (has_roof_tag or (has_generator_solar and has_building)):
             continue
+        # Drop non-residential buildings (reningsverk, kyrkor, lager etc.)
+        btype = tags.get("building", "")
+        if btype and btype in _NON_RESIDENTIAL_TYPES:
+            continue
         if el["type"] == "node":
             lat, lng = el["lat"], el["lon"]
         elif el["type"] == "way" and "center" in el:
