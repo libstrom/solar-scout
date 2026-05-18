@@ -16,12 +16,20 @@ import io
 import math
 import base64
 import time
+import logging
 import httpx
 import googlemaps
 import anthropic
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Callable
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [scanner] %(levelname)s %(message)s",
+    datefmt="%H:%M:%S",
+)
+_log = logging.getLogger("solar_scout")
 
 try:
     from PIL import Image as _PILImage
@@ -78,6 +86,7 @@ def _center_bbox(lat: float, lng: float, radius_km: float = 1.0):
 
 def _overpass(query: str, timeout: int = 90) -> list[dict]:
     try:
+        _log.info("Overpass query start (timeout=%ds)", timeout)
         resp = httpx.post(
             "https://overpass-api.de/api/interpreter",
             data={"data": query},
@@ -88,8 +97,11 @@ def _overpass(query: str, timeout: int = 90) -> list[dict]:
             },
         )
         resp.raise_for_status()
-        return resp.json().get("elements", [])
-    except Exception:
+        elements = resp.json().get("elements", [])
+        _log.info("Overpass returned %d elements", len(elements))
+        return elements
+    except Exception as exc:
+        _log.error("Overpass error: %s", exc)
         return []
 
 
@@ -108,16 +120,8 @@ def _tags_to_address(tags: dict) -> str:
 
 
 def scan_area_osm(south: float, west: float, north: float, east: float) -> list[Lead]:
-    """Buildings already tagged with solar panels in OSM — instant, no AI cost.
-
-    Only returns elements that are plausibly rooftop residential solar:
-    - way/node with roof:solar_panel=yes  (most reliable — explicitly on a building roof)
-    - way/node with generator:source=solar AND a building=* tag (rooftop, not a solar farm)
-
-    Excluded intentionally:
-    - power=generator + generator:source=solar  → utility-scale solar farms (Sturup etc.)
-    - generator:source=solar without building=* → ground-mounted / unknown installation
-    """
+    """Buildings already tagged with solar panels in OSM — instant, no AI cost."""
+    _log.info("scan_area_osm bbox=(%s,%s,%s,%s)", south, west, north, east)
     query = f"""
     [out:json][timeout:60];
     (
@@ -130,32 +134,46 @@ def scan_area_osm(south: float, west: float, north: float, east: float) -> list[
     """
     try:
         elements = _overpass(query)
-    except Exception:
+    except Exception as exc:
+        _log.error("scan_area_osm overpass failed: %s", exc)
         return []
+    _log.info("scan_area_osm raw elements=%d", len(elements))
     leads = []
     seen: set[str] = set()
+    skipped_no_solar_tag = 0
+    skipped_building_type = 0
+    skipped_amenity = 0
+    skipped_flats = 0
+    skipped_geom = 0
     for el in elements:
         tags = el.get("tags", {})
-        # Keep only rooftop solar: either explicit roof tag, or generator tag
-        # on a building. Drop solar farms, street lights, ground-mounted arrays.
         has_roof_tag = tags.get("roof:solar_panel") == "yes"
         has_building = bool(tags.get("building"))
         has_generator_solar = tags.get("generator:source") == "solar"
         if not (has_roof_tag or (has_generator_solar and has_building)):
+            skipped_no_solar_tag += 1
             continue
-        # Drop non-residential buildings (reningsverk, kyrkor, lager etc.)
         btype = tags.get("building", "")
-        # Om building-taggen finns, kräv explicit villa-typ.
-        # "yes" och "residential" är för tvetydiga (BRF, skola, lager).
-        # Element utan building-tagg (roof:solar_panel-noder) accepteras —
-        # de sitter på ett tak och typen är okänd men trolig villa.
         if btype and btype not in _VILLA_TYPES_OSM:
+            _log.debug("OSM skip building=%s addr=%s", btype, _tags_to_address(tags))
+            skipped_building_type += 1
             continue
+        amenity = tags.get("amenity", "")
+        if amenity in _NON_RESIDENTIAL_AMENITIES:
+            skipped_amenity += 1
+            continue
+        try:
+            if int(tags.get("building:flats", "0") or "0") > 1:
+                skipped_flats += 1
+                continue
+        except ValueError:
+            pass
         if el["type"] == "node":
             lat, lng = el["lat"], el["lon"]
         elif el["type"] == "way" and "center" in el:
             lat, lng = el["center"]["lat"], el["center"]["lon"]
         else:
+            skipped_geom += 1
             continue
         key = f"{lat:.5f},{lng:.5f}"
         if key in seen:
@@ -164,6 +182,12 @@ def scan_area_osm(south: float, west: float, north: float, east: float) -> list[
         addr = _tags_to_address(tags)
         leads.append(Lead(lat=lat, lng=lng, address=addr or key,
                           confidence=1.0, source="osm", tile_key=key))
+    _log.info(
+        "scan_area_osm result=%d leads | skipped: no_solar_tag=%d building_type=%d "
+        "amenity=%d flats=%d geom=%d",
+        len(leads), skipped_no_solar_tag, skipped_building_type,
+        skipped_amenity, skipped_flats, skipped_geom,
+    )
     return leads
 
 
@@ -552,14 +576,17 @@ def _fetch_satellite(
     # Priority: Lantmäteriet WMS (free, best for Sweden) → Mapbox → Google
     img = _fetch_lm_wms(lat, lng)
     if img:
+        _log.debug("_fetch_satellite source=lm_wms lat=%s lng=%s", lat, lng)
         return img
     if mapbox_key:
         img = _fetch_mapbox(mapbox_key, lat, lng, zoom)
         if img:
+            _log.debug("_fetch_satellite source=mapbox lat=%s lng=%s", lat, lng)
             return img
     if lm_key and _PIL_AVAILABLE:
         img = _fetch_lantmateriet(lm_key, lat, lng, layer=lm_layer)
         if img:
+            _log.debug("_fetch_satellite source=lm_tile lat=%s lng=%s", lat, lng)
             return img
     url = (
         f"https://maps.googleapis.com/maps/api/staticmap"
@@ -569,8 +596,10 @@ def _fetch_satellite(
     try:
         resp = httpx.get(url, timeout=20)
         resp.raise_for_status()
+        _log.debug("_fetch_satellite source=google lat=%s lng=%s", lat, lng)
         return resp.content
-    except Exception:
+    except Exception as exc:
+        _log.warning("_fetch_satellite failed lat=%s lng=%s: %s", lat, lng, exc)
         return None
 
 
@@ -635,8 +664,10 @@ def _analyze_building(client: anthropic.Anthropic, img_bytes: bytes) -> tuple[bo
         text = msg.content[0].text.upper()
         is_house = "HOUSE=YES" in text
         has_solar = is_house and "SOLAR=YES" in text
+        _log.debug("_analyze_building HOUSE=%s SOLAR=%s", is_house, has_solar)
         return is_house, has_solar
-    except Exception:
+    except Exception as exc:
+        _log.error("_analyze_building API error: %s", exc)
         return False, False
 
 
@@ -853,6 +884,7 @@ def scan_city(
         max_leads: Stop scanning once this many confirmed leads are found.
                    None means no limit.
     """
+    _log.info("scan_city city=%s max_leads=%s", city_name, max_leads)
     gmaps = googlemaps.Client(key=google_key)
     results = gmaps.geocode(city_name)
     if not results:
@@ -865,15 +897,19 @@ def scan_city(
     north = viewport["northeast"]["lat"]
     east  = viewport["northeast"]["lng"]
     center = geom["location"]
+    _log.info("scan_city geocoded bbox=(%s,%s,%s,%s)", south, west, north, east)
 
     # OSM solar tags cover the full city viewport (free, instant)
     osm_leads = scan_area_osm(south, west, north, east)
+    _log.info("scan_city osm_leads=%d", len(osm_leads))
 
     if not anthropic_key:
+        _log.info("scan_city no anthropic_key — returning OSM only")
         return osm_leads[:max_leads] if max_leads else osm_leads
 
     # Check if we've already hit max_leads from OSM alone
     if max_leads is not None and len(osm_leads) >= max_leads:
+        _log.info("scan_city max_leads reached by OSM alone")
         return osm_leads[:max_leads]
 
     osm_keys = {f"{l.lat:.4f},{l.lng:.4f}" for l in osm_leads}
@@ -882,9 +918,11 @@ def scan_city(
 
     # Query landuse=residential polygons within the city viewport
     residential_areas = _get_residential_areas(south, west, north, east)
+    _log.info("scan_city residential_areas=%d", len(residential_areas))
 
     if residential_areas:
         max_areas = max(1, (max_leads // 5)) if max_leads else len(residential_areas)
+        _log.info("scan_city scanning %d/%d areas", max_areas, len(residential_areas))
         for area in residential_areas[:max_areas]:
             # Remaining lead budget for AI scan
             remaining = None
@@ -909,25 +947,30 @@ def scan_city(
                 seen_building_ids.add(b["osm_id"])
 
             if not buildings:
+                _log.info("scan_city area lat=%s lng=%s no new buildings", area["lat"], area["lng"])
                 continue
 
+            _log.info("scan_city area lat=%s lng=%s buildings=%d", area["lat"], area["lng"], len(buildings))
             area_leads = scan_buildings_ai(
                 buildings, google_key, anthropic_key, on_progress,
                 mapbox_key=mapbox_key, lm_key=lm_key,
                 max_leads=remaining,
             )
+            _log.info("scan_city area_leads=%d", len(area_leads))
             all_ai_leads.extend(area_leads)
 
             if max_leads is not None and len(osm_leads) + len(all_ai_leads) >= max_leads:
                 break
     else:
-        # Fallback: 1 km radius around city centre (original behaviour)
+        # Fallback: 1 km radius around city centre
+        _log.info("scan_city no residential areas — fallback to 1km radius")
         ai_south, ai_west, ai_north, ai_east = _center_bbox(
             center["lat"], center["lng"], radius_km=1.0
         )
         buildings = _get_osm_buildings(ai_south, ai_west, ai_north, ai_east)
         buildings = [b for b in buildings
                      if f"{b['lat']:.4f},{b['lng']:.4f}" not in osm_keys]
+        _log.info("scan_city fallback buildings=%d", len(buildings))
 
         remaining = None
         if max_leads is not None:
@@ -938,7 +981,10 @@ def scan_city(
             max_leads=remaining,
         )
 
-    return merge_leads(osm_leads, all_ai_leads)
+    merged = merge_leads(osm_leads, all_ai_leads)
+    _log.info("scan_city done city=%s total_leads=%d (osm=%d ai=%d)",
+              city_name, len(merged), len(osm_leads), len(all_ai_leads))
+    return merged
 
 
 def scan_bbox(
