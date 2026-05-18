@@ -399,6 +399,9 @@ def page_scanner(user):
             f"{'OSM direkt' if not ai_available else f'beräknad tid ~{est_min} min med AI'}."
         )
 
+    max_leads = st.number_input("Max antal leads (lämna 0 för obegränsat)", min_value=0, max_value=500, value=30, step=5)
+    max_leads = max_leads if max_leads > 0 else None
+
     start = st.button("Starta scanning", type="primary", use_container_width=True)
     if not start:
         return
@@ -429,10 +432,10 @@ def page_scanner(user):
     try:
         if mode == "Ort/stad (ange namn)":
             status_text.info("Söker upp ort och startar scanning...")
-            leads = scan_city(city_name, GOOGLE_API_KEY or "", anthr_key, on_progress, mapbox_key=MAPBOX_TOKEN or None)
+            leads = scan_city(city_name, GOOGLE_API_KEY or "", anthr_key, on_progress, mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads)
         else:
             status_text.info("Startar scanning av markerat område...")
-            leads = scan_bbox(south, west, north, east, GOOGLE_API_KEY or "", anthr_key, on_progress, mapbox_key=MAPBOX_TOKEN or None)
+            leads = scan_bbox(south, west, north, east, GOOGLE_API_KEY or "", anthr_key, on_progress, mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads)
     except ValueError as e:
         st.error(str(e))
         return
