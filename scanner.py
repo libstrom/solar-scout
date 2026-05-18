@@ -50,6 +50,8 @@ class Lead:
     zoom: int = 20          # zoom used when fetching satellite image
     samtomt_solar_extra: bool = False  # extra solar found on same property
     solar_location: str = "roof"       # "roof" | "samtomt"
+    needs_review: bool = False         # AI was unsure — human should verify
+    ai_reasoning: str = ""             # AI's roof description (1-2 sentences)
 
 
 # ── Tile helpers (kept for UI bbox display) ────────────────────────────────────
@@ -348,8 +350,10 @@ def _get_osm_buildings(south: float, west: float, north: float,
             continue
 
         addr = _tags_to_address(tags) or _nearest_addr_node(lat, lng, addr_nodes)
+        # Don't require an address — scan the building anyway and resolve via
+        # reverse geocode after AI confirms solar. Use coords as placeholder.
         if not addr:
-            continue
+            addr = f"{lat:.5f},{lng:.5f}"
 
         buildings.append({
             "lat": lat, "lng": lng, "address": addr,
@@ -603,17 +607,18 @@ def _fetch_satellite(
         return None
 
 
-def _analyze_building(client: anthropic.Anthropic, img_bytes: bytes) -> tuple[bool, bool]:
+def _analyze_building(client: anthropic.Anthropic, img_bytes: bytes) -> tuple[bool, bool, bool, str]:
     """
-    Returns (is_residential_house, has_solar_panels).
-    Only the centre structure is judged. Garages, carports, sheds, industrial
-    buildings and non-buildings return (False, False).
+    Returns (is_residential_house, has_solar_panels, is_unsure, reasoning).
+
+    is_unsure=True means SOLAR=UNSURE — AI sees possible panels but can't
+    confirm. These become needs_review=True leads surfaced in the review queue.
     """
     b64 = base64.standard_b64encode(img_bytes).decode()
     try:
         msg = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=180,
+            max_tokens=220,
             messages=[{
                 "role": "user",
                 "content": [
@@ -642,33 +647,41 @@ def _analyze_building(client: anthropic.Anthropic, img_bytes: bytes) -> tuple[bo
                             "- Installation may be a partial array (one or several rectangles "
                             "on part of the roof) OR cover an entire south-facing slope.\n"
                             "- Supporting signal when visible: regular grid lines / module seams.\n\n"
-                            "First, briefly describe the central building's roof in 1–2 "
-                            "sentences: roof shape, surface texture, any rectangular patches "
-                            "or smooth flat areas you notice. Be specific.\n\n"
-                            "Then commit to a verdict. Only answer SOLAR=YES if you can clearly "
-                            "identify rectangular, flat, smooth patches that are distinctly "
-                            "different from the surrounding roof material AND plausibly "
-                            "photovoltaic (dark blue, black, charcoal, or mirror-bright). "
-                            "Do NOT answer SOLAR=YES for: flat EPDM/felt roofs, standing-seam "
-                            "metal roofs, smooth asphalt, skylights, dormer windows, or any "
-                            "ambiguous surface. When uncertain, answer SOLAR=NO.\n\n"
-                            "End with exactly two lines, on their own, nothing after:\n"
+                            "First, in ONE sentence describe the roof: shape, texture, and any "
+                            "rectangular patches or unusual smooth areas you notice.\n\n"
+                            "Then commit to a verdict:\n"
+                            "- SOLAR=YES   — clearly visible rectangular smooth panels, distinctly "
+                            "different from surrounding roof, plausibly photovoltaic.\n"
+                            "- SOLAR=UNSURE — something that COULD be panels but image quality, "
+                            "shadow, or angle makes you uncertain. Use this instead of guessing.\n"
+                            "- SOLAR=NO    — no panels visible, or surface is EPDM/felt/metal/"
+                            "asphalt/skylights/ambiguous. Default when uncertain.\n\n"
+                            "End with exactly two lines, nothing after:\n"
                             "HOUSE=YES or HOUSE=NO\n"
-                            "SOLAR=YES or SOLAR=NO\n\n"
+                            "SOLAR=YES or SOLAR=UNSURE or SOLAR=NO\n\n"
                             "If HOUSE=NO, set SOLAR=NO."
                         ),
                     },
                 ],
             }],
         )
-        text = msg.content[0].text.upper()
+        raw = msg.content[0].text
+        text = raw.upper()
         is_house = "HOUSE=YES" in text
-        has_solar = is_house and "SOLAR=YES" in text
-        _log.debug("_analyze_building HOUSE=%s SOLAR=%s", is_house, has_solar)
-        return is_house, has_solar
+        has_solar = is_house and "SOLAR=YES" in text and "SOLAR=UNSURE" not in text
+        is_unsure = is_house and "SOLAR=UNSURE" in text
+        reasoning = ""
+        for line in raw.splitlines():
+            if line.strip().upper().startswith(("HOUSE=", "SOLAR=")):
+                break
+            if line.strip():
+                reasoning = line.strip()
+                break
+        _log.debug("_analyze_building HOUSE=%s SOLAR=%s UNSURE=%s", is_house, has_solar, is_unsure)
+        return is_house, has_solar, is_unsure, reasoning
     except Exception as exc:
         _log.error("_analyze_building API error: %s", exc)
-        return False, False
+        return False, False, False, ""
 
 
 def _process_building(
@@ -684,48 +697,55 @@ def _process_building(
     img = _fetch_satellite(google_key, lat, lng, zoom=zoom, mapbox_key=mapbox_key, lm_key=lm_key, lm_layer=lm_layer)
     if img is None:
         return None
-    is_house, has_solar = _analyze_building(anthropic_client, img)
+    is_house, has_solar, is_unsure, reasoning = _analyze_building(anthropic_client, img)
     if not is_house:
         return None
 
-    # Samtomt-Sol-Flagga (V1.5 Slice 7): look for extra solar on the same
-    # property beyond the central building, plus a villa-nearby check.
     samtomt = _has_extra_solar_nearby(lat, lng)
     extra_solar = samtomt.get("extra_solar_found", False)
     villa_nearby = samtomt.get("villa_nearby", False)
 
     samtomt_solar_extra = False
     solar_location = "roof"
+    needs_review = False
+    confidence = 0.90
 
     if has_solar:
-        # AI confirmed roof solar — extra solar on tomten is a bonus flag.
         if extra_solar:
             samtomt_solar_extra = True
+    elif is_unsure:
+        # AI not certain — save for human review instead of dropping
+        needs_review = True
+        confidence = 0.50
     else:
-        # No roof solar per AI. Only keep as a Lead if there's solar elsewhere
-        # on the property AND a villa context confirms it.
         if extra_solar and villa_nearby:
             samtomt_solar_extra = True
             solar_location = "samtomt"
         else:
-            # Either no extra solar (= no solar on property → drop), or extra
-            # solar without villa context (= markställning on lantbruk, V2).
             return None
 
     address = building["address"]
-    if not address:
-        return None
+    if address and "," in address and not any(c.isalpha() for c in address):
+        try:
+            gmaps = googlemaps.Client(key=google_key)
+            rev = gmaps.reverse_geocode((lat, lng))
+            if rev:
+                address = rev[0].get("formatted_address", address)
+        except Exception:
+            pass
     return Lead(
         lat=lat,
         lng=lng,
         address=address,
-        confidence=0.90,
+        confidence=confidence,
         source="ai",
         tile_key=f"bld/{building['osm_id']}",
         building_type=building.get("building_type", ""),
         zoom=zoom,
         samtomt_solar_extra=samtomt_solar_extra,
         solar_location=solar_location,
+        needs_review=needs_review,
+        ai_reasoning=reasoning,
     )
 
 

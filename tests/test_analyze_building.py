@@ -39,7 +39,7 @@ def test_flat_epdm_roof_is_not_solar():
         "No rectangular patches distinct from the roofing material are visible.\n"
         "HOUSE=YES\nSOLAR=NO"
     )
-    is_house, has_solar = _analyze_building(client, b"fake_image")
+    is_house, has_solar, _unsure, _reasoning = _analyze_building(client, b"fake_image")
     assert is_house is True
     assert has_solar is False
 
@@ -51,7 +51,7 @@ def test_standing_seam_metal_roof_is_not_solar():
         "The surface is uniform with no distinct rectangular patches.\n"
         "HOUSE=YES\nSOLAR=NO"
     )
-    is_house, has_solar = _analyze_building(client, b"fake_image")
+    is_house, has_solar, _unsure, _reasoning = _analyze_building(client, b"fake_image")
     assert is_house is True
     assert has_solar is False
 
@@ -63,7 +63,7 @@ def test_uncertain_roof_defaults_to_no_solar():
         "be a modern roofing material. It is unclear from this image.\n"
         "HOUSE=YES\nSOLAR=NO"
     )
-    is_house, has_solar = _analyze_building(client, b"fake_image")
+    is_house, has_solar, _unsure, _reasoning = _analyze_building(client, b"fake_image")
     assert is_house is True
     assert has_solar is False
 
@@ -75,7 +75,7 @@ def test_skylight_is_not_solar():
         "The rest of the roof is uniform clay tile.\n"
         "HOUSE=YES\nSOLAR=NO"
     )
-    is_house, has_solar = _analyze_building(client, b"fake_image")
+    is_house, has_solar, _unsure, _reasoning = _analyze_building(client, b"fake_image")
     assert is_house is True
     assert has_solar is False
 
@@ -91,7 +91,7 @@ def test_clear_solar_array_detected():
         "surrounding clay tiles.\n"
         "HOUSE=YES\nSOLAR=YES"
     )
-    is_house, has_solar = _analyze_building(client, b"fake_image")
+    is_house, has_solar, _unsure, _reasoning = _analyze_building(client, b"fake_image")
     assert is_house is True
     assert has_solar is True
 
@@ -103,7 +103,7 @@ def test_partial_solar_array_detected():
         "They are significantly smoother and darker than the tile texture around them.\n"
         "HOUSE=YES\nSOLAR=YES"
     )
-    is_house, has_solar = _analyze_building(client, b"fake_image")
+    is_house, has_solar, _unsure, _reasoning = _analyze_building(client, b"fake_image")
     assert is_house is True
     assert has_solar is True
 
@@ -116,7 +116,7 @@ def test_non_residential_building_rejected():
         "The central structure is a large warehouse with a flat bitumen roof.\n"
         "HOUSE=NO\nSOLAR=NO"
     )
-    is_house, has_solar = _analyze_building(client, b"fake_image")
+    is_house, has_solar, _unsure, _reasoning = _analyze_building(client, b"fake_image")
     assert is_house is False
     assert has_solar is False
 
@@ -127,7 +127,7 @@ def test_solar_on_non_residential_not_counted():
         "This is clearly a commercial building with a solar array on the roof.\n"
         "HOUSE=NO\nSOLAR=NO"
     )
-    is_house, has_solar = _analyze_building(client, b"fake_image")
+    is_house, has_solar, _unsure, _reasoning = _analyze_building(client, b"fake_image")
     assert is_house is False
     assert has_solar is False
 
@@ -138,6 +138,6 @@ def test_api_error_returns_false_false():
     """Vid API-fel ska (False, False) returneras — aldrig krascha."""
     client = MagicMock()
     client.messages.create.side_effect = Exception("network error")
-    is_house, has_solar = _analyze_building(client, b"fake_image")
+    is_house, has_solar, _unsure, _reasoning = _analyze_building(client, b"fake_image")
     assert is_house is False
     assert has_solar is False
