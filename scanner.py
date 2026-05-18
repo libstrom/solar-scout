@@ -670,7 +670,6 @@ def _analyze_building(client: anthropic.Anthropic, img_bytes: bytes) -> tuple[bo
         is_house = "HOUSE=YES" in text
         has_solar = is_house and "SOLAR=YES" in text and "SOLAR=UNSURE" not in text
         is_unsure = is_house and "SOLAR=UNSURE" in text
-        # Extract the first sentence as reasoning (everything before the verdict lines)
         reasoning = ""
         for line in raw.splitlines():
             if line.strip().upper().startswith(("HOUSE=", "SOLAR=")):
