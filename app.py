@@ -12,6 +12,12 @@ import streamlit as st
 from datetime import datetime
 from supabase import create_client, Client
 
+try:
+    import extra_streamlit_components as stx
+    _COOKIES_AVAILABLE = True
+except ImportError:
+    _COOKIES_AVAILABLE = False
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [app] %(levelname)s %(message)s",
@@ -53,19 +59,33 @@ CSV_ATTRIBUTION_HEADER = (
 def get_supabase() -> Client:
     return create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 
+
+def _get_cookie_manager():
+    if _COOKIES_AVAILABLE:
+        return stx.CookieManager(key="solar_scout_auth")
+    return None
+
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
 def init_auth():
-    """Återställ session från session_state om tokens finns.
+    """Återställ session från session_state eller browser-cookies.
 
-    Försöker refresh innan vi kastar ut user — annars logoutas användaren
-    vid minsta JWT-expiration eller transient nätverksfel.
+    Ordning: session_state → cookies → None.
+    Cookies överlever Railway-restarts; session_state gör det inte.
     """
     sb = get_supabase()
     access = st.session_state.get("access_token")
     refresh = st.session_state.get("refresh_token")
+
+    # Fallback: läs från cookies om session_state är tom
     if not access or not refresh:
-        return None
+        cm = _get_cookie_manager()
+        if cm is not None:
+            access = cm.get("access_token")
+            refresh = cm.get("refresh_token")
+        if not access or not refresh:
+            return None
+
     try:
         sb.auth.set_session(access, refresh)
         return sb.auth.get_user().user
@@ -77,12 +97,20 @@ def init_auth():
         if resp.session and resp.user:
             st.session_state["access_token"]  = resp.session.access_token
             st.session_state["refresh_token"] = resp.session.refresh_token
+            cm = _get_cookie_manager()
+            if cm is not None:
+                cm.set("access_token", resp.session.access_token)
+                cm.set("refresh_token", resp.session.refresh_token)
             return resp.user
     except Exception:
         pass
     # Refresh failed → riktig logout
     st.session_state.pop("access_token", None)
     st.session_state.pop("refresh_token", None)
+    cm = _get_cookie_manager()
+    if cm is not None:
+        cm.remove("access_token")
+        cm.remove("refresh_token")
     return None
 
 
@@ -91,6 +119,10 @@ def do_login(email: str, password: str):
     resp = sb.auth.sign_in_with_password({"email": email, "password": password})
     st.session_state["access_token"]  = resp.session.access_token
     st.session_state["refresh_token"] = resp.session.refresh_token
+    cm = _get_cookie_manager()
+    if cm is not None:
+        cm.set("access_token", resp.session.access_token)
+        cm.set("refresh_token", resp.session.refresh_token)
     return resp.user
 
 
@@ -113,6 +145,10 @@ def do_logout():
         pass
     st.session_state.pop("access_token", None)
     st.session_state.pop("refresh_token", None)
+    cm = _get_cookie_manager()
+    if cm is not None:
+        cm.remove("access_token")
+        cm.remove("refresh_token")
 
 # ── Profil & subscription ─────────────────────────────────────────────────────
 

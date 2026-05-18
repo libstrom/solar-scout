@@ -10,3 +10,4 @@ folium
 httpx
 pillow
 pytest
+extra-streamlit-components
