@@ -754,14 +754,31 @@ def scan_buildings_ai(
 
 # ── Merge & deduplicate ────────────────────────────────────────────────────────
 
-def merge_leads(osm_leads: list[Lead], ai_leads: list[Lead]) -> list[Lead]:
-    seen: set[str] = set()
+def merge_leads(osm_leads: list[Lead], ai_leads: list[Lead], dedup_radius_m: int = 50) -> list[Lead]:
+    """Merge OSM and AI leads, deduplicating by proximity.
+
+    Two leads within dedup_radius_m metres of each other are treated as the
+    same building. OSM leads take priority over AI leads (higher confidence).
+    """
     merged: list[Lead] = []
+    cos_lat_avg = math.cos(math.radians(
+        sum(l.lat for l in osm_leads + ai_leads) /
+        max(len(osm_leads) + len(ai_leads), 1)
+    ))
+
+    def _too_close(lead: Lead) -> bool:
+        for existing in merged:
+            d_lat = (lead.lat - existing.lat) * 111_000
+            d_lng = (lead.lng - existing.lng) * 111_000 * cos_lat_avg
+            if math.sqrt(d_lat * d_lat + d_lng * d_lng) < dedup_radius_m:
+                return True
+        return False
+
+    # OSM first (confidence=1.0), then AI — so OSM wins ties
     for lead in osm_leads + ai_leads:
-        key = lead.tile_key or f"{lead.lat:.4f},{lead.lng:.4f}"
-        if key not in seen:
-            seen.add(key)
+        if not _too_close(lead):
             merged.append(lead)
+
     merged.sort(key=lambda l: (0 if l.source == "osm" else 1, -l.confidence))
     return merged
 
