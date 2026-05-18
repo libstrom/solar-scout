@@ -521,6 +521,7 @@ def page_scanner(user):
                 "google_search_url":   f"https://www.google.com/search?q=vem+bor+p%C3%A5+{urllib.parse.quote(lead.address)}",
                 "hitta_url":           f"https://www.hitta.se/s%C3%B6k?vad={urllib.parse.quote(lead.address)}",
                 "maps_url":            f"https://www.google.com/maps/search/?api=1&query={lead.lat},{lead.lng}",
+                "image_url":           getattr(lead, "image_url", ""),
                 "lat":                 lead.lat,
                 "lng":                 lead.lng,
                 "scan_source":         lead.source,
@@ -773,24 +774,59 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
     m2.metric("Med solceller", solar)
     m3.metric("Utan solceller", total - solar)
 
-    filter_solar = st.radio(
-        "Filtrera", ["Alla", "Med solceller", "Utan solceller"], horizontal=True
-    )
+    col_filter1, col_filter2 = st.columns(2)
+    with col_filter1:
+        filter_solar = st.radio(
+            "Filtrera", ["Alla", "Med solceller", "Utan solceller"], horizontal=True
+        )
+    with col_filter2:
+        hide_samtomt = st.checkbox(
+            "Visa bara leads utan samtomt-sol",
+            value=False,
+            help="Dölj leads där solceller redan hittades på annan del av tomten (t.ex. garage)",
+        )
+
     if filter_solar == "Med solceller":
         df = df[df["has_solar"] == "Ja"]
     elif filter_solar == "Utan solceller":
         df = df[df["has_solar"] != "Ja"]
 
+    if hide_samtomt and "samtomt_solar_extra" in df.columns:
+        df = df[~df["samtomt_solar_extra"].astype(bool)]
+
+    def _samtomt_icon(val) -> str:
+        try:
+            return "✓" if bool(val) else "–"
+        except Exception:
+            return "–"
+
     display_cols = [c for c in
-        ["address", "has_solar", "air_to_air", "air_to_water", "notes", "created_at"]
+        ["address", "has_solar", "samtomt_solar_extra", "air_to_air", "air_to_water", "notes", "image_url", "created_at"]
         if c in df.columns]
+    rename_map = {
+        "address": "Adress", "has_solar": "Solceller",
+        "samtomt_solar_extra": "Samtomt sol",
+        "air_to_air": "L/L", "air_to_water": "L/V",
+        "notes": "Noteringar", "image_url": "Satellitbild",
+        "created_at": "Sparad",
+    }
+    display_df = df[display_cols].rename(columns=rename_map)
+    if "Samtomt sol" in display_df.columns:
+        display_df["Samtomt sol"] = display_df["Samtomt sol"].apply(_samtomt_icon)
+
+    column_config: dict = {}
+    if "Satellitbild" in display_df.columns:
+        column_config["Satellitbild"] = st.column_config.LinkColumn(
+            "Satellitbild",
+            display_text="🛰 Visa tak",
+            help="Öppnar LM WMS-bild direkt i webbläsaren",
+        )
+
     st.dataframe(
-        df[display_cols].rename(columns={
-            "address": "Adress", "has_solar": "Solceller",
-            "air_to_air": "L/L", "air_to_water": "L/V",
-            "notes": "Noteringar", "created_at": "Sparad",
-        }),
-        use_container_width=True, hide_index=True,
+        display_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config=column_config if column_config else None,
     )
 
     with st.expander("➕ Lägg till manuell lead"):
@@ -819,7 +855,9 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
             st.rerun()
 
     st.divider()
-    export_df = df.drop(columns=["id", "user_id"], errors="ignore")
+    export_df = df.drop(columns=["id", "user_id"], errors="ignore").rename(
+        columns={"samtomt_solar_extra": "Samtomt sol"}
+    )
     date_str  = datetime.now().strftime("%y%m%d")
     csv_bytes = (CSV_ATTRIBUTION_HEADER + export_df.to_csv(index=False)).encode("utf-8")
     st.download_button(
