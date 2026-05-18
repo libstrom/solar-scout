@@ -108,23 +108,49 @@ def _tags_to_address(tags: dict) -> str:
 
 
 def scan_area_osm(south: float, west: float, north: float, east: float) -> list[Lead]:
-    """Buildings already tagged with solar panels in OSM — instant, no AI cost."""
+    """Buildings already tagged with solar panels in OSM — instant, no AI cost.
+
+    Only returns elements that are plausibly rooftop residential solar:
+    - way/node with roof:solar_panel=yes  (most reliable — explicitly on a building roof)
+    - way/node with generator:source=solar AND a building=* tag (rooftop, not a solar farm)
+
+    Excluded intentionally:
+    - power=generator + generator:source=solar  → utility-scale solar farms (Sturup etc.)
+    - generator:source=solar without building=* → ground-mounted / unknown installation
+    """
     query = f"""
     [out:json][timeout:60];
     (
-      node["generator:source"="solar"]({south},{west},{north},{east});
-      way["generator:source"="solar"]({south},{west},{north},{east});
       node["roof:solar_panel"="yes"]({south},{west},{north},{east});
       way["roof:solar_panel"="yes"]({south},{west},{north},{east});
-      node["power"="generator"]["generator:source"="solar"]({south},{west},{north},{east});
-      way["power"="generator"]["generator:source"="solar"]({south},{west},{north},{east});
+      node["generator:source"="solar"]["building"]({south},{west},{north},{east});
+      way["generator:source"="solar"]["building"]({south},{west},{north},{east});
     );
-    out center;
+    out center tags;
     """
-    elements = _overpass(query)
+    try:
+        elements = _overpass(query)
+    except Exception:
+        return []
     leads = []
     seen: set[str] = set()
     for el in elements:
+        tags = el.get("tags", {})
+        # Keep only rooftop solar: either explicit roof tag, or generator tag
+        # on a building. Drop solar farms, street lights, ground-mounted arrays.
+        has_roof_tag = tags.get("roof:solar_panel") == "yes"
+        has_building = bool(tags.get("building"))
+        has_generator_solar = tags.get("generator:source") == "solar"
+        if not (has_roof_tag or (has_generator_solar and has_building)):
+            continue
+        # Drop non-residential buildings (reningsverk, kyrkor, lager etc.)
+        btype = tags.get("building", "")
+        # Om building-taggen finns, kräv explicit villa-typ.
+        # "yes" och "residential" är för tvetydiga (BRF, skola, lager).
+        # Element utan building-tagg (roof:solar_panel-noder) accepteras —
+        # de sitter på ett tak och typen är okänd men trolig villa.
+        if btype and btype not in _VILLA_TYPES_OSM:
+            continue
         if el["type"] == "node":
             lat, lng = el["lat"], el["lon"]
         elif el["type"] == "way" and "center" in el:
@@ -135,7 +161,7 @@ def scan_area_osm(south: float, west: float, north: float, east: float) -> list[
         if key in seen:
             continue
         seen.add(key)
-        addr = _tags_to_address(el.get("tags", {}))
+        addr = _tags_to_address(tags)
         leads.append(Lead(lat=lat, lng=lng, address=addr or key,
                           confidence=1.0, source="osm", tile_key=key))
     return leads
@@ -143,10 +169,33 @@ def scan_area_osm(south: float, west: float, north: float, east: float) -> list[
 
 # Residential building types we want to KEEP. Note: `farm` here is a residential
 # farm-house, not a lantbruksbyggnad (which would be `farm_auxiliary`/`barn`).
+_NON_RESIDENTIAL_AMENITIES = {
+    "school", "university", "college", "kindergarten",
+    "hospital", "clinic", "doctors",
+    "church", "place_of_worship",
+    "community_centre", "social_facility",
+    "fire_station", "police",
+    "townhall", "courthouse", "post_office",
+    "library", "theatre", "cinema",
+    "restaurant", "cafe", "fast_food", "pub", "bar",
+    "fuel", "car_wash", "parking",
+    "waste_transfer_station", "recycling",
+}
+
+# Explicit single-family building types accepted by the AI scanner (broad —
+# includes "yes" and "residential" since AI can see the building).
 _RESIDENTIAL_TYPES = (
     "house|detached|semidetached_house|terrace|bungalow|cabin|residential|"
     "static_caravan|farm|yes"
 )
+
+# Strict allowlist used by the OSM scanner, which cannot see the building.
+# Only accept tags that unambiguously mean "enfamiljshus". "yes" and
+# "residential" are excluded — too many BRFs and schools use them.
+_VILLA_TYPES_OSM = {
+    "house", "detached", "semidetached_house", "terrace",
+    "bungalow", "cabin", "static_caravan", "farm",
+}
 
 # Building tag values that are NEVER single-family homes — explicit deny-list
 # because Swedish OSM heavily uses "building=yes" for everything. Includes
@@ -567,12 +616,13 @@ def _analyze_building(client: anthropic.Anthropic, img_bytes: bytes) -> tuple[bo
                             "First, briefly describe the central building's roof in 1–2 "
                             "sentences: roof shape, surface texture, any rectangular patches "
                             "or smooth flat areas you notice. Be specific.\n\n"
-                            "Then commit to a verdict. If the description mentions rectangular "
-                            "smooth patches, flat sections distinct from tile texture, modular "
-                            "segments, or any plausible solar-panel features — answer SOLAR=YES. "
-                            "Only answer SOLAR=NO if the roof is uniformly tile/shingle-textured "
-                            "across the entire surface with no plausible panel features. When "
-                            "uncertain between the two, prefer SOLAR=YES.\n\n"
+                            "Then commit to a verdict. Only answer SOLAR=YES if you can clearly "
+                            "identify rectangular, flat, smooth patches that are distinctly "
+                            "different from the surrounding roof material AND plausibly "
+                            "photovoltaic (dark blue, black, charcoal, or mirror-bright). "
+                            "Do NOT answer SOLAR=YES for: flat EPDM/felt roofs, standing-seam "
+                            "metal roofs, smooth asphalt, skylights, dormer windows, or any "
+                            "ambiguous surface. When uncertain, answer SOLAR=NO.\n\n"
                             "End with exactly two lines, on their own, nothing after:\n"
                             "HOUSE=YES or HOUSE=NO\n"
                             "SOLAR=YES or SOLAR=NO\n\n"
@@ -656,8 +706,14 @@ def scan_buildings_ai(
     max_workers: int = 8,
     mapbox_key: str | None = None,
     lm_key: str | None = None,
+    max_leads: int | None = None,
 ) -> list[Lead]:
-    """Run Claude Vision on each OSM building centroid."""
+    """Run Claude Vision on each OSM building centroid.
+
+    Args:
+        max_leads: Stop processing once this many confirmed leads are found.
+                   None means no limit.
+    """
     if not buildings or not anthropic_key:
         return []
 
@@ -690,25 +746,88 @@ def scan_buildings_ai(
                 leads.append(result)
             if on_progress:
                 on_progress(done, total, result)
+            # Short-circuit if we've hit the lead cap
+            if max_leads is not None and len(leads) >= max_leads:
+                # Cancel remaining futures that haven't started yet
+                for f in futures:
+                    f.cancel()
+                break
 
     return leads
 
 
 # ── Merge & deduplicate ────────────────────────────────────────────────────────
 
-def merge_leads(osm_leads: list[Lead], ai_leads: list[Lead]) -> list[Lead]:
-    seen: set[str] = set()
+def merge_leads(osm_leads: list[Lead], ai_leads: list[Lead], dedup_radius_m: int = 20) -> list[Lead]:
+    """Merge OSM and AI leads, deduplicating by proximity.
+
+    Two leads within dedup_radius_m metres of each other are treated as the
+    same building. OSM leads take priority over AI leads (higher confidence).
+    """
     merged: list[Lead] = []
+    cos_lat_avg = math.cos(math.radians(
+        sum(l.lat for l in osm_leads + ai_leads) /
+        max(len(osm_leads) + len(ai_leads), 1)
+    ))
+
+    def _too_close(lead: Lead) -> bool:
+        for existing in merged:
+            d_lat = (lead.lat - existing.lat) * 111_000
+            d_lng = (lead.lng - existing.lng) * 111_000 * cos_lat_avg
+            if math.sqrt(d_lat * d_lat + d_lng * d_lng) < dedup_radius_m:
+                return True
+        return False
+
+    # OSM first (confidence=1.0), then AI — so OSM wins ties
     for lead in osm_leads + ai_leads:
-        key = lead.tile_key or f"{lead.lat:.4f},{lead.lng:.4f}"
-        if key not in seen:
-            seen.add(key)
+        if not _too_close(lead):
             merged.append(lead)
+
     merged.sort(key=lambda l: (0 if l.source == "osm" else 1, -l.confidence))
     return merged
 
 
 # ── Public entry points ────────────────────────────────────────────────────────
+
+def _get_residential_areas(south: float, west: float, north: float, east: float) -> list[dict]:
+    """
+    Return OSM landuse=residential area centroids within the viewport, sorted by
+    area (largest first — most houses = most leads).
+
+    Each item: {lat, lng, area_deg2}
+    """
+    query = f"""
+    [out:json][timeout:90];
+    (
+      way["landuse"="residential"]({south},{west},{north},{east});
+      relation["landuse"="residential"]({south},{west},{north},{east});
+    );
+    out center;
+    """
+    elements = _overpass(query, timeout=90)
+    areas: list[dict] = []
+    for el in elements:
+        if el.get("type") == "way" and "center" in el:
+            lat = el["center"]["lat"]
+            lng = el["center"]["lon"]
+            # Estimate area from bounds if available (rough proxy for sorting)
+            bounds = el.get("bounds", {})
+            if bounds:
+                area_deg2 = (
+                    (bounds.get("maxlat", lat) - bounds.get("minlat", lat)) *
+                    (bounds.get("maxlon", lng) - bounds.get("minlon", lng))
+                )
+            else:
+                area_deg2 = 0.0
+            areas.append({"lat": lat, "lng": lng, "area_deg2": area_deg2})
+        elif el.get("type") == "relation" and "center" in el:
+            lat = el["center"]["lat"]
+            lng = el["center"]["lon"]
+            areas.append({"lat": lat, "lng": lng, "area_deg2": 0.0})
+    # Largest residential area first
+    areas.sort(key=lambda a: a["area_deg2"], reverse=True)
+    return areas
+
 
 def scan_city(
     city_name: str,
@@ -717,7 +836,14 @@ def scan_city(
     on_progress: Callable[[int, int, Lead | None], None] | None = None,
     lm_key: str | None = None,
     mapbox_key: str | None = None,
+    max_leads: int | None = None,
 ) -> list[Lead]:
+    """Scan a city for buildings with solar panels.
+
+    Args:
+        max_leads: Stop scanning once this many confirmed leads are found.
+                   None means no limit.
+    """
     gmaps = googlemaps.Client(key=google_key)
     results = gmaps.geocode(city_name)
     if not results:
@@ -737,19 +863,73 @@ def scan_city(
     if not anthropic_key:
         return osm_leads
 
-    # AI building scan: 1 km radius around city centre
-    ai_south, ai_west, ai_north, ai_east = _center_bbox(
-        center["lat"], center["lng"], radius_km=1.0
-    )
-    buildings = _get_osm_buildings(ai_south, ai_west, ai_north, ai_east)
+    # Check if we've already hit max_leads from OSM alone
+    if max_leads is not None and len(osm_leads) >= max_leads:
+        return osm_leads[:max_leads]
 
-    # Skip buildings already confirmed by OSM solar tags
     osm_keys = {f"{l.lat:.4f},{l.lng:.4f}" for l in osm_leads}
-    buildings = [b for b in buildings
-                 if f"{b['lat']:.4f},{b['lng']:.4f}" not in osm_keys]
+    all_ai_leads: list[Lead] = []
+    seen_building_ids: set[str] = set()
 
-    ai_leads = scan_buildings_ai(buildings, google_key, anthropic_key, on_progress, mapbox_key=mapbox_key, lm_key=lm_key)
-    return merge_leads(osm_leads, ai_leads)
+    # Query landuse=residential polygons within the city viewport
+    residential_areas = _get_residential_areas(south, west, north, east)
+
+    if residential_areas:
+        # Scan each residential area, largest first
+        for area in residential_areas:
+            # Remaining lead budget for AI scan
+            remaining = None
+            if max_leads is not None:
+                already_found = len(osm_leads) + len(all_ai_leads)
+                remaining = max_leads - already_found
+                if remaining <= 0:
+                    break
+
+            a_south, a_west, a_north, a_east = _center_bbox(
+                area["lat"], area["lng"], radius_km=1.0
+            )
+            buildings = _get_osm_buildings(a_south, a_west, a_north, a_east)
+
+            # Deduplicate across areas and against OSM leads
+            buildings = [
+                b for b in buildings
+                if b["osm_id"] not in seen_building_ids
+                and f"{b['lat']:.4f},{b['lng']:.4f}" not in osm_keys
+            ]
+            for b in buildings:
+                seen_building_ids.add(b["osm_id"])
+
+            if not buildings:
+                continue
+
+            area_leads = scan_buildings_ai(
+                buildings, google_key, anthropic_key, on_progress,
+                mapbox_key=mapbox_key, lm_key=lm_key,
+                max_leads=remaining,
+            )
+            all_ai_leads.extend(area_leads)
+
+            if max_leads is not None and len(osm_leads) + len(all_ai_leads) >= max_leads:
+                break
+    else:
+        # Fallback: 1 km radius around city centre (original behaviour)
+        ai_south, ai_west, ai_north, ai_east = _center_bbox(
+            center["lat"], center["lng"], radius_km=1.0
+        )
+        buildings = _get_osm_buildings(ai_south, ai_west, ai_north, ai_east)
+        buildings = [b for b in buildings
+                     if f"{b['lat']:.4f},{b['lng']:.4f}" not in osm_keys]
+
+        remaining = None
+        if max_leads is not None:
+            remaining = max_leads - len(osm_leads)
+        all_ai_leads = scan_buildings_ai(
+            buildings, google_key, anthropic_key, on_progress,
+            mapbox_key=mapbox_key, lm_key=lm_key,
+            max_leads=remaining,
+        )
+
+    return merge_leads(osm_leads, all_ai_leads)
 
 
 def scan_bbox(
@@ -762,7 +942,14 @@ def scan_bbox(
     on_progress: Callable[[int, int, Lead | None], None] | None = None,
     lm_key: str | None = None,
     mapbox_key: str | None = None,
+    max_leads: int | None = None,
 ) -> list[Lead]:
+    """Scan a bounding box for buildings with solar panels.
+
+    Args:
+        max_leads: Stop scanning once this many confirmed leads are found.
+                   None means no limit.
+    """
     tile_count = len(_bbox_tiles(south, west, north, east))
     if tile_count > 1000:
         raise ValueError(
@@ -775,10 +962,22 @@ def scan_bbox(
     if not anthropic_key:
         return osm_leads
 
+    # Check if we've already hit max_leads from OSM alone
+    if max_leads is not None and len(osm_leads) >= max_leads:
+        return osm_leads[:max_leads]
+
     buildings = _get_osm_buildings(south, west, north, east)
     osm_keys  = {f"{l.lat:.4f},{l.lng:.4f}" for l in osm_leads}
     buildings = [b for b in buildings
                  if f"{b['lat']:.4f},{b['lng']:.4f}" not in osm_keys]
 
-    ai_leads = scan_buildings_ai(buildings, google_key, anthropic_key, on_progress, mapbox_key=mapbox_key, lm_key=lm_key)
+    remaining = None
+    if max_leads is not None:
+        remaining = max_leads - len(osm_leads)
+
+    ai_leads = scan_buildings_ai(
+        buildings, google_key, anthropic_key, on_progress,
+        mapbox_key=mapbox_key, lm_key=lm_key,
+        max_leads=remaining,
+    )
     return merge_leads(osm_leads, ai_leads)

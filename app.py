@@ -399,6 +399,9 @@ def page_scanner(user):
             f"{'OSM direkt' if not ai_available else f'beräknad tid ~{est_min} min med AI'}."
         )
 
+    max_leads = st.number_input("Max antal leads (lämna 0 för obegränsat)", min_value=0, max_value=500, value=30, step=5)
+    max_leads = max_leads if max_leads > 0 else None
+
     start = st.button("Starta scanning", type="primary", use_container_width=True)
     if not start:
         return
@@ -429,10 +432,10 @@ def page_scanner(user):
     try:
         if mode == "Ort/stad (ange namn)":
             status_text.info("Söker upp ort och startar scanning...")
-            leads = scan_city(city_name, GOOGLE_API_KEY or "", anthr_key, on_progress, mapbox_key=MAPBOX_TOKEN or None)
+            leads = scan_city(city_name, GOOGLE_API_KEY or "", anthr_key, on_progress, mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads)
         else:
             status_text.info("Startar scanning av markerat område...")
-            leads = scan_bbox(south, west, north, east, GOOGLE_API_KEY or "", anthr_key, on_progress, mapbox_key=MAPBOX_TOKEN or None)
+            leads = scan_bbox(south, west, north, east, GOOGLE_API_KEY or "", anthr_key, on_progress, mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads)
     except ValueError as e:
         st.error(str(e))
         return
@@ -636,7 +639,25 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
         use_container_width=True, hide_index=True,
     )
 
-    with st.expander("Ta bort en lead"):
+    with st.expander("➕ Lägg till manuell lead"):
+        m_addr  = st.text_input("Adress", placeholder="Ljunggatan 12, Malmö")
+        m_note  = st.text_input("Notering", placeholder="t.ex. solceller på garage, pool, dåligt tak")
+        m_solar = st.checkbox("Har solceller", value=True)
+        if st.button("Spara manuell lead", type="secondary") and m_addr:
+            sb = get_supabase()
+            sb.table("scout_leads").insert({
+                "user_id":    str(user.id),
+                "address":    m_addr,
+                "has_solar":  "Ja" if m_solar else "Nej",
+                "notes":      m_note,
+                "scan_source": "manual",
+                "air_to_air": "False",
+                "air_to_water": "False",
+            }).execute()
+            st.success(f"Lead '{m_addr}' sparad.")
+            st.rerun()
+
+    with st.expander("🗑 Ta bort en lead"):
         lead_id = st.number_input("Lead-ID (se id-kolumnen i databasen)", min_value=1, step=1)
         if st.button("Ta bort", type="secondary"):
             delete_lead(int(lead_id))
