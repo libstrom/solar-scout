@@ -147,6 +147,10 @@ def scan_area_osm(south: float, west: float, north: float, east: float) -> list[
         btype = tags.get("building", "")
         if btype and btype in _NON_RESIDENTIAL_TYPES:
             continue
+        # Drop by amenity tag — catches building=yes + amenity=school etc.
+        amenity = tags.get("amenity", "")
+        if amenity in _NON_RESIDENTIAL_AMENITIES:
+            continue
         if el["type"] == "node":
             lat, lng = el["lat"], el["lon"]
         elif el["type"] == "way" and "center" in el:
@@ -165,6 +169,19 @@ def scan_area_osm(south: float, west: float, north: float, east: float) -> list[
 
 # Residential building types we want to KEEP. Note: `farm` here is a residential
 # farm-house, not a lantbruksbyggnad (which would be `farm_auxiliary`/`barn`).
+_NON_RESIDENTIAL_AMENITIES = {
+    "school", "university", "college", "kindergarten",
+    "hospital", "clinic", "doctors",
+    "church", "place_of_worship",
+    "community_centre", "social_facility",
+    "fire_station", "police",
+    "townhall", "courthouse", "post_office",
+    "library", "theatre", "cinema",
+    "restaurant", "cafe", "fast_food", "pub", "bar",
+    "fuel", "car_wash", "parking",
+    "waste_transfer_station", "recycling",
+}
+
 _RESIDENTIAL_TYPES = (
     "house|detached|semidetached_house|terrace|bungalow|cabin|residential|"
     "static_caravan|farm|yes"
