@@ -96,7 +96,6 @@ def _overpass(query: str, timeout: int = 90) -> list[dict]:
             timeout=timeout,
             headers={
                 "User-Agent": "solar-scout/1.0 (https://github.com/libstrom/solar-scout)",
-                "Accept": "application/json",
             },
         )
         resp.raise_for_status()
