@@ -88,23 +88,27 @@ def _center_bbox(lat: float, lng: float, radius_km: float = 1.0):
 # ── OSM queries ────────────────────────────────────────────────────────────────
 
 def _overpass(query: str, timeout: int = 90) -> list[dict]:
-    try:
-        _log.info("Overpass query start (timeout=%ds)", timeout)
-        resp = httpx.post(
-            "https://overpass-api.de/api/interpreter",
-            data={"data": query},
-            timeout=timeout,
-            headers={
-                "User-Agent": "solar-scout/1.0 (https://github.com/libstrom/solar-scout)",
-            },
-        )
-        resp.raise_for_status()
-        elements = resp.json().get("elements", [])
-        _log.info("Overpass returned %d elements", len(elements))
-        return elements
-    except Exception as exc:
-        _log.error("Overpass error: %s", exc)
-        return []
+    for attempt in range(3):
+        try:
+            _log.info("Overpass query start (timeout=%ds attempt=%d)", timeout, attempt + 1)
+            resp = httpx.post(
+                "https://overpass-api.de/api/interpreter",
+                data={"data": query},
+                timeout=timeout,
+                headers={
+                    "User-Agent": "solar-scout/1.0 (https://github.com/libstrom/solar-scout)",
+                },
+            )
+            resp.raise_for_status()
+            elements = resp.json().get("elements", [])
+            _log.info("Overpass returned %d elements", len(elements))
+            return elements
+        except Exception as exc:
+            _log.warning("Overpass attempt %d failed: %s", attempt + 1, exc)
+            if attempt < 2:
+                import time; time.sleep(2 ** attempt)
+    _log.error("Overpass failed after 3 attempts")
+    return []
 
 
 def _tags_to_address(tags: dict) -> str:
