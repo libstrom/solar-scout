@@ -770,8 +770,12 @@ def merge_leads(osm_leads: list[Lead], ai_leads: list[Lead], dedup_radius_m: int
         max(len(osm_leads) + len(ai_leads), 1)
     ))
 
-    def _too_close(lead: Lead) -> bool:
+    seen_keys: set[str] = set()
+
+    def _too_close_cross_source(lead: Lead) -> bool:
         for existing in merged:
+            if existing.source == lead.source:
+                continue
             d_lat = (lead.lat - existing.lat) * 111_000
             d_lng = (lead.lng - existing.lng) * 111_000 * cos_lat_avg
             if math.sqrt(d_lat * d_lat + d_lng * d_lng) < dedup_radius_m:
@@ -780,8 +784,13 @@ def merge_leads(osm_leads: list[Lead], ai_leads: list[Lead], dedup_radius_m: int
 
     # OSM first (confidence=1.0), then AI — so OSM wins ties
     for lead in osm_leads + ai_leads:
-        if not _too_close(lead):
-            merged.append(lead)
+        key = lead.tile_key or f"{lead.lat:.5f},{lead.lng:.5f}"
+        if key in seen_keys:
+            continue
+        if _too_close_cross_source(lead):
+            continue
+        seen_keys.add(key)
+        merged.append(lead)
 
     merged.sort(key=lambda l: (0 if l.source == "osm" else 1, -l.confidence))
     return merged
@@ -861,7 +870,7 @@ def scan_city(
     osm_leads = scan_area_osm(south, west, north, east)
 
     if not anthropic_key:
-        return osm_leads
+        return osm_leads[:max_leads] if max_leads else osm_leads
 
     # Check if we've already hit max_leads from OSM alone
     if max_leads is not None and len(osm_leads) >= max_leads:
@@ -875,8 +884,8 @@ def scan_city(
     residential_areas = _get_residential_areas(south, west, north, east)
 
     if residential_areas:
-        # Scan each residential area, largest first
-        for area in residential_areas:
+        max_areas = max(1, (max_leads // 5)) if max_leads else len(residential_areas)
+        for area in residential_areas[:max_areas]:
             # Remaining lead budget for AI scan
             remaining = None
             if max_leads is not None:
@@ -960,7 +969,7 @@ def scan_bbox(
     osm_leads = scan_area_osm(south, west, north, east)
 
     if not anthropic_key:
-        return osm_leads
+        return osm_leads[:max_leads] if max_leads else osm_leads
 
     # Check if we've already hit max_leads from OSM alone
     if max_leads is not None and len(osm_leads) >= max_leads:
