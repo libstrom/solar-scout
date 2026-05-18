@@ -754,7 +754,7 @@ def scan_buildings_ai(
 
 # ── Merge & deduplicate ────────────────────────────────────────────────────────
 
-def merge_leads(osm_leads: list[Lead], ai_leads: list[Lead], dedup_radius_m: int = 50) -> list[Lead]:
+def merge_leads(osm_leads: list[Lead], ai_leads: list[Lead], dedup_radius_m: int = 10) -> list[Lead]:
     """Merge OSM and AI leads, deduplicating by proximity.
 
     Two leads within dedup_radius_m metres of each other are treated as the

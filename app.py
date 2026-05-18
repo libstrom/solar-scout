@@ -639,7 +639,25 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
         use_container_width=True, hide_index=True,
     )
 
-    with st.expander("Ta bort en lead"):
+    with st.expander("➕ Lägg till manuell lead"):
+        m_addr  = st.text_input("Adress", placeholder="Ljunggatan 12, Malmö")
+        m_note  = st.text_input("Notering", placeholder="t.ex. solceller på garage, pool, dåligt tak")
+        m_solar = st.checkbox("Har solceller", value=True)
+        if st.button("Spara manuell lead", type="secondary") and m_addr:
+            sb = get_supabase()
+            sb.table("scout_leads").insert({
+                "user_id":    str(user.id),
+                "address":    m_addr,
+                "has_solar":  "Ja" if m_solar else "Nej",
+                "notes":      m_note,
+                "scan_source": "manual",
+                "air_to_air": "False",
+                "air_to_water": "False",
+            }).execute()
+            st.success(f"Lead '{m_addr}' sparad.")
+            st.rerun()
+
+    with st.expander("🗑 Ta bort en lead"):
         lead_id = st.number_input("Lead-ID (se id-kolumnen i databasen)", min_value=1, step=1)
         if st.button("Ta bort", type="secondary"):
             delete_lead(int(lead_id))
