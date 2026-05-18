@@ -411,122 +411,147 @@ def page_scanner(user):
     max_leads = max_leads if max_leads > 0 else None
 
     start = st.button("Starta scanning", type="primary", use_container_width=True)
-    if not start:
+
+    if start:
+        if mode == "Ort/stad (ange namn)" and not city_name:
+            st.warning("Ange en ort.")
+            return
+        if mode == "Rita område på karta" and None in (south, west, north, east):
+            st.warning("Rita ett område på kartan först.")
+            return
+
+        # Clear any previous scan results
+        st.session_state.pop("scanner_sb_rows", None)
+        st.session_state.pop("scanner_display_rows", None)
+
+        from scanner import scan_city, scan_bbox, Lead
+
+        progress_bar  = st.progress(0.0, text="Startar...")
+        status_text   = st.empty()
+        found_leads: list[Lead] = []
+        found_count_ph = st.empty()
+
+        def on_progress(done: int, total: int, result):
+            pct = done / total if total else 1.0
+            progress_bar.progress(pct, text=f"Analyserar bricka {done}/{total}...")
+            if result:
+                found_leads.append(result)
+                found_count_ph.info(f"Hittade hittills: {len(found_leads)} solcellstak")
+
+        anthr_key = ANTHROPIC_API_KEY if ai_available else None
+        _log.info("scan start mode=%s ai=%s max_leads=%s", mode, bool(anthr_key), max_leads)
+        try:
+            if mode == "Ort/stad (ange namn)":
+                status_text.info("Söker upp ort och hämtar byggnadsdata från OSM (kan ta 20–60 s)...")
+                leads = scan_city(city_name, GOOGLE_API_KEY or "", anthr_key, on_progress, mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads)
+            else:
+                status_text.info("Hämtar byggnadsdata från OSM (kan ta 20–60 s)...")
+                leads = scan_bbox(south, west, north, east, GOOGLE_API_KEY or "", anthr_key, on_progress, mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads)
+        except ValueError as e:
+            _log.error("scan ValueError: %s", e)
+            st.error(str(e))
+            return
+        except Exception as e:
+            _log.error("scan Exception: %s", e, exc_info=True)
+            st.error(f"Fel under scanning: {e}")
+            return
+
+        progress_bar.progress(1.0, text="Klar!")
+        status_text.empty()
+        found_count_ph.empty()
+
+        if not leads:
+            st.warning("Inga solcellstak hittades i det valda området.")
+            with st.expander("🔍 Debug-info (felsökning)"):
+                st.caption("Kontrollera Railway-loggarna för detaljerad info. Vanliga orsaker: 1) OSM saknar solar-taggar för området 2) Inga residential_areas hittades 3) AI-nyckel saknas eller tog slut 4) Alla byggnader filtrerades som icke-villor.")
+            return
+
+        display_rows = []
+        sb_rows = []
+        for lead in leads:
+            display_rows.append({
+                "Adress":    lead.address,
+                "Källa":     "OSM" if lead.source == "osm" else "AI",
+                "Konfidens": f"{lead.confidence:.0%}",
+                "Lat":       round(lead.lat, 5),
+                "Lng":       round(lead.lng, 5),
+            })
+            sb_rows.append({
+                "address":             lead.address,
+                "has_solar":           "Ja",
+                "air_to_air":          "False",
+                "air_to_water":        "False",
+                "notes":               f"Detekterad via {lead.source.upper()} (konfidens {lead.confidence:.0%})",
+                "google_search_url":   f"https://www.google.com/search?q=vem+bor+p%C3%A5+{urllib.parse.quote(lead.address)}",
+                "hitta_url":           f"https://www.hitta.se/s%C3%B6k?vad={urllib.parse.quote(lead.address)}",
+                "maps_url":            f"https://www.google.com/maps/search/?api=1&query={lead.lat},{lead.lng}",
+                "lat":                 lead.lat,
+                "lng":                 lead.lng,
+                "scan_source":         lead.source,
+                "building_type":       getattr(lead, "building_type", ""),
+                "samtomt_solar_extra": getattr(lead, "samtomt_solar_extra", False),
+                "solar_location":      getattr(lead, "solar_location", "roof"),
+                "needs_review":        getattr(lead, "needs_review", False),
+                "ai_reasoning":        getattr(lead, "ai_reasoning", ""),
+            })
+
+        # Persist results in session_state so they survive button clicks
+        st.session_state["scanner_sb_rows"] = sb_rows
+        st.session_state["scanner_display_rows"] = display_rows
+
+    # ── Show results (persisted across reruns) ────────────────────────────────
+    sb_rows      = st.session_state.get("scanner_sb_rows")
+    display_rows = st.session_state.get("scanner_display_rows")
+
+    if not sb_rows:
         return
-    if mode == "Ort/stad (ange namn)" and not city_name:
-        st.warning("Ange en ort.")
-        return
-    if mode == "Rita område på karta" and None in (south, west, north, east):
-        st.warning("Rita ett område på kartan först.")
-        return
 
-    from scanner import scan_city, scan_bbox, Lead
+    already_saved = st.session_state.get("scanner_saved", False)
 
-    progress_bar  = st.progress(0.0, text="Startar...")
-    status_text   = st.empty()
-    results_ph    = st.empty()
-
-    found_leads: list[Lead] = []
-    found_count_ph = st.empty()
-
-    def on_progress(done: int, total: int, result):
-        pct = done / total if total else 1.0
-        progress_bar.progress(pct, text=f"Analyserar bricka {done}/{total}...")
-        if result:
-            found_leads.append(result)
-            found_count_ph.info(f"Hittade hittills: {len(found_leads)} solcellstak")
-
-    anthr_key = ANTHROPIC_API_KEY if ai_available else None
-    _log.info("scan start mode=%s ai=%s max_leads=%s", mode, bool(anthr_key), max_leads)
-    try:
-        if mode == "Ort/stad (ange namn)":
-            status_text.info("Söker upp ort och hämtar byggnadsdata från OSM (kan ta 20–60 s)...")
-            leads = scan_city(city_name, GOOGLE_API_KEY or "", anthr_key, on_progress, mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads)
-        else:
-            status_text.info("Hämtar byggnadsdata från OSM (kan ta 20–60 s)...")
-            leads = scan_bbox(south, west, north, east, GOOGLE_API_KEY or "", anthr_key, on_progress, mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads)
-    except ValueError as e:
-        _log.error("scan ValueError: %s", e)
-        st.error(str(e))
-        return
-    except Exception as e:
-        _log.error("scan Exception: %s", e, exc_info=True)
-        st.error(f"Fel under scanning: {e}")
-        return
-
-    progress_bar.progress(1.0, text="Klar!")
-    status_text.empty()
-    found_count_ph.empty()
-
-    if not leads:
-        st.warning("Inga solcellstak hittades i det valda området.")
-        with st.expander("🔍 Debug-info (felsökning)"):
-            st.caption("Kontrollera Railway-loggarna för detaljerad info. Vanliga orsaker: 1) OSM saknar solar-taggar för området 2) Inga residential_areas hittades 3) AI-nyckel saknas eller tog slut 4) Alla byggnader filtrerades som icke-villor.")
-        return
-
-    st.success(f"Scanning klar! Hittade {len(leads)} tak med solceller.")
+    st.success(f"Scanning klar! Hittade {len(sb_rows)} tak med solceller.")
     st.divider()
 
-    import pandas as pd
-    from datetime import datetime
-
-    rows = []
-    sb_rows = []
-    for lead in leads:
-        rows.append({
-            "Adress":      lead.address,
-            "Källa":       "OSM" if lead.source == "osm" else "AI",
-            "Konfidens":   f"{lead.confidence:.0%}",
-            "Lat":         round(lead.lat, 5),
-            "Lng":         round(lead.lng, 5),
-        })
-        sb_rows.append({
-            "address":           lead.address,
-            "has_solar":         "Ja",
-            "air_to_air":        "False",
-            "air_to_water":      "False",
-            "notes":             f"Detekterad via {lead.source.upper()} (konfidens {lead.confidence:.0%})",
-            "google_search_url": f"https://www.google.com/search?q=vem+bor+p%C3%A5+{urllib.parse.quote(lead.address)}",
-            "hitta_url":         f"https://www.hitta.se/s%C3%B6k?vad={urllib.parse.quote(lead.address)}",
-            "maps_url":          f"https://www.google.com/maps/search/?api=1&query={lead.lat},{lead.lng}",
-            "lat":               lead.lat,
-            "lng":               lead.lng,
-            "scan_source":       lead.source,
-            "building_type":     getattr(lead, "building_type", ""),
-            "samtomt_solar_extra": getattr(lead, "samtomt_solar_extra", False),
-            "solar_location":    getattr(lead, "solar_location", "roof"),
-            "needs_review":      getattr(lead, "needs_review", False),
-            "ai_reasoning":      getattr(lead, "ai_reasoning", ""),
-        })
-
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame(display_rows)
     st.dataframe(df, use_container_width=True, hide_index=True)
 
-    col_save, col_dl = st.columns(2)
-    with col_save:
-        if st.button("💾 Spara alla till Leadslista", type="primary", use_container_width=True):
-            sb = get_supabase()
-            for row in sb_rows:
-                data = {k: v for k, v in row.items()}
-                data["user_id"] = str(user.id)
-                try:
-                    sb.table("scout_leads").insert(data).execute()
-                except Exception:
-                    pass
-            st.success(f"{len(sb_rows)} leads sparade!")
-            st.balloons()
+    if already_saved:
+        st.info(f"✅ {len(sb_rows)} leads sparade i Leadslistan.")
+    else:
+        col_save, col_dl = st.columns(2)
+        with col_save:
+            if st.button("💾 Spara alla till Leadslista", type="primary", use_container_width=True):
+                sb = get_supabase()
+                saved = 0
+                for row in sb_rows:
+                    data = {k: v for k, v in row.items()}
+                    data["user_id"] = str(user.id)
+                    try:
+                        sb.table("scout_leads").insert(data).execute()
+                        saved += 1
+                    except Exception as exc:
+                        _log.warning("lead insert failed: %s", exc)
+                st.session_state["scanner_saved"] = True
+                st.success(f"{saved} leads sparade!")
+                st.balloons()
+                st.rerun()
 
-    with col_dl:
-        date_str = datetime.now().strftime("%y%m%d")
-        export = pd.DataFrame(sb_rows).drop(columns=["lat", "lng"], errors="ignore")
-        csv_bytes = (CSV_ATTRIBUTION_HEADER + export.to_csv(index=False)).encode("utf-8")
-        st.download_button(
-            "⬇ Ladda ner CSV",
-            csv_bytes,
-            file_name=f"Scanner_Leads_{date_str}.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
+        with col_dl:
+            date_str = datetime.now().strftime("%y%m%d")
+            export = pd.DataFrame(sb_rows).drop(columns=["lat", "lng"], errors="ignore")
+            csv_bytes = (CSV_ATTRIBUTION_HEADER + export.to_csv(index=False)).encode("utf-8")
+            st.download_button(
+                "⬇ Ladda ner CSV",
+                csv_bytes,
+                file_name=f"Scanner_Leads_{date_str}.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+    if st.button("🔄 Ny scanning", use_container_width=True):
+        st.session_state.pop("scanner_sb_rows", None)
+        st.session_state.pop("scanner_display_rows", None)
+        st.session_state.pop("scanner_saved", None)
+        st.rerun()
 
 
 def page_scout(user):
