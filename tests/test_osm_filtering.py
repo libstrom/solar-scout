@@ -1,12 +1,13 @@
 """
 Enhetstester för OSM-filtrering i scan_area_osm.
 
-Verifierar att scannern inte returnerar leads för:
-  - node-element utan byggnadstagg (t.ex. solcellsgatlyktor, markmonterade paneler)
-  - way-element utan adress (inget hus att kontakta)
+Verifierar att scannern INTE returnerar leads för:
+  - generator:source=solar utan building-tagg (solcellsparker, gatlyktor)
+  - power=generator + generator:source=solar (utility-scale, t.ex. Sturup)
 
-Och att den returnerar leads för:
-  - way-element med roof:solar_panel=yes och adress
+Och att den RETURNERAR leads för:
+  - roof:solar_panel=yes (taksolceller, mest tillförlitlig tagg)
+  - generator:source=solar med building-tagg (tak på byggnad med solar)
 """
 
 import sys
@@ -30,29 +31,32 @@ def _osm_way(lat=55.55, lon=13.05, tags=None):
     return {"type": "way", "center": {"lat": lat, "lon": lon}, "tags": tags or {}}
 
 
-def test_isolated_solar_node_without_address_is_excluded():
-    """
-    Isolerade nod-element (t.ex. solcellsgatlyktor) utan adresstaggar
-    ska inkluderas men med lat/lng som adress — acceptabelt men verifierbart.
+def test_solar_park_without_building_tag_excluded():
+    """Solcellspark (Sturup-fallet) ska inte ge ett lead.
 
-    Primärt: kontrollera att en nod UTAN roof:solar_panel-tagg och UTAN
-    adresstaggar inte ger en falsk "Ja"-lead med en riktig gatuadress.
+    generator:source=solar utan building-tagg = markmonterad anläggning.
     """
     fake_elements = [
-        _osm_node(tags={"generator:source": "solar"})  # ingen adress
+        _osm_way(tags={"generator:source": "solar", "landuse": "industrial"}),
+        _osm_node(tags={"generator:source": "solar"}),
     ]
     with patch("scanner._overpass", return_value=fake_elements):
         leads = scan_area_osm(*_BBOX)
-    assert len(leads) == 1
-    lead = leads[0]
-    # Utan adresstaggar ska adressen vara koordinater, inte en gatuadress
-    assert "," in lead.address or lead.address == ""
-    assert "gatan" not in lead.address.lower()
-    assert "vägen" not in lead.address.lower()
+    assert leads == [], "Solcellspark utan building-tagg ska filtreras bort"
 
 
-def test_way_with_roof_solar_and_address_is_included():
-    """way med roof:solar_panel=yes och adresstaggar ska ge ett lead."""
+def test_utility_generator_excluded():
+    """power=generator + generator:source=solar = storskalig anläggning, ska filtreras."""
+    fake_elements = [
+        _osm_way(tags={"power": "generator", "generator:source": "solar"}),
+    ]
+    with patch("scanner._overpass", return_value=fake_elements):
+        leads = scan_area_osm(*_BBOX)
+    assert leads == [], "Utility-scale generator ska filtreras bort"
+
+
+def test_roof_solar_panel_yes_included():
+    """roof:solar_panel=yes är den tillförlitligaste taggen — ska alltid inkluderas."""
     fake_elements = [
         _osm_way(tags={
             "roof:solar_panel": "yes",
@@ -69,10 +73,27 @@ def test_way_with_roof_solar_and_address_is_included():
     assert leads[0].confidence == 1.0
 
 
+def test_generator_solar_with_building_tag_included():
+    """generator:source=solar på en byggnad (building=*) = takinstallation → inkludera."""
+    fake_elements = [
+        _osm_way(tags={
+            "generator:source": "solar",
+            "building": "house",
+            "addr:street": "Myrtengatan",
+            "addr:housenumber": "11",
+            "addr:city": "Malmö",
+        })
+    ]
+    with patch("scanner._overpass", return_value=fake_elements):
+        leads = scan_area_osm(*_BBOX)
+    assert len(leads) == 1
+    assert "Myrtengatan 11" in leads[0].address
+
+
 def test_duplicate_coordinates_deduplicated():
     """Samma koordinat från flera OSM-element ska bara ge ett lead."""
     fake_elements = [
-        _osm_node(lat=55.55, lon=13.05, tags={"generator:source": "solar"}),
+        _osm_node(lat=55.55, lon=13.05, tags={"roof:solar_panel": "yes"}),
         _osm_way(lat=55.55, lon=13.05, tags={"roof:solar_panel": "yes"}),
     ]
     with patch("scanner._overpass", return_value=fake_elements):
