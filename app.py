@@ -4,12 +4,20 @@ Linus Bergström
 """
 
 import os
+import logging
 import urllib.parse
 import stripe
 import pandas as pd
 import streamlit as st
 from datetime import datetime
 from supabase import create_client, Client
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [app] %(levelname)s %(message)s",
+    datefmt="%H:%M:%S",
+)
+_log = logging.getLogger("solar_scout.app")
 
 # ── Konfiguration ─────────────────────────────────────────────────────────────
 
@@ -429,6 +437,7 @@ def page_scanner(user):
             found_count_ph.info(f"Hittade hittills: {len(found_leads)} solcellstak")
 
     anthr_key = ANTHROPIC_API_KEY if ai_available else None
+    _log.info("scan start mode=%s ai=%s max_leads=%s", mode, bool(anthr_key), max_leads)
     try:
         if mode == "Ort/stad (ange namn)":
             status_text.info("Söker upp ort och hämtar byggnadsdata från OSM (kan ta 20–60 s)...")
@@ -437,9 +446,11 @@ def page_scanner(user):
             status_text.info("Hämtar byggnadsdata från OSM (kan ta 20–60 s)...")
             leads = scan_bbox(south, west, north, east, GOOGLE_API_KEY or "", anthr_key, on_progress, mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads)
     except ValueError as e:
+        _log.error("scan ValueError: %s", e)
         st.error(str(e))
         return
     except Exception as e:
+        _log.error("scan Exception: %s", e, exc_info=True)
         st.error(f"Fel under scanning: {e}")
         return
 
@@ -449,6 +460,8 @@ def page_scanner(user):
 
     if not leads:
         st.warning("Inga solcellstak hittades i det valda området.")
+        with st.expander("🔍 Debug-info (felsökning)"):
+            st.caption("Kontrollera Railway-loggarna för detaljerad info. Vanliga orsaker: 1) OSM saknar solar-taggar för området 2) Inga residential_areas hittades 3) AI-nyckel saknas eller tog slut 4) Alla byggnader filtrerades som icke-villor.")
         return
 
     st.success(f"Scanning klar! Hittade {len(leads)} tak med solceller.")
