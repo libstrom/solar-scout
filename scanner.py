@@ -121,7 +121,10 @@ def scan_area_osm(south: float, west: float, north: float, east: float) -> list[
     );
     out center;
     """
-    elements = _overpass(query)
+    try:
+        elements = _overpass(query)
+    except Exception:
+        return []
     leads = []
     seen: set[str] = set()
     for el in elements:
