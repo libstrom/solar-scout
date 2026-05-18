@@ -145,18 +145,12 @@ def scan_area_osm(south: float, west: float, north: float, east: float) -> list[
             continue
         # Drop non-residential buildings (reningsverk, kyrkor, lager etc.)
         btype = tags.get("building", "")
-        if btype and btype in _NON_RESIDENTIAL_TYPES:
+        # Om building-taggen finns, kräv explicit villa-typ.
+        # "yes" och "residential" är för tvetydiga (BRF, skola, lager).
+        # Element utan building-tagg (roof:solar_panel-noder) accepteras —
+        # de sitter på ett tak och typen är okänd men trolig villa.
+        if btype and btype not in _VILLA_TYPES_OSM:
             continue
-        # Drop by amenity tag — catches building=yes + amenity=school etc.
-        amenity = tags.get("amenity", "")
-        if amenity in _NON_RESIDENTIAL_AMENITIES:
-            continue
-        # Drop multi-family buildings (BRF, hyreshus) via building:flats tag.
-        try:
-            if int(tags.get("building:flats", "0") or "0") > 1:
-                continue
-        except ValueError:
-            pass
         if el["type"] == "node":
             lat, lng = el["lat"], el["lon"]
         elif el["type"] == "way" and "center" in el:
@@ -188,10 +182,20 @@ _NON_RESIDENTIAL_AMENITIES = {
     "waste_transfer_station", "recycling",
 }
 
+# Explicit single-family building types accepted by the AI scanner (broad —
+# includes "yes" and "residential" since AI can see the building).
 _RESIDENTIAL_TYPES = (
     "house|detached|semidetached_house|terrace|bungalow|cabin|residential|"
     "static_caravan|farm|yes"
 )
+
+# Strict allowlist used by the OSM scanner, which cannot see the building.
+# Only accept tags that unambiguously mean "enfamiljshus". "yes" and
+# "residential" are excluded — too many BRFs and schools use them.
+_VILLA_TYPES_OSM = {
+    "house", "detached", "semidetached_house", "terrace",
+    "bungalow", "cabin", "static_caravan", "farm",
+}
 
 # Building tag values that are NEVER single-family homes — explicit deny-list
 # because Swedish OSM heavily uses "building=yes" for everything. Includes
@@ -754,7 +758,7 @@ def scan_buildings_ai(
 
 # ── Merge & deduplicate ────────────────────────────────────────────────────────
 
-def merge_leads(osm_leads: list[Lead], ai_leads: list[Lead], dedup_radius_m: int = 10) -> list[Lead]:
+def merge_leads(osm_leads: list[Lead], ai_leads: list[Lead], dedup_radius_m: int = 20) -> list[Lead]:
     """Merge OSM and AI leads, deduplicating by proximity.
 
     Two leads within dedup_radius_m metres of each other are treated as the
