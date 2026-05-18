@@ -151,6 +151,12 @@ def scan_area_osm(south: float, west: float, north: float, east: float) -> list[
         amenity = tags.get("amenity", "")
         if amenity in _NON_RESIDENTIAL_AMENITIES:
             continue
+        # Drop multi-family buildings (BRF, hyreshus) via building:flats tag.
+        try:
+            if int(tags.get("building:flats", "0") or "0") > 1:
+                continue
+        except ValueError:
+            pass
         if el["type"] == "node":
             lat, lng = el["lat"], el["lon"]
         elif el["type"] == "way" and "center" in el:
