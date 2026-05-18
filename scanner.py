@@ -551,6 +551,22 @@ def _fetch_mapbox(mapbox_key: str, lat: float, lng: float, zoom: int = ZOOM_BUIL
         return None
 
 
+def lm_wms_url(lat: float, lng: float, size_m: float = 80, width: int = 640, height: int = 480) -> str:
+    """Return a clickable Lantmäteriet WMS URL centred on (lat, lng). No API key required."""
+    d_lat = (size_m / 2) / 111_000
+    d_lng = d_lat / math.cos(math.radians(lat))
+    d_lat_h = d_lat * height / width
+    bbox = f"{lng - d_lng},{lat - d_lat_h},{lng + d_lng},{lat + d_lat_h}"
+    return (
+        "https://minkarta.lantmateriet.se/map/ortofoto"
+        "?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap"
+        "&LAYERS=Ortofoto_0.25,Ortofoto_0.16"
+        "&FORMAT=image/jpeg"
+        f"&WIDTH={width}&HEIGHT={height}"
+        f"&SRS=EPSG:4326&BBOX={bbox}"
+    )
+
+
 def _fetch_lm_wms(lat: float, lng: float, size_m: float = 18) -> bytes | None:
     """Lantmäteriet minkarta WMS — free, no key, high-res Swedish orthophoto."""
     d_lat = (size_m / 2) / 111_000
@@ -737,22 +753,43 @@ def _process_building(
     if not is_house:
         return None
 
+    if is_unsure:
+        # AI not certain — skip samtomt check (result unused for UNSURE), save for human review
+        address = building["address"]
+        if address and "," in address and not any(c.isalpha() for c in address):
+            try:
+                gmaps = googlemaps.Client(key=google_key)
+                rev = gmaps.reverse_geocode((lat, lng))
+                if rev:
+                    address = rev[0].get("formatted_address", address)
+            except Exception:
+                pass
+        return Lead(
+            lat=lat,
+            lng=lng,
+            address=address,
+            confidence=0.50,
+            source="ai",
+            tile_key=f"bld/{building['osm_id']}",
+            building_type=building.get("building_type", ""),
+            zoom=zoom,
+            samtomt_solar_extra=False,
+            solar_location="roof",
+            needs_review=True,
+            ai_reasoning=reasoning,
+            image_url=lm_wms_url(lat, lng),
+        )
+
     samtomt = _has_extra_solar_nearby(lat, lng)
     extra_solar = samtomt.get("extra_solar_found", False)
     villa_nearby = samtomt.get("villa_nearby", False)
 
     samtomt_solar_extra = False
     solar_location = "roof"
-    needs_review = False
-    confidence = 0.90
 
     if has_solar:
         if extra_solar:
             samtomt_solar_extra = True
-    elif is_unsure:
-        # AI not certain — save for human review instead of dropping
-        needs_review = True
-        confidence = 0.50
     else:
         if extra_solar and villa_nearby:
             samtomt_solar_extra = True
@@ -773,14 +810,14 @@ def _process_building(
         lat=lat,
         lng=lng,
         address=address,
-        confidence=confidence,
+        confidence=0.90,
         source="ai",
         tile_key=f"bld/{building['osm_id']}",
         building_type=building.get("building_type", ""),
         zoom=zoom,
         samtomt_solar_extra=samtomt_solar_extra,
         solar_location=solar_location,
-        needs_review=needs_review,
+        needs_review=False,
         ai_reasoning=reasoning,
         image_url=lm_wms_url(lat, lng),
     )
