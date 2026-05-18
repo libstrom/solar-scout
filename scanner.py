@@ -108,18 +108,25 @@ def _tags_to_address(tags: dict) -> str:
 
 
 def scan_area_osm(south: float, west: float, north: float, east: float) -> list[Lead]:
-    """Buildings already tagged with solar panels in OSM — instant, no AI cost."""
+    """Buildings already tagged with solar panels in OSM — instant, no AI cost.
+
+    Only returns elements that are plausibly rooftop residential solar:
+    - way/node with roof:solar_panel=yes  (most reliable — explicitly on a building roof)
+    - way/node with generator:source=solar AND a building=* tag (rooftop, not a solar farm)
+
+    Excluded intentionally:
+    - power=generator + generator:source=solar  → utility-scale solar farms (Sturup etc.)
+    - generator:source=solar without building=* → ground-mounted / unknown installation
+    """
     query = f"""
     [out:json][timeout:60];
     (
-      node["generator:source"="solar"]({south},{west},{north},{east});
-      way["generator:source"="solar"]({south},{west},{north},{east});
       node["roof:solar_panel"="yes"]({south},{west},{north},{east});
       way["roof:solar_panel"="yes"]({south},{west},{north},{east});
-      node["power"="generator"]["generator:source"="solar"]({south},{west},{north},{east});
-      way["power"="generator"]["generator:source"="solar"]({south},{west},{north},{east});
+      node["generator:source"="solar"]["building"]({south},{west},{north},{east});
+      way["generator:source"="solar"]["building"]({south},{west},{north},{east});
     );
-    out center;
+    out center tags;
     """
     try:
         elements = _overpass(query)
@@ -128,6 +135,14 @@ def scan_area_osm(south: float, west: float, north: float, east: float) -> list[
     leads = []
     seen: set[str] = set()
     for el in elements:
+        tags = el.get("tags", {})
+        # Keep only rooftop solar: either explicit roof tag, or generator tag
+        # on a building. Drop solar farms, street lights, ground-mounted arrays.
+        has_roof_tag = tags.get("roof:solar_panel") == "yes"
+        has_building = bool(tags.get("building"))
+        has_generator_solar = tags.get("generator:source") == "solar"
+        if not (has_roof_tag or (has_generator_solar and has_building)):
+            continue
         if el["type"] == "node":
             lat, lng = el["lat"], el["lon"]
         elif el["type"] == "way" and "center" in el:
@@ -138,7 +153,7 @@ def scan_area_osm(south: float, west: float, north: float, east: float) -> list[
         if key in seen:
             continue
         seen.add(key)
-        addr = _tags_to_address(el.get("tags", {}))
+        addr = _tags_to_address(tags)
         leads.append(Lead(lat=lat, lng=lng, address=addr or key,
                           confidence=1.0, source="osm", tile_key=key))
     return leads
