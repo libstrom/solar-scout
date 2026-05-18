@@ -1092,13 +1092,9 @@ def scan_bbox(
     lm_key: str | None = None,
     mapbox_key: str | None = None,
     max_leads: int | None = None,
+    phase_callback: Callable[[str, int], None] | None = None,
 ) -> list[Lead]:
-    """Scan a bounding box for buildings with solar panels.
-
-    Args:
-        max_leads: Stop scanning once this many confirmed leads are found.
-                   None means no limit.
-    """
+    """Scan a bounding box for buildings with solar panels."""
     tile_count = len(_bbox_tiles(south, west, north, east))
     if tile_count > 1000:
         raise ValueError(
@@ -1107,6 +1103,8 @@ def scan_bbox(
         )
 
     osm_leads = scan_area_osm(south, west, north, east)
+    if phase_callback:
+        phase_callback("osm_leads", len(osm_leads))
 
     if not anthropic_key:
         return osm_leads[:max_leads] if max_leads else osm_leads
@@ -1119,6 +1117,8 @@ def scan_bbox(
     osm_keys  = {f"{l.lat:.4f},{l.lng:.4f}" for l in osm_leads}
     buildings = [b for b in buildings
                  if f"{b['lat']:.4f},{b['lng']:.4f}" not in osm_keys]
+    if phase_callback:
+        phase_callback("buildings_found", len(buildings))
 
     remaining = None
     if max_leads is not None:
@@ -1129,4 +1129,6 @@ def scan_bbox(
         mapbox_key=mapbox_key, lm_key=lm_key,
         max_leads=remaining,
     )
+    if phase_callback:
+        phase_callback("ai_done", len(ai_leads))
     return merge_leads(osm_leads, ai_leads)
