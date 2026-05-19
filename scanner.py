@@ -781,6 +781,8 @@ def _analyze_building(
         "- Snow or frost patches (bright/white uniform areas — common in Nordic winter)\n"
         "- Eternite / grey fibre-cement tiles (smooth grey-brown surface, common on "
         "older Swedish houses — no module grid visible)\n"
+        "- Standing seam metal roofs (plåttak) — uniformly smooth with long parallel "
+        "ridges/seams running ridge-to-eave; NO distinct rectangular panel patches\n"
         "- Solar thermal collectors (solfångare) — long narrow strips with visible "
         "tube rows, unlike flat PV panels\n\n"
         "First, in ONE sentence describe the roof: shape, texture, and whether "
