@@ -125,8 +125,9 @@ def init_auth():
             access = cm.get("access_token")
             refresh = cm.get("refresh_token")
         if not access or not refresh:
-            if not st.session_state.get("_cookie_load_attempted"):
-                st.session_state["_cookie_load_attempted"] = True
+            attempts = st.session_state.get("_cookie_load_attempted", 0)
+            if attempts < 3:
+                st.session_state["_cookie_load_attempted"] = attempts + 1
                 st.rerun()
             return None
     st.session_state.pop("_cookie_load_attempted", None)
@@ -544,6 +545,38 @@ def page_paywall(user, lead_count: int = 0):
 ANTHROPIC_API_KEY = _secret("SOLAR_SCOUT_ANTHROPIC_KEY") or _secret("ANTHROPIC_API_KEY")
 
 
+def _lead_to_display_row(lead) -> dict:
+    return {
+        "Adress":    lead.address,
+        "Källa":     "OSM" if lead.source == "osm" else "AI",
+        "Konfidens": f"{lead.confidence:.0%}",
+        "Lat":       round(lead.lat, 5),
+        "Lng":       round(lead.lng, 5),
+    }
+
+
+def _lead_to_sb_row(lead) -> dict:
+    return {
+        "address":             lead.address,
+        "has_solar":           "Ja",
+        "air_to_air":          "False",
+        "air_to_water":        "False",
+        "notes":               f"Detekterad via {lead.source.upper()} (konfidens {lead.confidence:.0%})",
+        "google_search_url":   f"https://www.google.com/search?q=vem+bor+p%C3%A5+{urllib.parse.quote(lead.address)}",
+        "hitta_url":           f"https://www.hitta.se/s%C3%B6k?vad={urllib.parse.quote(lead.address)}",
+        "maps_url":            f"https://www.google.com/maps/search/?api=1&query={lead.lat},{lead.lng}",
+        "image_url":           getattr(lead, "image_url", ""),
+        "lat":                 lead.lat,
+        "lng":                 lead.lng,
+        "scan_source":         lead.source,
+        "building_type":       getattr(lead, "building_type", ""),
+        "samtomt_solar_extra": getattr(lead, "samtomt_solar_extra", False),
+        "solar_location":      getattr(lead, "solar_location", "roof"),
+        "needs_review":        getattr(lead, "needs_review", False),
+        "ai_reasoning":        getattr(lead, "ai_reasoning", ""),
+    }
+
+
 def page_scanner(user, profile: dict | None = None):
     st.subheader("AI Scanner — Hitta solcellstak automatiskt")
 
@@ -639,52 +672,93 @@ def page_scanner(user, profile: dict | None = None):
 
         from scanner import scan_city, scan_bbox, Lead
 
-        progress_bar  = st.progress(0.0, text="Startar...")
-        status_text   = st.empty()
+        progress_bar   = st.progress(0.0, text="Startar...")
+        status_text    = st.empty()
         found_leads: list[Lead] = []
         found_count_ph = st.empty()
         scan_debug: list[str] = []
+        scan_errors: list[str] = []
+        total_buildings_est = [0]
+        cumulative_done = [0]
 
         def on_progress(done: int, total: int, result):
-            pct = done / total if total else 1.0
-            progress_bar.progress(pct, text=f"Analyserar byggnad {done}/{total}...")
+            cumulative_done[0] += 1
+            n = cumulative_done[0]
+            known_total = total_buildings_est[0]
+            if known_total > 0:
+                frac = min(n / known_total, 0.97)
+            else:
+                # Unknown total — asymptotic: moves fast early, slows near 95 %
+                frac = min(0.02 + 0.93 * (1 - 1 / (1 + n / 15)), 0.97)
+            progress_bar.progress(frac, text=f"Analyserar byggnad {n}...")
             if result:
                 found_leads.append(result)
                 found_count_ph.info(f"Hittade hittills: {len(found_leads)} solcellstak")
+                # Progressive save — persists each AI lead immediately so a crash never loses data
+                if result.source == "ai":
+                    try:
+                        row = {**_lead_to_sb_row(result), "user_id": str(user.id)}
+                        get_supabase().table("scout_leads").insert(row).execute()
+                    except Exception as _ins_exc:
+                        _log.warning("progressive lead insert failed: %s", _ins_exc)
+                        scan_errors.append(f"DB-sparning misslyckades ({result.address}): {_ins_exc}")
 
         def on_phase(phase: str, count: int):
             if phase == "osm_leads":
                 scan_debug.append(f"OSM solar-taggade: {count}")
-            elif phase == "buildings_found":
-                scan_debug.append(f"Byggnader att AI-analysera: {count}")
+            elif phase in ("buildings_found", "area_buildings"):
+                total_buildings_est[0] += count
+                scan_debug.append(f"Byggnader att AI-analysera: {total_buildings_est[0]}")
                 if count == 0:
                     status_text.warning("Inga villabyggnader hittades i OSM för detta område.")
                 else:
-                    status_text.info(f"Hittade {count} byggnader — AI-analyserar nu (kan ta flera min)...")
+                    status_text.info(
+                        f"Hittade {total_buildings_est[0]} byggnader — AI-analyserar nu (kan ta flera min)..."
+                    )
             elif phase == "ai_done":
                 scan_debug.append(f"AI bekräftade solceller: {count}")
 
         anthr_key = ANTHROPIC_API_KEY if ai_available else None
         _log.info("scan start mode=%s ai=%s max_leads=%s", mode, bool(anthr_key), max_leads)
+        leads = None
+        scan_crashed = False
         try:
             if mode == "Ort/stad (ange namn)":
                 status_text.info("Söker upp ort och hämtar byggnadsdata från OSM (kan ta 20–60 s)...")
-                leads = scan_city(city_name, GOOGLE_API_KEY or "", anthr_key, on_progress, mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads)
+                leads = scan_city(
+                    city_name, GOOGLE_API_KEY or "", anthr_key, on_progress,
+                    mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads,
+                    phase_callback=on_phase,
+                )
             else:
                 status_text.info("Hämtar byggnadsdata från OSM (kan ta 20–60 s)...")
-                leads = scan_bbox(south, west, north, east, GOOGLE_API_KEY or "", anthr_key, on_progress, mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads, phase_callback=on_phase)
+                leads = scan_bbox(
+                    south, west, north, east, GOOGLE_API_KEY or "", anthr_key, on_progress,
+                    mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads, phase_callback=on_phase,
+                )
         except ValueError as e:
             _log.error("scan ValueError: %s", e)
             st.error(str(e))
             return
         except Exception as e:
             _log.error("scan Exception: %s", e, exc_info=True)
-            st.error(f"Fel under scanning: {e}")
-            return
+            scan_crashed = True
+            scan_errors.append(f"Scanning avbröts oväntat: {e}")
 
         progress_bar.progress(1.0, text="Klar!")
         status_text.empty()
         found_count_ph.empty()
+
+        # On crash: fall back to the AI leads already saved progressively
+        if scan_crashed:
+            if not found_leads:
+                st.error("Scanning kraschade och inga leads hittades. Se felloggen nedan.")
+                with st.expander("Felllogg"):
+                    for err in scan_errors:
+                        st.caption(f"• {err}")
+                return
+            leads = found_leads
+            st.warning(f"⚠️ Scanning avbröts men {len(found_leads)} AI-leads är redan sparade i Leads-fliken.")
 
         if not leads:
             st.warning("Inga solcellstak hittades i det valda området.")
@@ -692,61 +766,40 @@ def page_scanner(user, profile: dict | None = None):
                 if scan_debug:
                     for line in scan_debug:
                         st.caption(f"• {line}")
-                    if any("Byggnader att AI-analysera: 0" in l for l in scan_debug):
-                        st.info("Inga villabyggnader hittades av OSM. Prova ett tätare villaområde, eller ett område med fler OSM-taggade hus.")
+                    if any("Byggnader att AI-analysera: 0" in l or "area_buildings" in l for l in scan_debug):
+                        st.info("Inga villabyggnader hittades av OSM. Prova ett tätare villaområde.")
                     elif any("AI bekräftade solceller: 0" in l for l in scan_debug):
-                        st.info("AI analyserade byggnader men hittade inga solceller. Antingen har husen inga solpaneler, eller så är bildkvaliteten för låg.")
+                        st.info("AI analyserade byggnader men hittade inga solceller.")
                 else:
-                    st.caption("Kontrollera Railway-loggarna. Möjliga orsaker: AI-nyckel saknas, Overpass-timeout, eller alla byggnader filtrerades.")
+                    st.caption("Möjliga orsaker: AI-nyckel saknas, Overpass-timeout, eller alla byggnader filtrerades.")
             return
 
-        display_rows = []
-        sb_rows = []
-        for lead in leads:
-            display_rows.append({
-                "Adress":    lead.address,
-                "Källa":     "OSM" if lead.source == "osm" else "AI",
-                "Konfidens": f"{lead.confidence:.0%}",
-                "Lat":       round(lead.lat, 5),
-                "Lng":       round(lead.lng, 5),
-            })
-            sb_rows.append({
-                "address":             lead.address,
-                "has_solar":           "Ja",
-                "air_to_air":          "False",
-                "air_to_water":        "False",
-                "notes":               f"Detekterad via {lead.source.upper()} (konfidens {lead.confidence:.0%})",
-                "google_search_url":   f"https://www.google.com/search?q=vem+bor+p%C3%A5+{urllib.parse.quote(lead.address)}",
-                "hitta_url":           f"https://www.hitta.se/s%C3%B6k?vad={urllib.parse.quote(lead.address)}",
-                "maps_url":            f"https://www.google.com/maps/search/?api=1&query={lead.lat},{lead.lng}",
-                "image_url":           getattr(lead, "image_url", ""),
-                "lat":                 lead.lat,
-                "lng":                 lead.lng,
-                "scan_source":         lead.source,
-                "building_type":       getattr(lead, "building_type", ""),
-                "samtomt_solar_extra": getattr(lead, "samtomt_solar_extra", False),
-                "solar_location":      getattr(lead, "solar_location", "roof"),
-                "needs_review":        getattr(lead, "needs_review", False),
-                "ai_reasoning":        getattr(lead, "ai_reasoning", ""),
-            })
+        display_rows = [_lead_to_display_row(l) for l in leads]
+        sb_rows      = [_lead_to_sb_row(l) for l in leads]
 
-        # Persist results in session_state so they survive button clicks
-        # Auto-spara leads direkt till databasen så de överlever sidnavigation
+        # Save OSM leads now (AI leads were already saved progressively in on_progress)
         sb_client = get_supabase()
-        auto_saved = 0
-        for row in sb_rows:
-            data = {k: v for k, v in row.items()}
-            data["user_id"] = str(user.id)
-            try:
-                sb_client.table("scout_leads").insert(data).execute()
-                auto_saved += 1
-            except Exception as exc:
-                _log.warning("lead insert failed: %s", exc)
-        st.session_state["scanner_sb_rows"]    = sb_rows
+        osm_saved = 0
+        for lead in leads:
+            if lead.source != "ai":
+                try:
+                    sb_client.table("scout_leads").insert(
+                        {**_lead_to_sb_row(lead), "user_id": str(user.id)}
+                    ).execute()
+                    osm_saved += 1
+                except Exception as exc:
+                    _log.warning("osm lead insert failed: %s", exc)
+
+        _log.info("scan done: %d total leads (%d AI progressive, %d OSM saved) for user %s",
+                  len(leads), len(found_leads), osm_saved, user.id)
+        st.session_state["scanner_sb_rows"]      = sb_rows
         st.session_state["scanner_display_rows"] = display_rows
-        st.session_state["scanner_saved"]       = True
-        if auto_saved:
-            _log.info("auto-saved %d leads for user %s", auto_saved, user.id)
+        st.session_state["scanner_saved"]        = True
+
+        if scan_errors:
+            with st.expander(f"⚠️ {len(scan_errors)} fel under scanning (leads sparades ändå)"):
+                for err in scan_errors:
+                    st.caption(f"• {err}")
 
     # ── Show results (persisted across reruns) ────────────────────────────────
     sb_rows      = st.session_state.get("scanner_sb_rows")
@@ -1086,16 +1139,32 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
         col_img, col_info = st.columns([1, 1])
 
         with col_img:
-            lat, lng = row.get("lat"), row.get("lng")
-            if lat and lng and MAPBOX_TOKEN:
-                img_url = (
-                    f"https://api.mapbox.com/styles/v1/mapbox/satellite-v9/static"
-                    f"/{lng},{lat},20/400x300"
-                    f"?access_token={MAPBOX_TOKEN}"
-                )
-                st.image(img_url, use_container_width=True)
-            else:
-                st.caption("(Ingen bild — Mapbox-nyckel saknas)")
+            img_shown = False
+            stored_url = row.get("image_url", "")
+            if stored_url:
+                try:
+                    st.image(stored_url, use_container_width=True)
+                    img_shown = True
+                except Exception:
+                    pass
+            if not img_shown:
+                lat, lng = row.get("lat"), row.get("lng")
+                if lat and lng and MAPBOX_TOKEN:
+                    st.image(
+                        f"https://api.mapbox.com/styles/v1/mapbox/satellite-v9/static"
+                        f"/{lng},{lat},20/400x300?access_token={MAPBOX_TOKEN}",
+                        use_container_width=True,
+                    )
+                elif lat and lng:
+                    try:
+                        from scanner import _fetch_lm_wms
+                        img_bytes = _fetch_lm_wms(lat, lng)
+                        if img_bytes:
+                            st.image(img_bytes, use_container_width=True)
+                        else:
+                            st.caption("(Bild ej tillgänglig)")
+                    except Exception:
+                        st.caption("(Bild ej tillgänglig)")
 
         with col_info:
             st.markdown(f"**{row.get('address', '–')}**")

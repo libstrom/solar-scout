@@ -2,6 +2,9 @@
   "plugins": [
     "../.claude-plugin/plugin.json"
   ],
+  "enabledPlugins": {
+    "superpowers@claude-plugins-official": true
+  },
   "permissions": {
     "defaultMode": "bypassPermissions"
   },
