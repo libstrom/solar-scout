@@ -54,7 +54,7 @@ def test_do_login_sets_access_token_cookie():
     sb, _ = _make_supabase(access="AT-abc")
     cm = _make_cookie_mock()
 
-    with patch("app.get_supabase", return_value=sb), \
+    with patch("app.create_client", return_value=sb), \
          patch("app._get_cookie_manager", return_value=cm):
         app.do_login("test@example.com", "pass")
 
@@ -66,7 +66,7 @@ def test_do_login_sets_refresh_token_cookie():
     sb, _ = _make_supabase(refresh="RT-xyz")
     cm = _make_cookie_mock()
 
-    with patch("app.get_supabase", return_value=sb), \
+    with patch("app.create_client", return_value=sb), \
          patch("app._get_cookie_manager", return_value=cm):
         app.do_login("test@example.com", "pass")
 
