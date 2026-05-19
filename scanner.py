@@ -488,13 +488,20 @@ _LM_ZOOM     = 19   # max zoom for LM open ortofoto (3x3 tiles → ~95m × 95m v
 # Few-shot ground-truth buildings (verified by user, Malmö 2026-05-19).
 # Loaded once per scan session from LM WMS and sent as multi-turn examples.
 _FEW_SHOT_COORDS = [
-    (55.5705978, 13.0378985, "solar_yes"),  # Risholmsgatan 8
-    (55.5764531, 13.0743366, "solar_no"),   # Remontgatan 41
+    (55.5705978, 13.0378985, "solar_yes"),   # Risholmsgatan 8, Malmö — panels clearly visible
+    (55.5750780, 13.0707577, "solar_yes_2"), # Skimmelgatan 22, Malmö — second positive example
+    (55.5764531, 13.0743366, "solar_no"),    # Remontgatan 41, Malmö — clean negative
 ]
 _FEW_SHOT_VERDICTS = {
     "solar_yes": (
         "The roof shows a rectangular section of smooth, uniform dark panels that clearly "
         "contrast against the surrounding coarser tile texture — typical PV array from above.\n\n"
+        "HOUSE=YES\nSOLAR=YES"
+    ),
+    "solar_yes_2": (
+        "A distinct rectangular patch with a smoother, more uniform surface is visible on "
+        "part of the roof, set apart from the surrounding textured tile material — "
+        "consistent with a photovoltaic array.\n\n"
         "HOUSE=YES\nSOLAR=YES"
     ),
     "solar_no": (
@@ -698,7 +705,12 @@ def _analyze_building(
         "- Dark clay tiles (tegelpannor), dark uniform papp/bitumen/EPDM roofs\n"
         "- Any dark uniform roof surface WITHOUT visible rectangular patch contrast\n"
         "- Shadows cast on rooftops\n"
-        "- Skylights or dormer windows\n\n"
+        "- Skylights or dormer windows\n"
+        "- Snow or frost patches (bright/white uniform areas — common in Nordic winter)\n"
+        "- Eternite / grey fibre-cement tiles (smooth grey-brown surface, common on "
+        "older Swedish houses — no module grid visible)\n"
+        "- Solar thermal collectors (solfångare) — long narrow strips with visible "
+        "tube rows, unlike flat PV panels\n\n"
         "First, in ONE sentence describe the roof: shape, texture, and whether "
         "you see any smooth rectangular patches that contrast with adjacent tiles.\n\n"
         "Then commit to a verdict:\n"
