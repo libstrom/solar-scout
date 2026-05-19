@@ -601,7 +601,7 @@ def page_scanner(user, profile: dict | None = None):
     if mode == "Ort/stad (ange namn)":
         city_name = st.text_input(
             "Ort eller stad:",
-            placeholder="t.ex. Helsingborg, Landskrona",
+            placeholder="t.ex. Nässjö, Jönköping, Eksjö, Vetlanda",
         )
     else:
         try:
@@ -609,7 +609,7 @@ def page_scanner(user, profile: dict | None = None):
             import folium
             from folium.plugins import Draw
 
-            m = folium.Map(location=[56.0, 13.0], zoom_start=13)
+            m = folium.Map(location=[57.65, 14.70], zoom_start=13)  # Nässjö
             Draw(
                 draw_options={
                     "rectangle": True,
