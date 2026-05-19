@@ -674,6 +674,19 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
 
         from scanner import scan_city, scan_bbox, Lead
 
+        # Fetch already-scanned tile_keys for this user to skip duplicates
+        try:
+            _existing = get_supabase().table("scout_leads").select("tile_key").eq(
+                "user_id", str(user.id)
+            ).execute()
+            _skip_tile_keys = frozenset(
+                r["tile_key"] for r in (_existing.data or []) if r.get("tile_key")
+            )
+            _log.info("scan dedup: %d existing tile_keys", len(_skip_tile_keys))
+        except Exception as _e:
+            _log.warning("scan dedup fetch failed: %s", _e)
+            _skip_tile_keys = frozenset()
+
         progress_bar   = st.progress(0.0, text="Startar...")
         status_text    = st.empty()
         found_leads: list[Lead] = []
@@ -733,13 +746,14 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                 leads = scan_city(
                     city_name, GOOGLE_API_KEY or "", anthr_key, on_progress,
                     mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads,
-                    phase_callback=on_phase,
+                    phase_callback=on_phase, skip_tile_keys=_skip_tile_keys,
                 )
             else:
                 status_text.info("Hämtar byggnadsdata från OSM (kan ta 20–60 s)...")
                 leads = scan_bbox(
                     south, west, north, east, GOOGLE_API_KEY or "", anthr_key, on_progress,
-                    mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads, phase_callback=on_phase,
+                    mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads,
+                    phase_callback=on_phase, skip_tile_keys=_skip_tile_keys,
                 )
         except ValueError as e:
             _log.error("scan ValueError: %s", e)

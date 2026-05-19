@@ -546,7 +546,7 @@ def _lm_tile_url(token: str, layer: str, z: int, x: int, y: int) -> str:
 
 def _fetch_lantmateriet(lm_key: str, lat: float, lng: float, layer: str = _LM_LAYERS[0]) -> bytes | None:
     """Fetch 3×3 tile grid from Lantmäteriet ortofoto and return a 640×640 PNG."""
-    if not _PIL_AVAILABLE:
+    if not _ENHANCE_AVAILABLE:
         return None
     cx, cy = _lat_lng_to_tile(lat, lng, _LM_ZOOM)
     canvas = _PILImage.new("RGB", (768, 768), (80, 80, 80))
@@ -667,7 +667,7 @@ def _fetch_satellite(
     lm_layer: str = _LM_LAYERS[0],
 ) -> bytes | None:
     # Priority: official LM API → free minkarta WMS → Mapbox → Google
-    if lm_key and _PIL_AVAILABLE:
+    if lm_key and _ENHANCE_AVAILABLE:
         img = _fetch_lantmateriet(lm_key, lat, lng, layer=lm_layer)
         if img:
             _log.debug("_fetch_satellite source=lm_tile lat=%s lng=%s", lat, lng)
@@ -854,9 +854,14 @@ def _process_building(
     lm_key: str | None = None,
     lm_layer: str = _LM_LAYERS[0],
     few_shot: list[tuple[str, str]] | None = None,
+    skip_tile_keys: frozenset[str] = frozenset(),
 ) -> Lead | None:
     lat, lng = building["lat"], building["lng"]
     zoom = building.get("zoom", ZOOM_BUILDING)
+    tile_key = f"bld/{building['osm_id']}"
+    if tile_key in skip_tile_keys:
+        _log.debug("_process_building skip duplicate tile_key=%s", tile_key)
+        return None
     img = _fetch_satellite(google_key, lat, lng, zoom=zoom, mapbox_key=mapbox_key, lm_key=lm_key, lm_layer=lm_layer)
     if img is None:
         return None
@@ -944,6 +949,7 @@ def scan_buildings_ai(
     lm_key: str | None = None,
     max_leads: int | None = None,
     few_shot: list[tuple[str, str]] | None = None,
+    skip_tile_keys: frozenset[str] = frozenset(),
 ) -> list[Lead]:
     """Run Claude Vision on each OSM building centroid.
 
@@ -965,7 +971,7 @@ def scan_buildings_ai(
 
     # Probe which LM layer works once up front to avoid per-tile probing
     lm_layer = _LM_LAYERS[0]
-    if lm_key and _PIL_AVAILABLE:
+    if lm_key and _ENHANCE_AVAILABLE:
         probed = _probe_lm_layer(lm_key)
         if probed:
             lm_layer = probed
@@ -980,7 +986,7 @@ def scan_buildings_ai(
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
-            pool.submit(_process_building, b, google_key, client, mapbox_key, lm_key, lm_layer, few_shot): b
+            pool.submit(_process_building, b, google_key, client, mapbox_key, lm_key, lm_layer, few_shot, skip_tile_keys): b
             for b in buildings
         }
         done = 0
@@ -1101,6 +1107,7 @@ def scan_city(
     mapbox_key: str | None = None,
     max_leads: int | None = None,
     phase_callback: Callable[[str, int], None] | None = None,
+    skip_tile_keys: frozenset[str] = frozenset(),
 ) -> list[Lead]:
     """Scan a city for buildings with solar panels.
 
@@ -1188,6 +1195,7 @@ def scan_city(
                 buildings, google_key, anthropic_key, on_progress,
                 mapbox_key=mapbox_key, lm_key=lm_key,
                 max_leads=remaining, few_shot=few_shot,
+                skip_tile_keys=skip_tile_keys,
             )
             _log.info("scan_city area_leads=%d", len(area_leads))
             all_ai_leads.extend(area_leads)
@@ -1212,6 +1220,7 @@ def scan_city(
             buildings, google_key, anthropic_key, on_progress,
             mapbox_key=mapbox_key, lm_key=lm_key,
             max_leads=remaining, few_shot=few_shot,
+            skip_tile_keys=skip_tile_keys,
         )
 
     merged = merge_leads(osm_leads, all_ai_leads)
@@ -1232,6 +1241,7 @@ def scan_bbox(
     mapbox_key: str | None = None,
     max_leads: int | None = None,
     phase_callback: Callable[[str, int], None] | None = None,
+    skip_tile_keys: frozenset[str] = frozenset(),
 ) -> list[Lead]:
     """Scan a bounding box for buildings with solar panels."""
     tile_count = len(_bbox_tiles(south, west, north, east))
@@ -1271,6 +1281,7 @@ def scan_bbox(
         buildings, google_key, anthropic_key, on_progress,
         mapbox_key=mapbox_key, lm_key=lm_key,
         max_leads=remaining, few_shot=few_shot,
+        skip_tile_keys=skip_tile_keys,
     )
     if phase_callback:
         phase_callback("ai_done", len(ai_leads))
