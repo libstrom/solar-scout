@@ -20,6 +20,7 @@ import logging
 import httpx
 import googlemaps
 import anthropic
+import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Callable
@@ -484,6 +485,25 @@ _LM_SERVICE  = "ortofoto-ccby"
 _LM_LAYERS   = ["Ortofoto_0.25", "orto", "ortofoto"]
 _LM_ZOOM     = 19   # max zoom for LM open ortofoto (3x3 tiles → ~95m × 95m view)
 
+# Few-shot ground-truth buildings (verified by user, Malmö 2026-05-19).
+# Loaded once per scan session from LM WMS and sent as multi-turn examples.
+_FEW_SHOT_COORDS = [
+    (55.5705978, 13.0378985, "solar_yes"),  # Risholmsgatan 8
+    (55.5764531, 13.0743366, "solar_no"),   # Remontgatan 41
+]
+_FEW_SHOT_VERDICTS = {
+    "solar_yes": (
+        "The roof shows a rectangular section of smooth, uniform dark panels that clearly "
+        "contrast against the surrounding coarser tile texture — typical PV array from above.\n\n"
+        "HOUSE=YES\nSOLAR=YES"
+    ),
+    "solar_no": (
+        "Uniform roof surface with consistent texture throughout — no smooth rectangular "
+        "patches or contrast areas visible.\n\n"
+        "HOUSE=YES\nSOLAR=NO"
+    ),
+}
+
 
 def _lm_tile_url(token: str, layer: str, z: int, x: int, y: int) -> str:
     # WMTS order: TileMatrix / TileRow / TileCol  →  z / y / x
@@ -588,6 +608,24 @@ def _fetch_lm_wms(lat: float, lng: float, size_m: float = 18) -> bytes | None:
     return None
 
 
+def _load_few_shot_images() -> list[tuple[str, str]]:
+    """Download few-shot examples from LM WMS once per session.
+
+    Returns list of (b64_jpeg, verdict_text). Returns [] if any download fails
+    so callers degrade gracefully to text-only prompts.
+    """
+    examples = []
+    for lat, lng, label in _FEW_SHOT_COORDS:
+        img = _fetch_lm_wms(lat, lng)
+        if img is None:
+            _log.warning("few-shot download failed for %s — disabling few-shot", label)
+            return []
+        b64 = base64.standard_b64encode(img).decode()
+        examples.append((b64, _FEW_SHOT_VERDICTS[label]))
+    _log.info("few-shot examples loaded: %d", len(examples))
+    return examples
+
+
 def _fetch_satellite(
     google_key: str,
     lat: float,
@@ -627,7 +665,11 @@ def _fetch_satellite(
         return None
 
 
-def _analyze_building(client: anthropic.Anthropic, img_bytes: bytes) -> tuple[bool, bool, bool, str]:
+def _analyze_building(
+    client: anthropic.Anthropic,
+    img_bytes: bytes,
+    few_shot: list[tuple[str, str]] | None = None,
+) -> tuple[bool, bool, bool, str]:
     """
     Returns (is_residential_house, has_solar_panels, is_unsure, reasoning).
 
@@ -635,55 +677,73 @@ def _analyze_building(client: anthropic.Anthropic, img_bytes: bytes) -> tuple[bo
     confirm. These become needs_review=True leads surfaced in the review queue.
     """
     b64 = base64.standard_b64encode(img_bytes).decode()
+    instruction = (
+        "Swedish aerial orthophoto, ~50m wide, top-down view.\n\n"
+        "Look at the structure occupying the CENTRE of the image. Answer:\n\n"
+        "Q1 — Is the central structure a single-family residential home "
+        "(villa, parhus, radhus, fritidshus)? It must NOT be: carport, "
+        "parking shed, garage, barn, industrial building, warehouse, "
+        "church, school, kiosk, construction site, or bare ground.\n\n"
+        "Q2 — Only if Q1=YES: does its roof have photovoltaic solar panels?\n\n"
+        "Solar PV from directly above appears as:\n"
+        "- RECTANGULAR FLAT PATCHES on the roof that are SMOOTHER and more "
+        "UNIFORM than the bumpy texture of surrounding clay tiles or asphalt "
+        "shingles. The SMOOTHNESS CONTRAST vs adjacent roof material is the "
+        "primary signal — if you cannot see a distinctly smoother patch "
+        "against the surrounding roof texture, say SOLAR=NO.\n"
+        "- Colour can vary: dark blue, black, charcoal, blue-grey, or "
+        "mirror-bright reflections.\n"
+        "- Supporting signal when visible: regular grid lines / module seams.\n\n"
+        "CRITICAL — these are NOT solar panels:\n"
+        "- Dark clay tiles (tegelpannor), dark uniform papp/bitumen/EPDM roofs\n"
+        "- Any dark uniform roof surface WITHOUT visible rectangular patch contrast\n"
+        "- Shadows cast on rooftops\n"
+        "- Skylights or dormer windows\n\n"
+        "First, in ONE sentence describe the roof: shape, texture, and whether "
+        "you see any smooth rectangular patches that contrast with adjacent tiles.\n\n"
+        "Then commit to a verdict:\n"
+        "- SOLAR=YES   — clearly unambiguous rectangular smooth area, visibly "
+        "different in texture from adjacent roof material. High confidence only.\n"
+        "- SOLAR=UNSURE — something that COULD be panels but image quality, "
+        "shadow, or angle makes you uncertain. Use this instead of guessing.\n"
+        "- SOLAR=NO    — no panels visible, or surface is dark tiles/EPDM/felt/"
+        "metal/asphalt/skylights/ambiguous. DEFAULT when uncertain.\n\n"
+        "End with exactly two lines, nothing after:\n"
+        "HOUSE=YES or HOUSE=NO\n"
+        "SOLAR=YES or SOLAR=UNSURE or SOLAR=NO\n\n"
+        "If HOUSE=NO, set SOLAR=NO."
+    )
     try:
+        if few_shot:
+            msgs: list[dict] = []
+            for ex_b64, verdict in few_shot:
+                msgs.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Analyze this Swedish aerial roof image:"},
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": ex_b64}},
+                    ],
+                })
+                msgs.append({"role": "assistant", "content": verdict})
+            msgs.append({
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
+                    {"type": "text", "text": instruction},
+                ],
+            })
+        else:
+            msgs = [{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
+                    {"type": "text", "text": instruction},
+                ],
+            }]
         msg = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=220,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {"type": "base64", "media_type": "image/jpeg", "data": b64},
-                    },
-                    {
-                        "type": "text",
-                        "text": (
-                            "Swedish aerial orthophoto, ~50m wide, top-down view.\n\n"
-                            "Look at the structure occupying the CENTRE of the image. Answer:\n\n"
-                            "Q1 — Is the central structure a single-family residential home "
-                            "(villa, parhus, radhus, fritidshus)? It must NOT be: carport, "
-                            "parking shed, garage, barn, industrial building, warehouse, "
-                            "church, school, kiosk, construction site, or bare ground.\n\n"
-                            "Q2 — Only if Q1=YES: does its roof have photovoltaic solar panels?\n\n"
-                            "Solar PV from directly above appears as:\n"
-                            "- RECTANGULAR FLAT PATCHES on the roof that are SMOOTHER and more "
-                            "UNIFORM than the bumpy texture of surrounding clay tiles or asphalt "
-                            "shingles. This is the primary signal — even when grid lines between "
-                            "individual modules are too thin to see in compressed imagery, the "
-                            "smoothness contrast remains visible.\n"
-                            "- Colour can vary with sun angle: dark blue, black, charcoal, "
-                            "lighter blue-grey, brownish, or mirror-bright reflections.\n"
-                            "- Installation may be a partial array (one or several rectangles "
-                            "on part of the roof) OR cover an entire south-facing slope.\n"
-                            "- Supporting signal when visible: regular grid lines / module seams.\n\n"
-                            "First, in ONE sentence describe the roof: shape, texture, and any "
-                            "rectangular patches or unusual smooth areas you notice.\n\n"
-                            "Then commit to a verdict:\n"
-                            "- SOLAR=YES   — clearly visible rectangular smooth panels, distinctly "
-                            "different from surrounding roof, plausibly photovoltaic.\n"
-                            "- SOLAR=UNSURE — something that COULD be panels but image quality, "
-                            "shadow, or angle makes you uncertain. Use this instead of guessing.\n"
-                            "- SOLAR=NO    — no panels visible, or surface is EPDM/felt/metal/"
-                            "asphalt/skylights/ambiguous. Default when uncertain.\n\n"
-                            "End with exactly two lines, nothing after:\n"
-                            "HOUSE=YES or HOUSE=NO\n"
-                            "SOLAR=YES or SOLAR=UNSURE or SOLAR=NO\n\n"
-                            "If HOUSE=NO, set SOLAR=NO."
-                        ),
-                    },
-                ],
-            }],
+            messages=msgs,
         )
         raw = msg.content[0].text
         text = raw.upper()
@@ -697,7 +757,8 @@ def _analyze_building(client: anthropic.Anthropic, img_bytes: bytes) -> tuple[bo
             if line.strip():
                 reasoning = line.strip()
                 break
-        _log.debug("_analyze_building HOUSE=%s SOLAR=%s UNSURE=%s", is_house, has_solar, is_unsure)
+        _log.debug("_analyze_building HOUSE=%s SOLAR=%s UNSURE=%s few_shot=%s",
+                   is_house, has_solar, is_unsure, bool(few_shot))
         return is_house, has_solar, is_unsure, reasoning
     except Exception as exc:
         _log.error("_analyze_building API error: %s", exc)
@@ -711,13 +772,14 @@ def _process_building(
     mapbox_key: str | None = None,
     lm_key: str | None = None,
     lm_layer: str = _LM_LAYERS[0],
+    few_shot: list[tuple[str, str]] | None = None,
 ) -> Lead | None:
     lat, lng = building["lat"], building["lng"]
     zoom = building.get("zoom", ZOOM_BUILDING)
     img = _fetch_satellite(google_key, lat, lng, zoom=zoom, mapbox_key=mapbox_key, lm_key=lm_key, lm_layer=lm_layer)
     if img is None:
         return None
-    is_house, has_solar, is_unsure, reasoning = _analyze_building(anthropic_client, img)
+    is_house, has_solar, is_unsure, reasoning = _analyze_building(anthropic_client, img, few_shot=few_shot)
     if not is_house:
         return None
 
@@ -796,7 +858,7 @@ def scan_buildings_ai(
     google_key: str,
     anthropic_key: str,
     on_progress: Callable[[int, int, "Lead | None"], None] | None = None,
-    max_workers: int = 8,
+    max_workers: int = 4,
     mapbox_key: str | None = None,
     lm_key: str | None = None,
     max_leads: int | None = None,
@@ -823,16 +885,22 @@ def scan_buildings_ai(
         else:
             lm_key = None
 
+    # Load few-shot examples once — shared across all workers (read-only)
+    few_shot = _load_few_shot_images()
+
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
-            pool.submit(_process_building, b, google_key, client, mapbox_key, lm_key, lm_layer): b
+            pool.submit(_process_building, b, google_key, client, mapbox_key, lm_key, lm_layer, few_shot): b
             for b in buildings
         }
         done = 0
         for future in as_completed(futures):
             done += 1
             try:
-                result = future.result()
+                result = future.result(timeout=60)
+            except concurrent.futures.TimeoutError:
+                _log.warning("_process_building timed out after 60s, skipping")
+                result = None
             except Exception:
                 result = None
             if result:
