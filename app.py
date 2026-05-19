@@ -1139,16 +1139,32 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
         col_img, col_info = st.columns([1, 1])
 
         with col_img:
-            lat, lng = row.get("lat"), row.get("lng")
-            if lat and lng and MAPBOX_TOKEN:
-                img_url = (
-                    f"https://api.mapbox.com/styles/v1/mapbox/satellite-v9/static"
-                    f"/{lng},{lat},20/400x300"
-                    f"?access_token={MAPBOX_TOKEN}"
-                )
-                st.image(img_url, use_container_width=True)
-            else:
-                st.caption("(Ingen bild — Mapbox-nyckel saknas)")
+            img_shown = False
+            stored_url = row.get("image_url", "")
+            if stored_url:
+                try:
+                    st.image(stored_url, use_container_width=True)
+                    img_shown = True
+                except Exception:
+                    pass
+            if not img_shown:
+                lat, lng = row.get("lat"), row.get("lng")
+                if lat and lng and MAPBOX_TOKEN:
+                    st.image(
+                        f"https://api.mapbox.com/styles/v1/mapbox/satellite-v9/static"
+                        f"/{lng},{lat},20/400x300?access_token={MAPBOX_TOKEN}",
+                        use_container_width=True,
+                    )
+                elif lat and lng:
+                    try:
+                        from scanner import _fetch_lm_wms
+                        img_bytes = _fetch_lm_wms(lat, lng)
+                        if img_bytes:
+                            st.image(img_bytes, use_container_width=True)
+                        else:
+                            st.caption("(Bild ej tillgänglig)")
+                    except Exception:
+                        st.caption("(Bild ej tillgänglig)")
 
         with col_info:
             st.markdown(f"**{row.get('address', '–')}**")
