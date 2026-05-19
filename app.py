@@ -52,8 +52,8 @@ stripe.api_key = STRIPE_SECRET_KEY
 # Lantmäteriets CC-BY-villkor. Se docs/adr/0001-osm-odbl-csv.md för tolkning.
 CSV_ATTRIBUTION_HEADER = (
     "# Genererad av solar-scout · "
-    "Geodata © Lantmäteriet, CC-BY 4.0 · "
-    "Innehåller OSM-data © OpenStreetMap-bidragsgivare, ODbL 1.0\n"
+    "Geodata © Lantmäteriet, CC-BY 4.0\n"
+    "# Innehåller OSM-data © OpenStreetMap-bidragsgivare, ODbL 1.0\n"
     "# https://www.openstreetmap.org/copyright · "
     "https://creativecommons.org/licenses/by/4.0/\n"
 )
@@ -428,7 +428,7 @@ def page_auth():
                 sb.auth.reset_password_email(email, {"redirect_to": f"{APP_URL}?reset=true"})
                 st.success("Länk skickad! Kolla din e-post (även skräppost).")
             except Exception as e:
-                st.error(f"Fel: {e}")
+                st.error(_sv_error(e))
 
 
 def page_paywall(user, lead_count: int = 0):
@@ -853,14 +853,14 @@ def page_scout(user):
     try:
         gmaps = googlemaps.Client(key=GOOGLE_API_KEY)
     except Exception as e:
-        st.error(f"Google API-fel: {e}")
+        st.error(f"Google API-fel — kontrollera att GOOGLE_API_KEY är korrekt.")
         return
 
     with st.spinner("Söker adress..."):
         try:
             results = gmaps.geocode(search_query)
         except Exception as e:
-            st.error(f"Fel: {e}")
+            st.error("Adresssökning misslyckades — kontrollera din internetanslutning eller API-nyckel.")
             return
 
     if not results:
