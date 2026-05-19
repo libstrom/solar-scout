@@ -19,6 +19,7 @@ import time
 import logging
 import httpx
 import googlemaps
+from known_installations import ENSPECTA_INSTALLATIONS
 import anthropic
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -643,6 +644,19 @@ def _fetch_lm_wms(lat: float, lng: float, size_m: float = 18) -> bytes | None:
     return None
 
 
+def _is_existing_customer(lat: float, lng: float, radius_m: float = 30.0) -> bool:
+    """Return True if (lat, lng) is within radius_m metres of a known Enspecta installation."""
+    R = 6_371_000
+    lat_r = math.radians(lat)
+    for inst_lat, inst_lng, _ in ENSPECTA_INSTALLATIONS:
+        dlat = math.radians(inst_lat - lat)
+        dlng = math.radians(inst_lng - lng)
+        a = math.sin(dlat / 2) ** 2 + math.cos(lat_r) * math.cos(math.radians(inst_lat)) * math.sin(dlng / 2) ** 2
+        if R * 2 * math.asin(math.sqrt(a)) <= radius_m:
+            return True
+    return False
+
+
 def _fetch_street_view(google_key: str, lat: float, lng: float) -> bytes | None:
     """Fetch a Google Street View image for the given location.
 
@@ -913,6 +927,9 @@ def _process_building(
     tile_key = f"bld/{building['osm_id']}"
     if tile_key in skip_tile_keys:
         _log.debug("_process_building skip duplicate tile_key=%s", tile_key)
+        return None
+    if _is_existing_customer(lat, lng):
+        _log.debug("_process_building skip existing Enspecta customer lat=%s lng=%s", lat, lng)
         return None
     img = _fetch_satellite(google_key, lat, lng, zoom=zoom, mapbox_key=mapbox_key, lm_key=lm_key, lm_layer=lm_layer)
     if img is None:
