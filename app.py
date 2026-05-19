@@ -59,8 +59,19 @@ CSV_ATTRIBUTION_HEADER = (
 )
 
 @st.cache_resource
-def get_supabase() -> Client:
+def _anon_supabase() -> Client:
+    """Process-wide anon client — only for unauthenticated ops (login, signup)."""
     return create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+
+
+def get_supabase() -> Client:
+    """Return per-session authenticated Supabase client.
+
+    Each Streamlit session gets its own client with set_session() called once
+    in init_auth(). This prevents concurrent users from overwriting each
+    other's auth state on the shared cache_resource client.
+    """
+    return st.session_state.get("_sb_user_client") or _anon_supabase()
 
 
 def _get_cookie_manager():
@@ -96,17 +107,23 @@ def init_auth():
             return None
     st.session_state.pop("_cookie_load_attempted", None)
 
+    # Create a FRESH client per session — never mutate the shared _anon_supabase()
+    # client. This makes concurrent sessions (same or different accounts) safe.
+    user_sb = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
     try:
-        sb.auth.set_session(access, refresh)
-        return sb.auth.get_user().user
+        user_sb.auth.set_session(access, refresh)
+        user = user_sb.auth.get_user().user
+        st.session_state["_sb_user_client"] = user_sb
+        return user
     except Exception:
         pass
     # Token förmodligen expired — försök refresh
     try:
-        resp = sb.auth.refresh_session(refresh)
+        resp = user_sb.auth.refresh_session(refresh)
         if resp.session and resp.user:
             st.session_state["access_token"]  = resp.session.access_token
             st.session_state["refresh_token"] = resp.session.refresh_token
+            st.session_state["_sb_user_client"] = user_sb
             cm = _get_cookie_manager()
             if cm is not None:
                 cm.set("access_token", resp.session.access_token)
@@ -117,6 +134,7 @@ def init_auth():
     # Refresh failed → riktig logout
     st.session_state.pop("access_token", None)
     st.session_state.pop("refresh_token", None)
+    st.session_state.pop("_sb_user_client", None)
     cm = _get_cookie_manager()
     if cm is not None:
         cm.remove("access_token")
@@ -125,10 +143,12 @@ def init_auth():
 
 
 def do_login(email: str, password: str):
-    sb = get_supabase()
-    resp = sb.auth.sign_in_with_password({"email": email, "password": password})
-    st.session_state["access_token"]  = resp.session.access_token
-    st.session_state["refresh_token"] = resp.session.refresh_token
+    user_sb = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+    resp = user_sb.auth.sign_in_with_password({"email": email, "password": password})
+    user_sb.auth.set_session(resp.session.access_token, resp.session.refresh_token)
+    st.session_state["access_token"]    = resp.session.access_token
+    st.session_state["refresh_token"]   = resp.session.refresh_token
+    st.session_state["_sb_user_client"] = user_sb
     cm = _get_cookie_manager()
     if cm is not None:
         cm.set("access_token", resp.session.access_token)
@@ -155,6 +175,7 @@ def do_logout():
         pass
     st.session_state.pop("access_token", None)
     st.session_state.pop("refresh_token", None)
+    st.session_state.pop("_sb_user_client", None)
     cm = _get_cookie_manager()
     if cm is not None:
         cm.remove("access_token")

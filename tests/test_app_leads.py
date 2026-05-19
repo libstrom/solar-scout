@@ -70,8 +70,8 @@ def _make_supabase_mock(rows=None):
 
 
 def _inject(sb):
-    """Sätt sb som returvärde för app.get_supabase() och returnera sb."""
-    app.get_supabase.return_value = sb
+    """Ersätt app.get_supabase med en funktion som returnerar sb."""
+    app.get_supabase = lambda: sb
     return sb
 
 
