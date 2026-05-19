@@ -493,7 +493,8 @@ _LM_ZOOM     = 19   # max zoom for LM open ortofoto (3x3 tiles → ~95m × 95m v
 _FEW_SHOT_COORDS = [
     (55.5705978, 13.0378985, "solar_yes"),   # Risholmsgatan 8, Malmö — SE4 positive
     (57.6398006, 14.7055590, "solar_yes_3"), # Queckfeldtsgatan 17, Nässjö — SE3 positive
-    (55.5764531, 13.0743366, "solar_no"),    # Remontgatan 41, Malmö — clean negative
+    (55.5764531, 13.0743366, "solar_no"),    # Remontgatan 41, Malmö — SE4 negative
+    (57.6349444, 14.7103611, "solar_no_3"),  # Smålandsgatan 48, Nässjö — SE3 negative
 ]
 _FEW_SHOT_VERDICTS = {
     "solar_yes": (
@@ -529,6 +530,12 @@ _FEW_SHOT_VERDICTS = {
         "section that stands out from the surrounding textured tiles — consistent with a "
         "photovoltaic installation on the main roof slope.\n\n"
         "HOUSE=YES\nSOLAR=YES"
+    ),
+    "solar_no_3": (
+        "Swedish inland villa (Småland/Nässjö). Roof surface is uniformly textured throughout "
+        "— no smooth rectangular patch or contrast area distinguishable from the surrounding "
+        "tile material. No photovoltaic installation visible.\n\n"
+        "HOUSE=YES\nSOLAR=NO"
     ),
 }
 
