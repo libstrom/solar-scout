@@ -39,11 +39,6 @@ logging.basicConfig(
 )
 _log = logging.getLogger("solar_scout")
 
-try:
-    from PIL import Image as _PILImage
-    _PIL_AVAILABLE = True
-except ImportError:
-    _PIL_AVAILABLE = False
 
 
 @dataclass
