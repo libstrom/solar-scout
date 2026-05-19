@@ -792,14 +792,24 @@ def _analyze_building(
         "If HOUSE=NO, set SOLAR=NO."
     )
     try:
+        system_blocks: list[dict] = [
+            {"type": "text", "text": instruction, "cache_control": {"type": "ephemeral"}}
+        ]
         if few_shot:
             msgs: list[dict] = []
-            for ex_b64, verdict in few_shot:
+            last_idx = len(few_shot) - 1
+            for i, (ex_b64, verdict) in enumerate(few_shot):
+                img_block: dict = {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/jpeg", "data": ex_b64},
+                }
+                if i == last_idx:
+                    img_block["cache_control"] = {"type": "ephemeral"}
                 msgs.append({
                     "role": "user",
                     "content": [
                         {"type": "text", "text": "Analyze this Swedish aerial roof image:"},
-                        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": ex_b64}},
+                        img_block,
                     ],
                 })
                 msgs.append({"role": "assistant", "content": verdict})
@@ -807,7 +817,6 @@ def _analyze_building(
                 "role": "user",
                 "content": [
                     {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
-                    {"type": "text", "text": instruction},
                 ],
             })
         else:
@@ -815,12 +824,12 @@ def _analyze_building(
                 "role": "user",
                 "content": [
                     {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
-                    {"type": "text", "text": instruction},
                 ],
             }]
         msg = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=220,
+            system=system_blocks,
             messages=msgs,
         )
         raw = msg.content[0].text
