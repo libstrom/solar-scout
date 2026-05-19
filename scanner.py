@@ -25,6 +25,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Callable
 
+try:
+    import numpy as np
+    from PIL import Image as _PILImage
+    _ENHANCE_AVAILABLE = True
+except ImportError:
+    _ENHANCE_AVAILABLE = False
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [scanner] %(levelname)s %(message)s",
@@ -672,6 +679,48 @@ def _fetch_satellite(
         return None
 
 
+def _enhance_contrast(img_bytes: bytes) -> bytes:
+    """Boost image contrast via tile-based CLAHE on the Y channel (YCbCr).
+
+    Helps Claude distinguish smooth PV patches on overcast/flat Scandinavian
+    orthophotos. Falls back silently to original bytes if PIL/numpy absent.
+    """
+    if not _ENHANCE_AVAILABLE:
+        return img_bytes
+    try:
+        img = _PILImage.open(io.BytesIO(img_bytes)).convert("YCbCr")
+        y, cb, cr = img.split()
+        y_arr = np.array(y, dtype=np.uint8)
+
+        # Tile-based equalization — 4×4 grid, each tile equalised independently
+        h, w = y_arr.shape
+        tile_h, tile_w = h // 4, w // 4
+        out = np.empty_like(y_arr)
+        for ti in range(4):
+            for tj in range(4):
+                r0, r1 = ti * tile_h, (ti + 1) * tile_h if ti < 3 else h
+                c0, c1 = tj * tile_w, (tj + 1) * tile_w if tj < 3 else w
+                tile = y_arr[r0:r1, c0:c1]
+                hist, _ = np.histogram(tile.flatten(), 256, (0, 256))
+                cdf = hist.cumsum()
+                cdf_min = int(cdf[cdf > 0][0])
+                n = tile.size
+                lut = np.round(
+                    (cdf - cdf_min) / max(n - cdf_min, 1) * 255
+                ).clip(0, 255).astype(np.uint8)
+                out[r0:r1, c0:c1] = lut[tile]
+
+        # Blend: 60% CLAHE + 40% original to avoid over-sharpening
+        blended = (0.6 * out + 0.4 * y_arr).clip(0, 255).astype(np.uint8)
+        y_new = _PILImage.fromarray(blended, mode="L")
+        enhanced = _PILImage.merge("YCbCr", (y_new, cb, cr)).convert("RGB")
+        buf = io.BytesIO()
+        enhanced.save(buf, format="JPEG", quality=85)
+        return buf.getvalue()
+    except Exception:
+        return img_bytes
+
+
 def _analyze_building(
     client: anthropic.Anthropic,
     img_bytes: bytes,
@@ -683,6 +732,7 @@ def _analyze_building(
     is_unsure=True means SOLAR=UNSURE — AI sees possible panels but can't
     confirm. These become needs_review=True leads surfaced in the review queue.
     """
+    img_bytes = _enhance_contrast(img_bytes)
     b64 = base64.standard_b64encode(img_bytes).decode()
     instruction = (
         "Swedish aerial orthophoto, ~50m wide, top-down view.\n\n"
