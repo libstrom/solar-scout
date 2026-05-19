@@ -943,12 +943,18 @@ def scan_buildings_ai(
     mapbox_key: str | None = None,
     lm_key: str | None = None,
     max_leads: int | None = None,
+    few_shot: list[tuple[str, str]] | None = None,
 ) -> list[Lead]:
     """Run Claude Vision on each OSM building centroid.
 
     Args:
         max_leads: Stop processing once this many confirmed leads are found.
                    None means no limit.
+        few_shot: Pre-loaded few-shot examples as (b64_jpeg, verdict_text) pairs.
+                  If None, examples are loaded from LM WMS on first call.
+                  Pass a pre-loaded list to avoid redundant downloads when
+                  scan_buildings_ai is called multiple times per scan (e.g.
+                  once per residential area in scan_city).
     """
     if not buildings or not anthropic_key:
         return []
@@ -966,8 +972,11 @@ def scan_buildings_ai(
         else:
             lm_key = None
 
-    # Load few-shot examples once — shared across all workers (read-only)
-    few_shot = _load_few_shot_images()
+    # Load few-shot examples if not provided by caller.
+    # Callers that invoke scan_buildings_ai multiple times per scan (scan_city)
+    # should load once and pass the result here to avoid redundant WMS downloads.
+    if few_shot is None:
+        few_shot = _load_few_shot_images()
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
@@ -1133,6 +1142,11 @@ def scan_city(
     all_ai_leads: list[Lead] = []
     seen_building_ids: set[str] = set()
 
+    # Load few-shot examples once per full scan — shared across all residential
+    # areas so LM WMS is not hit 6× per area (N_areas × 6 images otherwise).
+    few_shot = _load_few_shot_images()
+    _log.info("scan_city few_shot=%d examples loaded", len(few_shot))
+
     # Query landuse=residential polygons within the city viewport
     residential_areas = _get_residential_areas(south, west, north, east)
     _log.info("scan_city residential_areas=%d", len(residential_areas))
@@ -1173,7 +1187,7 @@ def scan_city(
             area_leads = scan_buildings_ai(
                 buildings, google_key, anthropic_key, on_progress,
                 mapbox_key=mapbox_key, lm_key=lm_key,
-                max_leads=remaining,
+                max_leads=remaining, few_shot=few_shot,
             )
             _log.info("scan_city area_leads=%d", len(area_leads))
             all_ai_leads.extend(area_leads)
@@ -1197,7 +1211,7 @@ def scan_city(
         all_ai_leads = scan_buildings_ai(
             buildings, google_key, anthropic_key, on_progress,
             mapbox_key=mapbox_key, lm_key=lm_key,
-            max_leads=remaining,
+            max_leads=remaining, few_shot=few_shot,
         )
 
     merged = merge_leads(osm_leads, all_ai_leads)
@@ -1249,10 +1263,14 @@ def scan_bbox(
     if max_leads is not None:
         remaining = max_leads - len(osm_leads)
 
+    # Load few-shot images once per scan (not inside scan_buildings_ai) so the
+    # same 6 WMS requests are not repeated for every scan_buildings_ai call.
+    few_shot = _load_few_shot_images()
+
     ai_leads = scan_buildings_ai(
         buildings, google_key, anthropic_key, on_progress,
         mapbox_key=mapbox_key, lm_key=lm_key,
-        max_leads=remaining,
+        max_leads=remaining, few_shot=few_shot,
     )
     if phase_callback:
         phase_callback("ai_done", len(ai_leads))

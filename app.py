@@ -667,9 +667,10 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
             st.warning("Rita ett område på kartan först.")
             return
 
-        # Clear any previous scan results
+        # Clear any previous scan results and state flags
         st.session_state.pop("scanner_sb_rows", None)
         st.session_state.pop("scanner_display_rows", None)
+        st.session_state.pop("scanner_saved", None)
 
         from scanner import scan_city, scan_bbox, Lead
 
@@ -685,16 +686,10 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
         def on_progress(done: int, total: int, result):
             cumulative_done[0] += 1
             n = cumulative_done[0]
-            known_total = total_buildings_est[0]
-            if known_total > 0:
-                frac = min(n / known_total, 0.97)
-            else:
-                # Unknown total — asymptotic: moves fast early, slows near 95 %
-                frac = min(0.02 + 0.93 * (1 - 1 / (1 + n / 15)), 0.97)
-            progress_bar.progress(frac, text=f"Analyserar byggnad {n}...")
+            # Capture the lead first — progress_bar.progress() must not prevent
+            # this even if it raises (e.g. on a second scan in the same session).
             if result:
                 found_leads.append(result)
-                found_count_ph.info(f"Hittade hittills: {len(found_leads)} solcellstak")
                 # Progressive save — persists each AI lead immediately so a crash never loses data
                 if result.source == "ai":
                     try:
@@ -703,6 +698,15 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                     except Exception as _ins_exc:
                         _log.warning("progressive lead insert failed: %s", _ins_exc)
                         scan_errors.append(f"DB-sparning misslyckades ({result.address}): {_ins_exc}")
+            known_total = total_buildings_est[0]
+            if known_total > 0:
+                frac = min(n / known_total, 0.97)
+            else:
+                # Unknown total — asymptotic: moves fast early, slows near 95 %
+                frac = min(0.02 + 0.93 * (1 - 1 / (1 + n / 15)), 0.97)
+            progress_bar.progress(frac, text=f"Analyserar byggnad {n}...")
+            if result:
+                found_count_ph.info(f"Hittade hittills: {len(found_leads)} solcellstak")
 
         def on_phase(phase: str, count: int):
             if phase == "osm_leads":
