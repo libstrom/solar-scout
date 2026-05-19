@@ -577,7 +577,7 @@ def _lead_to_sb_row(lead) -> dict:
     }
 
 
-def page_scanner(user, profile: dict | None = None):
+def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
     st.subheader("AI Scanner — Hitta solcellstak automatiskt")
 
     mode = st.radio(
@@ -590,7 +590,8 @@ def page_scanner(user, profile: dict | None = None):
     credits = profile.get("credits_balance", 0) or 0
     on_credit_plan = (not is_admin(profile) and
                       profile.get("scout_subscription_status") != "active")
-    if on_credit_plan and credits == 0:
+    free_quota_remaining = lead_count < 10
+    if on_credit_plan and credits == 0 and not free_quota_remaining:
         st.warning("Du har inga credits kvar. Köp ett credit-pack för att scanna.")
         st.info("Gå till fliken **Konto** för att köpa credits.")
         return
@@ -1298,7 +1299,7 @@ def page_account(user, profile):
             st.rerun()
 
 
-def page_app(user, profile):
+def page_app(user, profile, lead_count: int = 0):
     with st.sidebar:
         st.markdown("## Scout")
         st.divider()
@@ -1340,7 +1341,7 @@ def page_app(user, profile):
     )
 
     with tab_scanner:
-        page_scanner(user, profile)
+        page_scanner(user, profile, lead_count)
 
     with tab_scout:
         page_scout(user)
@@ -1485,7 +1486,7 @@ def main():
         page_paywall(user, lead_count)
         return
 
-    page_app(user, profile)
+    page_app(user, profile, lead_count)
 
 
 if __name__ == "__main__":
