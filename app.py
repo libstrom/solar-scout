@@ -972,24 +972,39 @@ def page_review(user):
     st.markdown(f"### 🔍 Granska lead  &nbsp; <span style='color:grey;font-size:0.85em'>{total} kvar</span>", unsafe_allow_html=True)
     st.progress(0.0 if total == 0 else (1 - total / (total + done)))
 
-    # Satellite image via LM WMS (free, no storage limit)
+    # Satellite + Street View sida vid sida
     lat, lng = lead.get("lat"), lead.get("lng")
     if lat and lng:
-        try:
-            from scanner import _fetch_lm_wms
-            img_bytes = _fetch_lm_wms(lat, lng)
-            if img_bytes:
-                st.image(img_bytes, use_container_width=True)
-            elif MAPBOX_TOKEN:
-                st.image(
-                    f"https://api.mapbox.com/styles/v1/mapbox/satellite-v9/static"
-                    f"/{lng},{lat},20/640x480?access_token={MAPBOX_TOKEN}",
-                    use_container_width=True,
+        col_sat, col_sv = st.columns(2)
+        with col_sat:
+            st.caption("🛰 Ortofoto")
+            try:
+                from scanner import _fetch_lm_wms
+                img_bytes = _fetch_lm_wms(lat, lng)
+                if img_bytes:
+                    st.image(img_bytes, use_container_width=True)
+                elif MAPBOX_TOKEN:
+                    st.image(
+                        f"https://api.mapbox.com/styles/v1/mapbox/satellite-v9/static"
+                        f"/{lng},{lat},20/640x480?access_token={MAPBOX_TOKEN}",
+                        use_container_width=True,
+                    )
+                else:
+                    st.caption("(Bild ej tillgänglig)")
+            except Exception:
+                st.caption("(Kunde inte hämta bild)")
+        with col_sv:
+            st.caption("🚗 Street View")
+            if GOOGLE_API_KEY:
+                sv_url = (
+                    f"https://maps.googleapis.com/maps/api/streetview"
+                    f"?size=640x480&location={lat},{lng}"
+                    f"&pitch=20&source=outdoor&return_error_code=true"
+                    f"&key={GOOGLE_API_KEY}"
                 )
+                st.image(sv_url, use_container_width=True)
             else:
-                st.caption("(Bild ej tillgänglig)")
-        except Exception:
-            st.caption("(Kunde inte hämta bild)")
+                st.caption("(GOOGLE_API_KEY saknas)")
 
     st.markdown(f"**{lead.get('address', '–')}**")
 
