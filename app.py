@@ -352,9 +352,27 @@ def page_auth():
 
     with tab_in:
         with st.form("login_form"):
-            email    = st.text_input("E-postadress")
-            password = st.text_input("Lösenord", type="password")
+            email    = st.text_input("E-postadress",  key="login_email")
+            password = st.text_input("Lösenord", type="password", key="login_password")
             submitted = st.form_submit_button("Logga in", type="primary", use_container_width=True)
+        # Patch autocomplete attributes so browsers offer to save/fill credentials.
+        # components.html runs in an iframe and can reach window.parent.document.
+        import streamlit.components.v1 as _stc
+        _stc.html("""
+        <script>
+        (function() {
+            function patch() {
+                var p = window.parent.document;
+                var em = p.querySelector('input[type="text"]');
+                var pw = p.querySelector('input[type="password"]');
+                if (em) { em.setAttribute('autocomplete', 'email'); em.setAttribute('name', 'email'); }
+                if (pw) { pw.setAttribute('autocomplete', 'current-password'); pw.setAttribute('name', 'password'); }
+            }
+            patch();
+            setTimeout(patch, 300);
+        })();
+        </script>
+        """, height=0)
         if submitted:
             try:
                 do_login(email, password)
@@ -364,8 +382,8 @@ def page_auth():
 
     with tab_up:
         with st.form("signup_form"):
-            email    = st.text_input("E-postadress")
-            password = st.text_input("Välj lösenord (minst 8 tecken)", type="password")
+            email    = st.text_input("E-postadress",  key="signup_email")
+            password = st.text_input("Välj lösenord (minst 8 tecken)", type="password", key="signup_password")
             submitted = st.form_submit_button("Skapa konto", type="primary", use_container_width=True)
         if submitted:
             try:
