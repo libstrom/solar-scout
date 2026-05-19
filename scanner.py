@@ -17,6 +17,7 @@ import math
 import base64
 import time
 import logging
+import os
 import httpx
 import googlemaps
 import anthropic
@@ -24,6 +25,13 @@ import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Callable
+
+# ── Feature flags ──────────────────────────────────────────────────────────────
+
+# When enabled, _process_building uses a two-pass approach:
+#   Pass 1 — wide 60m×60m image, classify house type only (cheap).
+#   Pass 2 — tight 18m×18m image, detect solar panels (existing logic).
+TWO_PASS_MODE = os.environ.get("TWO_PASS_DETECTION", "0") == "1"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -770,6 +778,182 @@ def _analyze_building(
         return False, False, False, ""
 
 
+def _analyze_building_two_pass(
+    client: anthropic.Anthropic,
+    google_key: str,
+    lat: float,
+    lng: float,
+    mapbox_key: str | None = None,
+    lm_key: str | None = None,
+    lm_layer: str = _LM_LAYERS[0],
+    few_shot: list[tuple[str, str]] | None = None,
+) -> tuple[bool, bool, bool, str] | None:
+    """Two-pass building analysis — cheaper house filter then focused panel scan.
+
+    Pass 1 — wide context (60 m × 60 m):
+        Ask only whether the central structure is a single-family home.
+        Uses a small max_tokens budget.  Returns None immediately on HOUSE=NO.
+
+    Pass 2 — tight view (18 m × 18 m, same as the original single-pass):
+        Ask only about solar panels, using existing few-shot examples.
+        Returns (is_residential_house, has_solar_panels, is_unsure, reasoning).
+
+    Returns None when Pass 1 rejects the building.
+    Returns (True, has_solar, is_unsure, reasoning) when Pass 2 completes.
+    """
+    # ── Pass 1: house classification, wide view ──────────────────────────────
+    img_wide = _fetch_lm_wms(lat, lng, size_m=60)
+    if img_wide is None:
+        # Fall back to Google/Mapbox at a slightly lower zoom for the wide view
+        img_wide = _fetch_satellite(google_key, lat, lng, zoom=18,
+                                    mapbox_key=mapbox_key, lm_key=lm_key,
+                                    lm_layer=lm_layer)
+    if img_wide is None:
+        _log.warning("_analyze_building_two_pass pass1 image fetch failed lat=%s lng=%s", lat, lng)
+        return None
+
+    b64_wide = base64.standard_b64encode(img_wide).decode()
+    pass1_prompt = (
+        "Swedish aerial orthophoto, ~60m wide, top-down view.\n\n"
+        "Is the central structure a single-family residential home "
+        "(villa/parhus/radhus)? It must NOT be a carport, shed, garage, "
+        "barn, industrial building, warehouse, church, school, or bare ground.\n\n"
+        "Answer with exactly one of:\n"
+        "HOUSE=YES\n"
+        "HOUSE=NO"
+    )
+    try:
+        p1_msg = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=50,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64_wide}},
+                    {"type": "text", "text": pass1_prompt},
+                ],
+            }],
+        )
+        p1_text = p1_msg.content[0].text.upper()
+        is_house_p1 = "HOUSE=YES" in p1_text
+        _log.debug("_analyze_building_two_pass pass1 HOUSE=%s lat=%s lng=%s", is_house_p1, lat, lng)
+    except Exception as exc:
+        _log.error("_analyze_building_two_pass pass1 API error: %s", exc)
+        return None
+
+    if not is_house_p1:
+        # Not a house — skip expensive pass 2
+        return None
+
+    # ── Pass 2: solar panel detection, tight view ────────────────────────────
+    img_tight = _fetch_lm_wms(lat, lng, size_m=18)
+    if img_tight is None:
+        img_tight = _fetch_satellite(google_key, lat, lng, zoom=ZOOM_BUILDING,
+                                     mapbox_key=mapbox_key, lm_key=lm_key,
+                                     lm_layer=lm_layer)
+    if img_tight is None:
+        _log.warning("_analyze_building_two_pass pass2 image fetch failed lat=%s lng=%s", lat, lng)
+        return None
+
+    has_solar, is_unsure, reasoning = _detect_solar_panels(client, img_tight, few_shot=few_shot)
+    _log.debug("_analyze_building_two_pass pass2 SOLAR=%s UNSURE=%s lat=%s lng=%s",
+               has_solar, is_unsure, lat, lng)
+    # is_residential_house is always True at this point (passed pass 1)
+    return True, has_solar, is_unsure, reasoning
+
+
+def _detect_solar_panels(
+    client: anthropic.Anthropic,
+    img_bytes: bytes,
+    few_shot: list[tuple[str, str]] | None = None,
+) -> tuple[bool, bool, str]:
+    """
+    Solar-panel-only detection — used by the two-pass path (pass 2).
+
+    Returns (has_solar_panels, is_unsure, reasoning).
+    Assumes the building has already been confirmed as a residential house.
+    """
+    b64 = base64.standard_b64encode(img_bytes).decode()
+    instruction = (
+        "Swedish aerial orthophoto, ~18m wide, top-down view of a residential roof.\n\n"
+        "Does this roof have photovoltaic solar panels?\n\n"
+        "Solar PV from directly above appears as:\n"
+        "- RECTANGULAR FLAT PATCHES on the roof that are SMOOTHER and more "
+        "UNIFORM than the bumpy texture of surrounding clay tiles or asphalt "
+        "shingles. The SMOOTHNESS CONTRAST vs adjacent roof material is the "
+        "primary signal — if you cannot see a distinctly smoother patch "
+        "against the surrounding roof texture, say SOLAR=NO.\n"
+        "- Colour can vary: dark blue, black, charcoal, blue-grey, or "
+        "mirror-bright reflections.\n"
+        "- Supporting signal when visible: regular grid lines / module seams.\n\n"
+        "CRITICAL — these are NOT solar panels:\n"
+        "- Dark clay tiles (tegelpannor), dark uniform papp/bitumen/EPDM roofs\n"
+        "- Any dark uniform roof surface WITHOUT visible rectangular patch contrast\n"
+        "- Shadows cast on rooftops\n"
+        "- Skylights or dormer windows\n\n"
+        "First, in ONE sentence describe the roof: shape, texture, and whether "
+        "you see any smooth rectangular patches that contrast with adjacent tiles.\n\n"
+        "Then commit to a verdict:\n"
+        "- SOLAR=YES   — clearly unambiguous rectangular smooth area, visibly "
+        "different in texture from adjacent roof material. High confidence only.\n"
+        "- SOLAR=UNSURE — something that COULD be panels but image quality, "
+        "shadow, or angle makes you uncertain.\n"
+        "- SOLAR=NO    — no panels visible, or surface is dark tiles/EPDM/felt/"
+        "metal/asphalt/skylights/ambiguous. DEFAULT when uncertain.\n\n"
+        "End with exactly one line, nothing after:\n"
+        "SOLAR=YES or SOLAR=UNSURE or SOLAR=NO"
+    )
+    try:
+        if few_shot:
+            msgs: list[dict] = []
+            for ex_b64, verdict in few_shot:
+                msgs.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Analyze this Swedish aerial roof image:"},
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": ex_b64}},
+                    ],
+                })
+                msgs.append({"role": "assistant", "content": verdict})
+            msgs.append({
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
+                    {"type": "text", "text": instruction},
+                ],
+            })
+        else:
+            msgs = [{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
+                    {"type": "text", "text": instruction},
+                ],
+            }]
+        msg = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=220,
+            messages=msgs,
+        )
+        raw = msg.content[0].text
+        text = raw.upper()
+        has_solar = "SOLAR=YES" in text and "SOLAR=UNSURE" not in text
+        is_unsure = "SOLAR=UNSURE" in text
+        reasoning = ""
+        for line in raw.splitlines():
+            if line.strip().upper().startswith("SOLAR="):
+                break
+            if line.strip():
+                reasoning = line.strip()
+                break
+        _log.debug("_detect_solar_panels SOLAR=%s UNSURE=%s few_shot=%s",
+                   has_solar, is_unsure, bool(few_shot))
+        return has_solar, is_unsure, reasoning
+    except Exception as exc:
+        _log.error("_detect_solar_panels API error: %s", exc)
+        return False, False, ""
+
+
 def _process_building(
     building: dict,
     google_key: str,
@@ -781,10 +965,21 @@ def _process_building(
 ) -> Lead | None:
     lat, lng = building["lat"], building["lng"]
     zoom = building.get("zoom", ZOOM_BUILDING)
-    img = _fetch_satellite(google_key, lat, lng, zoom=zoom, mapbox_key=mapbox_key, lm_key=lm_key, lm_layer=lm_layer)
-    if img is None:
-        return None
-    is_house, has_solar, is_unsure, reasoning = _analyze_building(anthropic_client, img, few_shot=few_shot)
+
+    if TWO_PASS_MODE:
+        result = _analyze_building_two_pass(
+            anthropic_client, google_key, lat, lng,
+            mapbox_key=mapbox_key, lm_key=lm_key, lm_layer=lm_layer, few_shot=few_shot,
+        )
+        if result is None:
+            return None
+        is_house, has_solar, is_unsure, reasoning = result
+    else:
+        img = _fetch_satellite(google_key, lat, lng, zoom=zoom, mapbox_key=mapbox_key, lm_key=lm_key, lm_layer=lm_layer)
+        if img is None:
+            return None
+        is_house, has_solar, is_unsure, reasoning = _analyze_building(anthropic_client, img, few_shot=few_shot)
+
     if not is_house:
         return None
 
