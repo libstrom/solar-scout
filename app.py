@@ -80,14 +80,21 @@ def init_auth():
     access = st.session_state.get("access_token")
     refresh = st.session_state.get("refresh_token")
 
-    # Fallback: läs från cookies om session_state är tom
+    # Fallback: läs från cookies om session_state är tom.
+    # CookieManager behöver en extra render-cykel efter Railway-restart för att
+    # ladda cookie-värden från browsern. Om vi inte har prövat cookies än denna
+    # render-cykel, sätt en flagga och kör en rerun — nästa gång är de tillgängliga.
     if not access or not refresh:
         cm = _get_cookie_manager()
         if cm is not None:
             access = cm.get("access_token")
             refresh = cm.get("refresh_token")
         if not access or not refresh:
+            if not st.session_state.get("_cookie_load_attempted"):
+                st.session_state["_cookie_load_attempted"] = True
+                st.rerun()
             return None
+    st.session_state.pop("_cookie_load_attempted", None)
 
     try:
         sb.auth.set_session(access, refresh)
