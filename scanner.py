@@ -643,6 +643,28 @@ def _fetch_lm_wms(lat: float, lng: float, size_m: float = 18) -> bytes | None:
     return None
 
 
+def _fetch_street_view(google_key: str, lat: float, lng: float) -> bytes | None:
+    """Fetch a Google Street View image for the given location.
+
+    Returns JPEG bytes, or None if no panorama exists nearby or the request fails.
+    pitch=20 tilts the camera slightly upward to reveal roof slopes.
+    source=outdoor avoids indoor panoramas.
+    """
+    url = (
+        "https://maps.googleapis.com/maps/api/streetview"
+        f"?size=400x400&location={lat},{lng}"
+        f"&pitch=20&source=outdoor&return_error_code=true"
+        f"&key={google_key}"
+    )
+    try:
+        resp = httpx.get(url, timeout=10)
+        if resp.status_code == 200 and "image" in resp.headers.get("content-type", ""):
+            return resp.content
+    except Exception:
+        pass
+    return None
+
+
 def _load_few_shot_images() -> list[tuple[str, str]]:
     """Download few-shot examples from LM WMS once per session.
 
@@ -746,15 +768,27 @@ def _analyze_building(
     client: anthropic.Anthropic,
     img_bytes: bytes,
     few_shot: list[tuple[str, str]] | None = None,
+    street_view_bytes: bytes | None = None,
 ) -> tuple[bool, bool, bool, str]:
     """
     Returns (is_residential_house, has_solar_panels, is_unsure, reasoning).
 
     is_unsure=True means SOLAR=UNSURE — AI sees possible panels but can't
     confirm. These become needs_review=True leads surfaced in the review queue.
+
+    street_view_bytes: optional JPEG from Google Street View, included as a
+    second reference image to resolve ambiguous cases.
     """
     img_bytes = _enhance_contrast(img_bytes)
     b64 = base64.standard_b64encode(img_bytes).decode()
+    sv_clause = (
+        "\n\nA street-level photo of the SAME property follows the aerial image. "
+        "Use it as a secondary reference — solar panels on south-facing roof slopes "
+        "are often clearly visible from the street. If the street-level view confirms "
+        "or refutes panels, weight it heavily. If the view is obstructed or unclear, "
+        "rely on the aerial image."
+        if street_view_bytes else ""
+    )
     instruction = (
         "Swedish aerial orthophoto, ~50m wide, top-down view.\n\n"
         "Look at the structure occupying the CENTRE of the image. Answer:\n\n"
@@ -797,6 +831,7 @@ def _analyze_building(
         "HOUSE=YES or HOUSE=NO\n"
         "SOLAR=YES or SOLAR=UNSURE or SOLAR=NO\n\n"
         "If HOUSE=NO, set SOLAR=NO."
+        + sv_clause
     )
     try:
         system_blocks: list[dict] = [
@@ -820,19 +855,23 @@ def _analyze_building(
                     ],
                 })
                 msgs.append({"role": "assistant", "content": verdict})
-            msgs.append({
-                "role": "user",
-                "content": [
-                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
-                ],
-            })
+            final_content: list[dict] = [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
+            ]
+            if street_view_bytes:
+                sv_b64 = base64.standard_b64encode(street_view_bytes).decode()
+                final_content.append({"type": "text", "text": "Street-level view of the same property:"})
+                final_content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": sv_b64}})
+            msgs.append({"role": "user", "content": final_content})
         else:
-            msgs = [{
-                "role": "user",
-                "content": [
-                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
-                ],
-            }]
+            final_content = [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
+            ]
+            if street_view_bytes:
+                sv_b64 = base64.standard_b64encode(street_view_bytes).decode()
+                final_content.append({"type": "text", "text": "Street-level view of the same property:"})
+                final_content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": sv_b64}})
+            msgs = [{"role": "user", "content": final_content}]
         msg = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=220,
@@ -851,8 +890,8 @@ def _analyze_building(
             if line.strip():
                 reasoning = line.strip()
                 break
-        _log.debug("_analyze_building HOUSE=%s SOLAR=%s UNSURE=%s few_shot=%s",
-                   is_house, has_solar, is_unsure, bool(few_shot))
+        _log.debug("_analyze_building HOUSE=%s SOLAR=%s UNSURE=%s few_shot=%s sv=%s",
+                   is_house, has_solar, is_unsure, bool(few_shot), bool(street_view_bytes))
         return is_house, has_solar, is_unsure, reasoning
     except Exception as exc:
         _log.error("_analyze_building API error: %s", exc)
@@ -881,6 +920,18 @@ def _process_building(
     is_house, has_solar, is_unsure, reasoning = _analyze_building(anthropic_client, img, few_shot=few_shot)
     if not is_house:
         return None
+
+    # Second pass: if AI is unsure, fetch Street View and reanalyse.
+    # Street View shows south-facing roof slopes that are often invisible from above.
+    if is_unsure and google_key:
+        sv_bytes = _fetch_street_view(google_key, lat, lng)
+        if sv_bytes:
+            _log.debug("_process_building: UNSURE → Street View second pass lat=%s lng=%s", lat, lng)
+            is_house, has_solar, is_unsure, reasoning = _analyze_building(
+                anthropic_client, img, few_shot=few_shot, street_view_bytes=sv_bytes
+            )
+            if not is_house:
+                return None
 
     if is_unsure:
         # AI not certain — skip samtomt check (result unused for UNSURE), save for human review
