@@ -79,6 +79,7 @@ Lead (SOLAR=UNSURE) → needs_review=True → granskningskö
 | 57.6398, 14.7056 | solar_yes_3 | Queckfeldtsgatan 17, Nässjö | SE3 |
 | 57.6475, 14.7094 | solar_yes_4 | Stjärngatan 4, Nässjö | SE3 |
 | 57.6530, 14.7126 | solar_yes_5 | Norrhagagatan 14, Nässjö | SE3 |
+| koordinater saknas | solar_no_3 | Smålandsgatan 48, Nässjö | SE3 |
 
 ## Bildkällor — regler
 
