@@ -74,6 +74,26 @@ def get_supabase() -> Client:
     return st.session_state.get("_sb_user_client") or _anon_supabase()
 
 
+def _sv_error(exc: Exception) -> str:
+    """Översätt vanliga Supabase-felmeddelanden till svenska."""
+    msg = str(exc).lower()
+    if "email" in msg and ("password" in msg or "phone" in msg):
+        return "Ange e-postadress och lösenord."
+    if "invalid login credentials" in msg or "invalid_credentials" in msg:
+        return "Fel e-postadress eller lösenord."
+    if "email not confirmed" in msg:
+        return "E-postadressen är inte bekräftad. Kolla din inkorg."
+    if "user already registered" in msg or "already been registered" in msg:
+        return "Det finns redan ett konto med den e-postadressen."
+    if "password should be at least" in msg:
+        return "Lösenordet måste vara minst 8 tecken."
+    if "rate limit" in msg or "too many requests" in msg:
+        return "För många försök — vänta en stund och försök igen."
+    if "network" in msg or "connection" in msg:
+        return "Nätverksfel — kontrollera din internetanslutning."
+    return str(exc)
+
+
 def _get_cookie_manager():
     if _COOKIES_AVAILABLE:
         return stx.CookieManager(key="solar_scout_auth")
@@ -87,14 +107,18 @@ def init_auth():
     Ordning: session_state → cookies → None.
     Cookies överlever Railway-restarts; session_state gör det inte.
     """
-    sb = get_supabase()
+    # Fast path: redan validerad denna session — returnera cachad användare utan
+    # nätverksanrop. Radioknappar, flikar och andra widgets triggar reruns men
+    # ska ALDRIG logga ut användaren.
+    cached_user = st.session_state.get("_auth_user")
+    if cached_user and st.session_state.get("access_token"):
+        return cached_user
+
     access = st.session_state.get("access_token")
     refresh = st.session_state.get("refresh_token")
 
     # Fallback: läs från cookies om session_state är tom.
-    # CookieManager behöver en extra render-cykel efter Railway-restart för att
-    # ladda cookie-värden från browsern. Om vi inte har prövat cookies än denna
-    # render-cykel, sätt en flagga och kör en rerun — nästa gång är de tillgängliga.
+    # CookieManager behöver en extra render-cykel efter Railway-restart.
     if not access or not refresh:
         cm = _get_cookie_manager()
         if cm is not None:
@@ -107,22 +131,23 @@ def init_auth():
             return None
     st.session_state.pop("_cookie_load_attempted", None)
 
-    # Create a FRESH client per session — never mutate the shared _anon_supabase()
-    # client. This makes concurrent sessions (same or different accounts) safe.
+    # Validera mot Supabase (körs bara vid första rendern eller efter token-refresh).
     user_sb = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
     try:
         user_sb.auth.set_session(access, refresh)
         user = user_sb.auth.get_user().user
+        st.session_state["_auth_user"]      = user
         st.session_state["_sb_user_client"] = user_sb
         return user
     except Exception:
         pass
-    # Token förmodligen expired — försök refresh
+    # Token expired — försök refresh
     try:
         resp = user_sb.auth.refresh_session(refresh)
         if resp.session and resp.user:
-            st.session_state["access_token"]  = resp.session.access_token
-            st.session_state["refresh_token"] = resp.session.refresh_token
+            st.session_state["access_token"]    = resp.session.access_token
+            st.session_state["refresh_token"]   = resp.session.refresh_token
+            st.session_state["_auth_user"]      = resp.user
             st.session_state["_sb_user_client"] = user_sb
             cm = _get_cookie_manager()
             if cm is not None:
@@ -131,10 +156,9 @@ def init_auth():
             return resp.user
     except Exception:
         pass
-    # Refresh failed → riktig logout
-    st.session_state.pop("access_token", None)
-    st.session_state.pop("refresh_token", None)
-    st.session_state.pop("_sb_user_client", None)
+    # Refresh misslyckades → riktig utloggning
+    for k in ("access_token", "refresh_token", "_auth_user", "_sb_user_client"):
+        st.session_state.pop(k, None)
     cm = _get_cookie_manager()
     if cm is not None:
         cm.remove("access_token")
@@ -148,6 +172,7 @@ def do_login(email: str, password: str):
     user_sb.auth.set_session(resp.session.access_token, resp.session.refresh_token)
     st.session_state["access_token"]    = resp.session.access_token
     st.session_state["refresh_token"]   = resp.session.refresh_token
+    st.session_state["_auth_user"]      = resp.user
     st.session_state["_sb_user_client"] = user_sb
     cm = _get_cookie_manager()
     if cm is not None:
@@ -173,9 +198,8 @@ def do_logout():
         sb.auth.sign_out()
     except Exception:
         pass
-    st.session_state.pop("access_token", None)
-    st.session_state.pop("refresh_token", None)
-    st.session_state.pop("_sb_user_client", None)
+    for k in ("access_token", "refresh_token", "_auth_user", "_sb_user_client"):
+        st.session_state.pop(k, None)
     cm = _get_cookie_manager()
     if cm is not None:
         cm.remove("access_token")
@@ -378,7 +402,7 @@ def page_auth():
                 do_login(email, password)
                 st.rerun()
             except Exception as e:
-                st.error(f"Fel: {e}")
+                st.error(_sv_error(e))
 
     with tab_up:
         with st.form("signup_form"):
@@ -390,7 +414,7 @@ def page_auth():
                 do_signup(email, password)
                 st.success("Konto skapat! Logga in i fliken ovan.")
             except Exception as e:
-                st.error(f"Fel: {e}")
+                st.error(_sv_error(e))
 
     with tab_pw:
         st.caption("Vi skickar en länk till din e-post så att du kan sätta ett nytt lösenord.")
@@ -707,8 +731,22 @@ def page_scanner(user, profile: dict | None = None):
             })
 
         # Persist results in session_state so they survive button clicks
-        st.session_state["scanner_sb_rows"] = sb_rows
+        # Auto-spara leads direkt till databasen så de överlever sidnavigation
+        sb_client = get_supabase()
+        auto_saved = 0
+        for row in sb_rows:
+            data = {k: v for k, v in row.items()}
+            data["user_id"] = str(user.id)
+            try:
+                sb_client.table("scout_leads").insert(data).execute()
+                auto_saved += 1
+            except Exception as exc:
+                _log.warning("lead insert failed: %s", exc)
+        st.session_state["scanner_sb_rows"]    = sb_rows
         st.session_state["scanner_display_rows"] = display_rows
+        st.session_state["scanner_saved"]       = True
+        if auto_saved:
+            _log.info("auto-saved %d leads for user %s", auto_saved, user.id)
 
     # ── Show results (persisted across reruns) ────────────────────────────────
     sb_rows      = st.session_state.get("scanner_sb_rows")
@@ -717,46 +755,24 @@ def page_scanner(user, profile: dict | None = None):
     if not sb_rows:
         return
 
-    already_saved = st.session_state.get("scanner_saved", False)
-
     st.success(f"Scanning klar! Hittade {len(sb_rows)} tak med solceller.")
     st.divider()
 
     df = pd.DataFrame(display_rows)
     st.dataframe(df, use_container_width=True, hide_index=True)
 
-    if already_saved:
-        st.info(f"✅ {len(sb_rows)} leads sparade i Leadslistan.")
-    else:
-        col_save, col_dl = st.columns(2)
-        with col_save:
-            if st.button("💾 Spara alla till Leadslista", type="primary", use_container_width=True):
-                sb = get_supabase()
-                saved = 0
-                for row in sb_rows:
-                    data = {k: v for k, v in row.items()}
-                    data["user_id"] = str(user.id)
-                    try:
-                        sb.table("scout_leads").insert(data).execute()
-                        saved += 1
-                    except Exception as exc:
-                        _log.warning("lead insert failed: %s", exc)
-                st.session_state["scanner_saved"] = True
-                st.success(f"{saved} leads sparade!")
-                st.balloons()
-                st.rerun()
+    st.info(f"✅ {len(sb_rows)} leads sparade i Leads-fliken.")
 
-        with col_dl:
-            date_str = datetime.now().strftime("%y%m%d")
-            export = pd.DataFrame(sb_rows).drop(columns=["lat", "lng"], errors="ignore")
-            csv_bytes = (CSV_ATTRIBUTION_HEADER + export.to_csv(index=False)).encode("utf-8")
-            st.download_button(
-                "⬇ Ladda ner CSV",
-                csv_bytes,
-                file_name=f"Scanner_Leads_{date_str}.csv",
-                mime="text/csv",
-                use_container_width=True,
-            )
+    date_str = datetime.now().strftime("%y%m%d")
+    export = pd.DataFrame(sb_rows).drop(columns=["lat", "lng"], errors="ignore")
+    csv_bytes = (CSV_ATTRIBUTION_HEADER + export.to_csv(index=False)).encode("utf-8")
+    st.download_button(
+        "⬇ Ladda ner CSV",
+        csv_bytes,
+        file_name=f"Scanner_Leads_{date_str}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
 
     if st.button("🔄 Ny scanning", use_container_width=True):
         st.session_state.pop("scanner_sb_rows", None)
@@ -937,7 +953,7 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
     df = load_leads(str(user.id))
 
     if df.empty:
-        st.info("Inga leads ännu. Gå till fliken 'Scouta Tak'.")
+        st.info("Inga leads ännu. Kör en scanning i fliken 'AI Scanner' för att hitta tak.")
         return
 
     total = len(df)
@@ -1156,7 +1172,15 @@ def page_account(user, profile):
         or getattr(user, "created_at", None)
     )
     if signup_date:
-        st.write(f"**Konto skapat:** {signup_date}")
+        try:
+            from datetime import timezone
+            dt = datetime.fromisoformat(str(signup_date).replace("Z", "+00:00"))
+            SWEDISH_MONTHS = ["jan","feb","mar","apr","maj","jun",
+                              "jul","aug","sep","okt","nov","dec"]
+            formatted = f"{dt.day} {SWEDISH_MONTHS[dt.month-1]} {dt.year}"
+        except Exception:
+            formatted = str(signup_date)
+        st.write(f"**Konto skapat:** {formatted}")
 
     st.divider()
     st.markdown("### Radera mitt konto")
@@ -1207,10 +1231,9 @@ def page_account(user, profile):
 
 def page_app(user, profile):
     with st.sidebar:
-        st.markdown("**Scout**")
-        st.caption("Linus Bergström")
+        st.markdown("## Scout")
         st.divider()
-        st.caption(f"Inloggad som:\n{user.email}")
+        st.markdown(f"**{user.email}**")
         credits = profile.get("credits_balance", 0) or 0
         if not is_admin(profile) and profile.get("scout_subscription_status") != "active":
             st.metric("Credits kvar", credits)
