@@ -69,16 +69,16 @@ Lead (SOLAR=YES) → spara direkt i Supabase (progressiv)
 Lead (SOLAR=UNSURE) → needs_review=True → granskningskö
 ```
 
-## Few-shot exempel (verifierade 2026-05-19)
+## Few-shot exempel (verifierade)
 
-Alla tre är från Malmö (SE4). Småland-exempel (SE3) saknas —
-se issue #X för att lägga till Nässjö/Jönköping-adresser.
-
-| Koord | Etikett | Kommentar |
-|-------|---------|-----------|
-| 55.5706, 13.0379 | solar_yes | Risholmsgatan 8, Malmö |
-| 55.5751, 13.0708 | solar_yes_2 | Skimmelgatan 22, Malmö |
-| 55.5765, 13.0743 | solar_no | Remontgatan 41, Malmö |
+| Koord | Etikett | Adress | Elvärde |
+|-------|---------|--------|---------|
+| 55.5706, 13.0379 | solar_yes | Risholmsgatan 8, Malmö | SE4 |
+| 55.5751, 13.0708 | solar_yes_2 | Skimmelgatan 22, Malmö | SE4 |
+| 55.5765, 13.0743 | solar_no | Remontgatan 41, Malmö | SE4 |
+| 57.6398, 14.7056 | solar_yes_3 | Queckfeldtsgatan 17, Nässjö | SE3 |
+| 57.6475, 14.7094 | solar_yes_4 | Stjärngatan 4, Nässjö | SE3 |
+| 57.6530, 14.7126 | solar_yes_5 | Norrhagagatan 14, Nässjö | SE3 |
 
 ## Bildkällor — regler
 

@@ -492,12 +492,16 @@ _LM_SERVICE  = "ortofoto-ccby"
 _LM_LAYERS   = ["Ortofoto_0.25", "orto", "ortofoto"]
 _LM_ZOOM     = 19   # max zoom for LM open ortofoto (3x3 tiles → ~95m × 95m view)
 
-# Few-shot ground-truth buildings (verified by user, Malmö 2026-05-19).
+# Few-shot ground-truth buildings (verified by user).
+# Malmö (SE4) + Nässjö/Småland (SE3) for geographic diversity.
 # Loaded once per scan session from LM WMS and sent as multi-turn examples.
 _FEW_SHOT_COORDS = [
-    (55.5705978, 13.0378985, "solar_yes"),   # Risholmsgatan 8, Malmö — panels clearly visible
-    (55.5750780, 13.0707577, "solar_yes_2"), # Skimmelgatan 22, Malmö — second positive example
-    (55.5764531, 13.0743366, "solar_no"),    # Remontgatan 41, Malmö — clean negative
+    (55.5705978, 13.0378985, "solar_yes"),   # Risholmsgatan 8, Malmö — SE4 positive
+    (55.5750780, 13.0707577, "solar_yes_2"), # Skimmelgatan 22, Malmö — SE4 second positive
+    (55.5764531, 13.0743366, "solar_no"),    # Remontgatan 41, Malmö — SE4 clean negative
+    (57.6398006, 14.7055590, "solar_yes_3"), # Queckfeldtsgatan 17, Nässjö — SE3 positive
+    (57.6474604, 14.7093514, "solar_yes_4"), # Stjärngatan 4, Nässjö — SE3 positive
+    (57.6529687, 14.7125879, "solar_yes_5"), # Norrhagagatan 14, Nässjö — SE3 positive
 ]
 _FEW_SHOT_VERDICTS = {
     "solar_yes": (
@@ -515,6 +519,24 @@ _FEW_SHOT_VERDICTS = {
         "Uniform roof surface with consistent texture throughout — no smooth rectangular "
         "patches or contrast areas visible.\n\n"
         "HOUSE=YES\nSOLAR=NO"
+    ),
+    "solar_yes_3": (
+        "Swedish inland villa (Småland). A clearly defined rectangular area on the roof "
+        "surface appears noticeably smoother and more uniform than the surrounding pitched "
+        "tile material — the smoothness contrast and regular geometry indicate a PV array.\n\n"
+        "HOUSE=YES\nSOLAR=YES"
+    ),
+    "solar_yes_4": (
+        "Single-family home with a south-facing roof slope. A flat, dark rectangular patch "
+        "of uniform texture is visible against the coarser surrounding roof surface — "
+        "characteristic smoothness contrast of mounted solar modules.\n\n"
+        "HOUSE=YES\nSOLAR=YES"
+    ),
+    "solar_yes_5": (
+        "Residential villa, Nässjö area. The roof has a distinctly smoother rectangular "
+        "section that stands out from the surrounding textured tiles — consistent with a "
+        "photovoltaic installation on the main roof slope.\n\n"
+        "HOUSE=YES\nSOLAR=YES"
     ),
 }
 
