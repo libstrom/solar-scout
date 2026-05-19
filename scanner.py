@@ -906,7 +906,10 @@ def scan_buildings_ai(
             if result:
                 leads.append(result)
             if on_progress:
-                on_progress(done, total, result)
+                try:
+                    on_progress(done, total, result)
+                except Exception as _cb_err:
+                    _log.warning("on_progress callback error: %s", _cb_err)
             # Short-circuit if we've hit the lead cap
             if max_leads is not None and len(leads) >= max_leads:
                 # Cancel remaining futures that haven't started yet
@@ -1007,6 +1010,7 @@ def scan_city(
     lm_key: str | None = None,
     mapbox_key: str | None = None,
     max_leads: int | None = None,
+    phase_callback: Callable[[str, int], None] | None = None,
 ) -> list[Lead]:
     """Scan a city for buildings with solar panels.
 
@@ -1032,6 +1036,8 @@ def scan_city(
     # OSM solar tags cover the full city viewport (free, instant)
     osm_leads = scan_area_osm(south, west, north, east)
     _log.info("scan_city osm_leads=%d", len(osm_leads))
+    if phase_callback:
+        phase_callback("osm_leads", len(osm_leads))
 
     if not anthropic_key:
         _log.info("scan_city no anthropic_key — returning OSM only")
@@ -1081,6 +1087,8 @@ def scan_city(
                 continue
 
             _log.info("scan_city area lat=%s lng=%s buildings=%d", area["lat"], area["lng"], len(buildings))
+            if phase_callback:
+                phase_callback("area_buildings", len(buildings))
             area_leads = scan_buildings_ai(
                 buildings, google_key, anthropic_key, on_progress,
                 mapbox_key=mapbox_key, lm_key=lm_key,
