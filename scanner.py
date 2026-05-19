@@ -492,11 +492,8 @@ _LM_ZOOM     = 19   # max zoom for LM open ortofoto (3x3 tiles → ~95m × 95m v
 # Loaded once per scan session from LM WMS and sent as multi-turn examples.
 _FEW_SHOT_COORDS = [
     (55.5705978, 13.0378985, "solar_yes"),   # Risholmsgatan 8, Malmö — SE4 positive
-    (55.5750780, 13.0707577, "solar_yes_2"), # Skimmelgatan 22, Malmö — SE4 second positive
-    (55.5764531, 13.0743366, "solar_no"),    # Remontgatan 41, Malmö — SE4 clean negative
     (57.6398006, 14.7055590, "solar_yes_3"), # Queckfeldtsgatan 17, Nässjö — SE3 positive
-    (57.6474604, 14.7093514, "solar_yes_4"), # Stjärngatan 4, Nässjö — SE3 positive
-    (57.6529687, 14.7125879, "solar_yes_5"), # Norrhagagatan 14, Nässjö — SE3 positive
+    (55.5764531, 13.0743366, "solar_no"),    # Remontgatan 41, Malmö — clean negative
 ]
 _FEW_SHOT_VERDICTS = {
     "solar_yes": (
