@@ -18,8 +18,14 @@ import base64
 import time
 import logging
 import httpx
-import googlemaps
-from known_installations import ENSPECTA_INSTALLATIONS
+try:
+    import googlemaps as googlemaps
+except ImportError:
+    googlemaps = None  # type: ignore[assignment]
+try:
+    from known_installations import ENSPECTA_INSTALLATIONS as _BUNDLED_INSTALLATIONS  # type: ignore[import]
+except ImportError:
+    _BUNDLED_INSTALLATIONS = []
 import anthropic
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -644,11 +650,46 @@ def _fetch_lm_wms(lat: float, lng: float, size_m: float = 18) -> bytes | None:
     return None
 
 
-def _is_existing_customer(lat: float, lng: float, radius_m: float = 30.0) -> bool:
+_installations_cache: list[tuple[float, float, str]] | None = None
+
+
+def _load_installations() -> list[tuple[float, float, str]]:
+    """Load known Enspecta installations from Supabase, fall back to bundled list."""
+    global _installations_cache
+    if _installations_cache is not None:
+        return _installations_cache
+    try:
+        from supabase import create_client
+        import os
+        url = os.environ.get("SUPABASE_URL", "")
+        key = os.environ.get("SUPABASE_ANON_KEY", "")
+        if url and key:
+            sb = create_client(url, key)
+            rows = sb.table("enspecta_installations").select("lat,lng,address").execute().data or []
+            if rows:
+                _installations_cache = [(r["lat"], r["lng"], r["address"]) for r in rows]
+                return _installations_cache
+    except Exception:
+        pass
+    _installations_cache = list(_BUNDLED_INSTALLATIONS)
+    return _installations_cache
+
+
+def _is_existing_customer(
+    lat: float,
+    lng: float,
+    radius_m: float = 30.0,
+    installations: list[tuple[float, float, str]] | None = None,
+) -> bool:
     """Return True if (lat, lng) is within radius_m metres of a known Enspecta installation."""
+    if installations is None:
+        try:
+            installations = _load_installations()
+        except Exception:
+            return False
     R = 6_371_000
     lat_r = math.radians(lat)
-    for inst_lat, inst_lng, _ in ENSPECTA_INSTALLATIONS:
+    for inst_lat, inst_lng, _ in installations:
         dlat = math.radians(inst_lat - lat)
         dlng = math.radians(inst_lng - lng)
         a = math.sin(dlat / 2) ** 2 + math.cos(lat_r) * math.cos(math.radians(inst_lat)) * math.sin(dlng / 2) ** 2
