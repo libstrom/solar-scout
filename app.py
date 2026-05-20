@@ -9,7 +9,7 @@ import urllib.parse
 import stripe
 import pandas as pd
 import streamlit as st
-from datetime import datetime
+from datetime import datetime, timedelta
 from supabase import create_client, Client
 
 try:
@@ -52,8 +52,8 @@ stripe.api_key = STRIPE_SECRET_KEY
 # Lantmäteriets CC-BY-villkor. Se docs/adr/0001-osm-odbl-csv.md för tolkning.
 CSV_ATTRIBUTION_HEADER = (
     "# Genererad av solar-scout · "
-    "Geodata © Lantmäteriet, CC-BY 4.0 · "
-    "Innehåller OSM-data © OpenStreetMap-bidragsgivare, ODbL 1.0\n"
+    "Geodata © Lantmäteriet, CC-BY 4.0\n"
+    "# Innehåller OSM-data © OpenStreetMap-bidragsgivare, ODbL 1.0\n"
     "# https://www.openstreetmap.org/copyright · "
     "https://creativecommons.org/licenses/by/4.0/\n"
 )
@@ -152,8 +152,9 @@ def init_auth():
             st.session_state["_sb_user_client"] = user_sb
             cm = _get_cookie_manager()
             if cm is not None:
-                cm.set("access_token", resp.session.access_token)
-                cm.set("refresh_token", resp.session.refresh_token)
+                _exp = datetime.now() + timedelta(days=30)
+                cm.set("access_token", resp.session.access_token, expires_at=_exp)
+                cm.set("refresh_token", resp.session.refresh_token, expires_at=_exp)
             return resp.user
     except Exception:
         pass
@@ -177,8 +178,9 @@ def do_login(email: str, password: str):
     st.session_state["_sb_user_client"] = user_sb
     cm = _get_cookie_manager()
     if cm is not None:
-        cm.set("access_token", resp.session.access_token)
-        cm.set("refresh_token", resp.session.refresh_token)
+        _exp = datetime.now() + timedelta(days=30)
+        cm.set("access_token", resp.session.access_token, expires_at=_exp)
+        cm.set("refresh_token", resp.session.refresh_token, expires_at=_exp)
     return resp.user
 
 
@@ -428,7 +430,7 @@ def page_auth():
                 sb.auth.reset_password_email(email, {"redirect_to": f"{APP_URL}?reset=true"})
                 st.success("Länk skickad! Kolla din e-post (även skräppost).")
             except Exception as e:
-                st.error(f"Fel: {e}")
+                st.error(_sv_error(e))
 
 
 def page_paywall(user, lead_count: int = 0):
@@ -577,7 +579,7 @@ def _lead_to_sb_row(lead) -> dict:
     }
 
 
-def page_scanner(user, profile: dict | None = None):
+def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
     st.subheader("AI Scanner — Hitta solcellstak automatiskt")
 
     mode = st.radio(
@@ -590,7 +592,8 @@ def page_scanner(user, profile: dict | None = None):
     credits = profile.get("credits_balance", 0) or 0
     on_credit_plan = (not is_admin(profile) and
                       profile.get("scout_subscription_status") != "active")
-    if on_credit_plan and credits == 0:
+    free_quota_remaining = lead_count < 10
+    if on_credit_plan and credits == 0 and not free_quota_remaining:
         st.warning("Du har inga credits kvar. Köp ett credit-pack för att scanna.")
         st.info("Gå till fliken **Konto** för att köpa credits.")
         return
@@ -601,7 +604,7 @@ def page_scanner(user, profile: dict | None = None):
     if mode == "Ort/stad (ange namn)":
         city_name = st.text_input(
             "Ort eller stad:",
-            placeholder="t.ex. Helsingborg, Landskrona",
+            placeholder="t.ex. Nässjö, Jönköping, Eksjö, Vetlanda",
         )
     else:
         try:
@@ -609,7 +612,7 @@ def page_scanner(user, profile: dict | None = None):
             import folium
             from folium.plugins import Draw
 
-            m = folium.Map(location=[56.0, 13.0], zoom_start=13)
+            m = folium.Map(location=[57.65, 14.70], zoom_start=13)  # Nässjö
             Draw(
                 draw_options={
                     "rectangle": True,
@@ -666,11 +669,25 @@ def page_scanner(user, profile: dict | None = None):
             st.warning("Rita ett område på kartan först.")
             return
 
-        # Clear any previous scan results
+        # Clear any previous scan results and state flags
         st.session_state.pop("scanner_sb_rows", None)
         st.session_state.pop("scanner_display_rows", None)
+        st.session_state.pop("scanner_saved", None)
 
         from scanner import scan_city, scan_bbox, Lead
+
+        # Fetch already-scanned tile_keys for this user to skip duplicates
+        try:
+            _existing = get_supabase().table("scout_leads").select("tile_key").eq(
+                "user_id", str(user.id)
+            ).execute()
+            _skip_tile_keys = frozenset(
+                r["tile_key"] for r in (_existing.data or []) if r.get("tile_key")
+            )
+            _log.info("scan dedup: %d existing tile_keys", len(_skip_tile_keys))
+        except Exception as _e:
+            _log.warning("scan dedup fetch failed: %s", _e)
+            _skip_tile_keys = frozenset()
 
         progress_bar   = st.progress(0.0, text="Startar...")
         status_text    = st.empty()
@@ -684,16 +701,10 @@ def page_scanner(user, profile: dict | None = None):
         def on_progress(done: int, total: int, result):
             cumulative_done[0] += 1
             n = cumulative_done[0]
-            known_total = total_buildings_est[0]
-            if known_total > 0:
-                frac = min(n / known_total, 0.97)
-            else:
-                # Unknown total — asymptotic: moves fast early, slows near 95 %
-                frac = min(0.02 + 0.93 * (1 - 1 / (1 + n / 15)), 0.97)
-            progress_bar.progress(frac, text=f"Analyserar byggnad {n}...")
+            # Capture the lead first — progress_bar.progress() must not prevent
+            # this even if it raises (e.g. on a second scan in the same session).
             if result:
                 found_leads.append(result)
-                found_count_ph.info(f"Hittade hittills: {len(found_leads)} solcellstak")
                 # Progressive save — persists each AI lead immediately so a crash never loses data
                 if result.source == "ai":
                     try:
@@ -702,6 +713,15 @@ def page_scanner(user, profile: dict | None = None):
                     except Exception as _ins_exc:
                         _log.warning("progressive lead insert failed: %s", _ins_exc)
                         scan_errors.append(f"DB-sparning misslyckades ({result.address}): {_ins_exc}")
+            known_total = total_buildings_est[0]
+            if known_total > 0:
+                frac = min(n / known_total, 0.97)
+            else:
+                # Unknown total — asymptotic: moves fast early, slows near 95 %
+                frac = min(0.02 + 0.93 * (1 - 1 / (1 + n / 15)), 0.97)
+            progress_bar.progress(frac, text=f"Analyserar byggnad {n}...")
+            if result:
+                found_count_ph.info(f"Hittade hittills: {len(found_leads)} solcellstak")
 
         def on_phase(phase: str, count: int):
             if phase == "osm_leads":
@@ -728,13 +748,14 @@ def page_scanner(user, profile: dict | None = None):
                 leads = scan_city(
                     city_name, GOOGLE_API_KEY or "", anthr_key, on_progress,
                     mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads,
-                    phase_callback=on_phase,
+                    phase_callback=on_phase, skip_tile_keys=_skip_tile_keys,
                 )
             else:
                 status_text.info("Hämtar byggnadsdata från OSM (kan ta 20–60 s)...")
                 leads = scan_bbox(
                     south, west, north, east, GOOGLE_API_KEY or "", anthr_key, on_progress,
-                    mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads, phase_callback=on_phase,
+                    mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads,
+                    phase_callback=on_phase, skip_tile_keys=_skip_tile_keys,
                 )
         except ValueError as e:
             _log.error("scan ValueError: %s", e)
@@ -853,14 +874,14 @@ def page_scout(user):
     try:
         gmaps = googlemaps.Client(key=GOOGLE_API_KEY)
     except Exception as e:
-        st.error(f"Google API-fel: {e}")
+        st.error(f"Google API-fel — kontrollera att GOOGLE_API_KEY är korrekt.")
         return
 
     with st.spinner("Söker adress..."):
         try:
             results = gmaps.geocode(search_query)
         except Exception as e:
-            st.error(f"Fel: {e}")
+            st.error("Adresssökning misslyckades — kontrollera din internetanslutning eller API-nyckel.")
             return
 
     if not results:
@@ -1298,7 +1319,7 @@ def page_account(user, profile):
             st.rerun()
 
 
-def page_app(user, profile):
+def page_app(user, profile, lead_count: int = 0):
     with st.sidebar:
         st.markdown("## Scout")
         st.divider()
@@ -1340,7 +1361,7 @@ def page_app(user, profile):
     )
 
     with tab_scanner:
-        page_scanner(user, profile)
+        page_scanner(user, profile, lead_count)
 
     with tab_scout:
         page_scout(user)
@@ -1485,7 +1506,7 @@ def main():
         page_paywall(user, lead_count)
         return
 
-    page_app(user, profile)
+    page_app(user, profile, lead_count)
 
 
 if __name__ == "__main__":

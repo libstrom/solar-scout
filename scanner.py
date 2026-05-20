@@ -19,11 +19,19 @@ import time
 import logging
 import httpx
 import googlemaps
+from known_installations import ENSPECTA_INSTALLATIONS
 import anthropic
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Callable
+
+try:
+    import numpy as np
+    from PIL import Image as _PILImage
+    _ENHANCE_AVAILABLE = True
+except ImportError:
+    _ENHANCE_AVAILABLE = False
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,11 +40,6 @@ logging.basicConfig(
 )
 _log = logging.getLogger("solar_scout")
 
-try:
-    from PIL import Image as _PILImage
-    _PIL_AVAILABLE = True
-except ImportError:
-    _PIL_AVAILABLE = False
 
 
 @dataclass
@@ -485,11 +488,14 @@ _LM_SERVICE  = "ortofoto-ccby"
 _LM_LAYERS   = ["Ortofoto_0.25", "orto", "ortofoto"]
 _LM_ZOOM     = 19   # max zoom for LM open ortofoto (3x3 tiles → ~95m × 95m view)
 
-# Few-shot ground-truth buildings (verified by user, Malmö 2026-05-19).
+# Few-shot ground-truth buildings (verified by user).
+# Malmö (SE4) + Nässjö/Småland (SE3) for geographic diversity.
 # Loaded once per scan session from LM WMS and sent as multi-turn examples.
 _FEW_SHOT_COORDS = [
-    (55.5705978, 13.0378985, "solar_yes"),  # Risholmsgatan 8
-    (55.5764531, 13.0743366, "solar_no"),   # Remontgatan 41
+    (55.5705978, 13.0378985, "solar_yes"),   # Risholmsgatan 8, Malmö — SE4 positive
+    (57.6398006, 14.7055590, "solar_yes_3"), # Queckfeldtsgatan 17, Nässjö — SE3 positive
+    (55.5764531, 13.0743366, "solar_no"),    # Remontgatan 41, Malmö — SE4 negative
+    (57.6349444, 14.7103611, "solar_no_3"),  # Smålandsgatan 48, Nässjö — SE3 negative
 ]
 _FEW_SHOT_VERDICTS = {
     "solar_yes": (
@@ -497,9 +503,39 @@ _FEW_SHOT_VERDICTS = {
         "contrast against the surrounding coarser tile texture — typical PV array from above.\n\n"
         "HOUSE=YES\nSOLAR=YES"
     ),
+    "solar_yes_2": (
+        "A distinct rectangular patch with a smoother, more uniform surface is visible on "
+        "part of the roof, set apart from the surrounding textured tile material — "
+        "consistent with a photovoltaic array.\n\n"
+        "HOUSE=YES\nSOLAR=YES"
+    ),
     "solar_no": (
         "Uniform roof surface with consistent texture throughout — no smooth rectangular "
         "patches or contrast areas visible.\n\n"
+        "HOUSE=YES\nSOLAR=NO"
+    ),
+    "solar_yes_3": (
+        "Swedish inland villa (Småland). A clearly defined rectangular area on the roof "
+        "surface appears noticeably smoother and more uniform than the surrounding pitched "
+        "tile material — the smoothness contrast and regular geometry indicate a PV array.\n\n"
+        "HOUSE=YES\nSOLAR=YES"
+    ),
+    "solar_yes_4": (
+        "Single-family home with a south-facing roof slope. A flat, dark rectangular patch "
+        "of uniform texture is visible against the coarser surrounding roof surface — "
+        "characteristic smoothness contrast of mounted solar modules.\n\n"
+        "HOUSE=YES\nSOLAR=YES"
+    ),
+    "solar_yes_5": (
+        "Residential villa, Nässjö area. The roof has a distinctly smoother rectangular "
+        "section that stands out from the surrounding textured tiles — consistent with a "
+        "photovoltaic installation on the main roof slope.\n\n"
+        "HOUSE=YES\nSOLAR=YES"
+    ),
+    "solar_no_3": (
+        "Swedish inland villa (Småland/Nässjö). Roof surface is uniformly textured throughout "
+        "— no smooth rectangular patch or contrast area distinguishable from the surrounding "
+        "tile material. No photovoltaic installation visible.\n\n"
         "HOUSE=YES\nSOLAR=NO"
     ),
 }
@@ -515,7 +551,7 @@ def _lm_tile_url(token: str, layer: str, z: int, x: int, y: int) -> str:
 
 def _fetch_lantmateriet(lm_key: str, lat: float, lng: float, layer: str = _LM_LAYERS[0]) -> bytes | None:
     """Fetch 3×3 tile grid from Lantmäteriet ortofoto and return a 640×640 PNG."""
-    if not _PIL_AVAILABLE:
+    if not _ENHANCE_AVAILABLE:
         return None
     cx, cy = _lat_lng_to_tile(lat, lng, _LM_ZOOM)
     canvas = _PILImage.new("RGB", (768, 768), (80, 80, 80))
@@ -608,6 +644,41 @@ def _fetch_lm_wms(lat: float, lng: float, size_m: float = 18) -> bytes | None:
     return None
 
 
+def _is_existing_customer(lat: float, lng: float, radius_m: float = 30.0) -> bool:
+    """Return True if (lat, lng) is within radius_m metres of a known Enspecta installation."""
+    R = 6_371_000
+    lat_r = math.radians(lat)
+    for inst_lat, inst_lng, _ in ENSPECTA_INSTALLATIONS:
+        dlat = math.radians(inst_lat - lat)
+        dlng = math.radians(inst_lng - lng)
+        a = math.sin(dlat / 2) ** 2 + math.cos(lat_r) * math.cos(math.radians(inst_lat)) * math.sin(dlng / 2) ** 2
+        if R * 2 * math.asin(math.sqrt(a)) <= radius_m:
+            return True
+    return False
+
+
+def _fetch_street_view(google_key: str, lat: float, lng: float) -> bytes | None:
+    """Fetch a Google Street View image for the given location.
+
+    Returns JPEG bytes, or None if no panorama exists nearby or the request fails.
+    pitch=20 tilts the camera slightly upward to reveal roof slopes.
+    source=outdoor avoids indoor panoramas.
+    """
+    url = (
+        "https://maps.googleapis.com/maps/api/streetview"
+        f"?size=400x400&location={lat},{lng}"
+        f"&pitch=20&source=outdoor&return_error_code=true"
+        f"&key={google_key}"
+    )
+    try:
+        resp = httpx.get(url, timeout=10)
+        if resp.status_code == 200 and "image" in resp.headers.get("content-type", ""):
+            return resp.content
+    except Exception:
+        pass
+    return None
+
+
 def _load_few_shot_images() -> list[tuple[str, str]]:
     """Download few-shot examples from LM WMS once per session.
 
@@ -636,7 +707,7 @@ def _fetch_satellite(
     lm_layer: str = _LM_LAYERS[0],
 ) -> bytes | None:
     # Priority: official LM API → free minkarta WMS → Mapbox → Google
-    if lm_key and _PIL_AVAILABLE:
+    if lm_key and _ENHANCE_AVAILABLE:
         img = _fetch_lantmateriet(lm_key, lat, lng, layer=lm_layer)
         if img:
             _log.debug("_fetch_satellite source=lm_tile lat=%s lng=%s", lat, lng)
@@ -665,18 +736,73 @@ def _fetch_satellite(
         return None
 
 
+def _enhance_contrast(img_bytes: bytes) -> bytes:
+    """Boost image contrast via tile-based CLAHE on the Y channel (YCbCr).
+
+    Helps Claude distinguish smooth PV patches on overcast/flat Scandinavian
+    orthophotos. Falls back silently to original bytes if PIL/numpy absent.
+    """
+    if not _ENHANCE_AVAILABLE:
+        return img_bytes
+    try:
+        img = _PILImage.open(io.BytesIO(img_bytes)).convert("YCbCr")
+        y, cb, cr = img.split()
+        y_arr = np.array(y, dtype=np.uint8)
+
+        # Tile-based equalization — 4×4 grid, each tile equalised independently
+        h, w = y_arr.shape
+        tile_h, tile_w = h // 4, w // 4
+        out = np.empty_like(y_arr)
+        for ti in range(4):
+            for tj in range(4):
+                r0, r1 = ti * tile_h, (ti + 1) * tile_h if ti < 3 else h
+                c0, c1 = tj * tile_w, (tj + 1) * tile_w if tj < 3 else w
+                tile = y_arr[r0:r1, c0:c1]
+                hist, _ = np.histogram(tile.flatten(), 256, (0, 256))
+                cdf = hist.cumsum()
+                cdf_min = int(cdf[cdf > 0][0])
+                n = tile.size
+                lut = np.round(
+                    (cdf - cdf_min) / max(n - cdf_min, 1) * 255
+                ).clip(0, 255).astype(np.uint8)
+                out[r0:r1, c0:c1] = lut[tile]
+
+        # Blend: 60% CLAHE + 40% original to avoid over-sharpening
+        blended = (0.6 * out + 0.4 * y_arr).clip(0, 255).astype(np.uint8)
+        y_new = _PILImage.fromarray(blended, mode="L")
+        enhanced = _PILImage.merge("YCbCr", (y_new, cb, cr)).convert("RGB")
+        buf = io.BytesIO()
+        enhanced.save(buf, format="JPEG", quality=85)
+        return buf.getvalue()
+    except Exception:
+        return img_bytes
+
+
 def _analyze_building(
     client: anthropic.Anthropic,
     img_bytes: bytes,
     few_shot: list[tuple[str, str]] | None = None,
+    street_view_bytes: bytes | None = None,
 ) -> tuple[bool, bool, bool, str]:
     """
     Returns (is_residential_house, has_solar_panels, is_unsure, reasoning).
 
     is_unsure=True means SOLAR=UNSURE — AI sees possible panels but can't
     confirm. These become needs_review=True leads surfaced in the review queue.
+
+    street_view_bytes: optional JPEG from Google Street View, included as a
+    second reference image to resolve ambiguous cases.
     """
+    img_bytes = _enhance_contrast(img_bytes)
     b64 = base64.standard_b64encode(img_bytes).decode()
+    sv_clause = (
+        "\n\nA street-level photo of the SAME property follows the aerial image. "
+        "Use it as a secondary reference — solar panels on south-facing roof slopes "
+        "are often clearly visible from the street. If the street-level view confirms "
+        "or refutes panels, weight it heavily. If the view is obstructed or unclear, "
+        "rely on the aerial image."
+        if street_view_bytes else ""
+    )
     instruction = (
         "Swedish aerial orthophoto, ~50m wide, top-down view.\n\n"
         "Look at the structure occupying the CENTRE of the image. Answer:\n\n"
@@ -702,6 +828,8 @@ def _analyze_building(
         "- Snow or frost patches (bright/white uniform areas — common in Nordic winter)\n"
         "- Eternite / grey fibre-cement tiles (smooth grey-brown surface, common on "
         "older Swedish houses — no module grid visible)\n"
+        "- Standing seam metal roofs (plåttak) — uniformly smooth with long parallel "
+        "ridges/seams running ridge-to-eave; NO distinct rectangular panel patches\n"
         "- Solar thermal collectors (solfångare) — long narrow strips with visible "
         "tube rows, unlike flat PV panels\n\n"
         "First, in ONE sentence describe the roof: shape, texture, and whether "
@@ -717,37 +845,51 @@ def _analyze_building(
         "HOUSE=YES or HOUSE=NO\n"
         "SOLAR=YES or SOLAR=UNSURE or SOLAR=NO\n\n"
         "If HOUSE=NO, set SOLAR=NO."
+        + sv_clause
     )
     try:
+        system_blocks: list[dict] = [
+            {"type": "text", "text": instruction, "cache_control": {"type": "ephemeral"}}
+        ]
         if few_shot:
             msgs: list[dict] = []
-            for ex_b64, verdict in few_shot:
+            last_idx = len(few_shot) - 1
+            for i, (ex_b64, verdict) in enumerate(few_shot):
+                img_block: dict = {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/jpeg", "data": ex_b64},
+                }
+                if i == last_idx:
+                    img_block["cache_control"] = {"type": "ephemeral"}
                 msgs.append({
                     "role": "user",
                     "content": [
                         {"type": "text", "text": "Analyze this Swedish aerial roof image:"},
-                        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": ex_b64}},
+                        img_block,
                     ],
                 })
                 msgs.append({"role": "assistant", "content": verdict})
-            msgs.append({
-                "role": "user",
-                "content": [
-                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
-                    {"type": "text", "text": instruction},
-                ],
-            })
+            final_content: list[dict] = [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
+            ]
+            if street_view_bytes:
+                sv_b64 = base64.standard_b64encode(street_view_bytes).decode()
+                final_content.append({"type": "text", "text": "Street-level view of the same property:"})
+                final_content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": sv_b64}})
+            msgs.append({"role": "user", "content": final_content})
         else:
-            msgs = [{
-                "role": "user",
-                "content": [
-                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
-                    {"type": "text", "text": instruction},
-                ],
-            }]
+            final_content = [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
+            ]
+            if street_view_bytes:
+                sv_b64 = base64.standard_b64encode(street_view_bytes).decode()
+                final_content.append({"type": "text", "text": "Street-level view of the same property:"})
+                final_content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": sv_b64}})
+            msgs = [{"role": "user", "content": final_content}]
         msg = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=220,
+            system=system_blocks,
             messages=msgs,
         )
         raw = msg.content[0].text
@@ -762,8 +904,8 @@ def _analyze_building(
             if line.strip():
                 reasoning = line.strip()
                 break
-        _log.debug("_analyze_building HOUSE=%s SOLAR=%s UNSURE=%s few_shot=%s",
-                   is_house, has_solar, is_unsure, bool(few_shot))
+        _log.debug("_analyze_building HOUSE=%s SOLAR=%s UNSURE=%s few_shot=%s sv=%s",
+                   is_house, has_solar, is_unsure, bool(few_shot), bool(street_view_bytes))
         return is_house, has_solar, is_unsure, reasoning
     except Exception as exc:
         _log.error("_analyze_building API error: %s", exc)
@@ -778,15 +920,35 @@ def _process_building(
     lm_key: str | None = None,
     lm_layer: str = _LM_LAYERS[0],
     few_shot: list[tuple[str, str]] | None = None,
+    skip_tile_keys: frozenset[str] = frozenset(),
 ) -> Lead | None:
     lat, lng = building["lat"], building["lng"]
     zoom = building.get("zoom", ZOOM_BUILDING)
+    tile_key = f"bld/{building['osm_id']}"
+    if tile_key in skip_tile_keys:
+        _log.debug("_process_building skip duplicate tile_key=%s", tile_key)
+        return None
+    if _is_existing_customer(lat, lng):
+        _log.debug("_process_building skip existing Enspecta customer lat=%s lng=%s", lat, lng)
+        return None
     img = _fetch_satellite(google_key, lat, lng, zoom=zoom, mapbox_key=mapbox_key, lm_key=lm_key, lm_layer=lm_layer)
     if img is None:
         return None
     is_house, has_solar, is_unsure, reasoning = _analyze_building(anthropic_client, img, few_shot=few_shot)
     if not is_house:
         return None
+
+    # Second pass: if AI is unsure, fetch Street View and reanalyse.
+    # Street View shows south-facing roof slopes that are often invisible from above.
+    if is_unsure and google_key:
+        sv_bytes = _fetch_street_view(google_key, lat, lng)
+        if sv_bytes:
+            _log.debug("_process_building: UNSURE → Street View second pass lat=%s lng=%s", lat, lng)
+            is_house, has_solar, is_unsure, reasoning = _analyze_building(
+                anthropic_client, img, few_shot=few_shot, street_view_bytes=sv_bytes
+            )
+            if not is_house:
+                return None
 
     if is_unsure:
         # AI not certain — skip samtomt check (result unused for UNSURE), save for human review
@@ -867,12 +1029,19 @@ def scan_buildings_ai(
     mapbox_key: str | None = None,
     lm_key: str | None = None,
     max_leads: int | None = None,
+    few_shot: list[tuple[str, str]] | None = None,
+    skip_tile_keys: frozenset[str] = frozenset(),
 ) -> list[Lead]:
     """Run Claude Vision on each OSM building centroid.
 
     Args:
         max_leads: Stop processing once this many confirmed leads are found.
                    None means no limit.
+        few_shot: Pre-loaded few-shot examples as (b64_jpeg, verdict_text) pairs.
+                  If None, examples are loaded from LM WMS on first call.
+                  Pass a pre-loaded list to avoid redundant downloads when
+                  scan_buildings_ai is called multiple times per scan (e.g.
+                  once per residential area in scan_city).
     """
     if not buildings or not anthropic_key:
         return []
@@ -883,19 +1052,22 @@ def scan_buildings_ai(
 
     # Probe which LM layer works once up front to avoid per-tile probing
     lm_layer = _LM_LAYERS[0]
-    if lm_key and _PIL_AVAILABLE:
+    if lm_key and _ENHANCE_AVAILABLE:
         probed = _probe_lm_layer(lm_key)
         if probed:
             lm_layer = probed
         else:
             lm_key = None
 
-    # Load few-shot examples once — shared across all workers (read-only)
-    few_shot = _load_few_shot_images()
+    # Load few-shot examples if not provided by caller.
+    # Callers that invoke scan_buildings_ai multiple times per scan (scan_city)
+    # should load once and pass the result here to avoid redundant WMS downloads.
+    if few_shot is None:
+        few_shot = _load_few_shot_images()
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
-            pool.submit(_process_building, b, google_key, client, mapbox_key, lm_key, lm_layer, few_shot): b
+            pool.submit(_process_building, b, google_key, client, mapbox_key, lm_key, lm_layer, few_shot, skip_tile_keys): b
             for b in buildings
         }
         done = 0
@@ -1016,6 +1188,7 @@ def scan_city(
     mapbox_key: str | None = None,
     max_leads: int | None = None,
     phase_callback: Callable[[str, int], None] | None = None,
+    skip_tile_keys: frozenset[str] = frozenset(),
 ) -> list[Lead]:
     """Scan a city for buildings with solar panels.
 
@@ -1057,6 +1230,11 @@ def scan_city(
     all_ai_leads: list[Lead] = []
     seen_building_ids: set[str] = set()
 
+    # Load few-shot examples once per full scan — shared across all residential
+    # areas so LM WMS is not hit 6× per area (N_areas × 6 images otherwise).
+    few_shot = _load_few_shot_images()
+    _log.info("scan_city few_shot=%d examples loaded", len(few_shot))
+
     # Query landuse=residential polygons within the city viewport
     residential_areas = _get_residential_areas(south, west, north, east)
     _log.info("scan_city residential_areas=%d", len(residential_areas))
@@ -1097,7 +1275,8 @@ def scan_city(
             area_leads = scan_buildings_ai(
                 buildings, google_key, anthropic_key, on_progress,
                 mapbox_key=mapbox_key, lm_key=lm_key,
-                max_leads=remaining,
+                max_leads=remaining, few_shot=few_shot,
+                skip_tile_keys=skip_tile_keys,
             )
             _log.info("scan_city area_leads=%d", len(area_leads))
             all_ai_leads.extend(area_leads)
@@ -1121,7 +1300,8 @@ def scan_city(
         all_ai_leads = scan_buildings_ai(
             buildings, google_key, anthropic_key, on_progress,
             mapbox_key=mapbox_key, lm_key=lm_key,
-            max_leads=remaining,
+            max_leads=remaining, few_shot=few_shot,
+            skip_tile_keys=skip_tile_keys,
         )
 
     merged = merge_leads(osm_leads, all_ai_leads)
@@ -1142,6 +1322,7 @@ def scan_bbox(
     mapbox_key: str | None = None,
     max_leads: int | None = None,
     phase_callback: Callable[[str, int], None] | None = None,
+    skip_tile_keys: frozenset[str] = frozenset(),
 ) -> list[Lead]:
     """Scan a bounding box for buildings with solar panels."""
     tile_count = len(_bbox_tiles(south, west, north, east))
@@ -1173,10 +1354,15 @@ def scan_bbox(
     if max_leads is not None:
         remaining = max_leads - len(osm_leads)
 
+    # Load few-shot images once per scan (not inside scan_buildings_ai) so the
+    # same 6 WMS requests are not repeated for every scan_buildings_ai call.
+    few_shot = _load_few_shot_images()
+
     ai_leads = scan_buildings_ai(
         buildings, google_key, anthropic_key, on_progress,
         mapbox_key=mapbox_key, lm_key=lm_key,
-        max_leads=remaining,
+        max_leads=remaining, few_shot=few_shot,
+        skip_tile_keys=skip_tile_keys,
     )
     if phase_callback:
         phase_callback("ai_done", len(ai_leads))
