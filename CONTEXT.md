@@ -10,7 +10,7 @@ säljleads som CSV.
 
 | Roll | Namn | Ansvar |
 |------|------|--------|
-| Fältsäljare | Ivan | Besöker leads, utgår från Nässjö |
+| Fältsäljare | David | Besöker leads, utgår från Nässjö |
 | Produktägare | Linus Bergström | Konfiguration, export, fakturering |
 
 ## Geografisk scope
