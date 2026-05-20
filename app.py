@@ -1007,18 +1007,41 @@ def page_review(user):
     lead_id = int(lead["id"])
     with col_ja:
         if st.button("✅ Ja, solceller", type="primary", use_container_width=True, key="review_yes"):
-            sb.table("scout_leads").update({
-                "user_confirmed": True,
-                "needs_review": False,
-                "has_solar": "Ja",
-            }).eq("id", lead_id).execute()
+            try:
+                sb.table("scout_leads").update({
+                    "user_confirmed": True,
+                    "needs_review": False,
+                    "has_solar": "Ja",
+                }).eq("id", lead_id).execute()
+            except Exception:
+                pass
+            # Spara bild till Supabase Storage vid bekräftelse
+            try:
+                from scanner import _fetch_lm_wms
+                _img_bytes = _fetch_lm_wms(lat, lng) if lat and lng else None
+                if _img_bytes:
+                    sb.storage.from_("lead-images").upload(
+                        f"{user.id}/{lead_id}.jpg",
+                        _img_bytes,
+                        {"content-type": "image/jpeg", "upsert": "true"},
+                    )
+                    _public_url = sb.storage.from_("lead-images").get_public_url(
+                        f"{user.id}/{lead_id}.jpg"
+                    )
+                    sb.table("scout_leads").update({"confirmed_image_url": _public_url}).eq("id", lead_id).execute()
+            except Exception:
+                pass
             st.rerun()
     with col_nej:
-        if st.button("❌ Nej, hoppa", use_container_width=True, key="review_no"):
-            sb.table("scout_leads").update({
-                "user_confirmed": False,
-                "needs_review": False,
-            }).eq("id", lead_id).execute()
+        if st.button("❌ Nej, inte solceller", use_container_width=True, key="review_no"):
+            try:
+                sb.table("scout_leads").update({
+                    "user_confirmed": False,
+                    "needs_review": False,
+                    "false_positive": True,
+                }).eq("id", lead_id).execute()
+            except Exception:
+                pass
             st.rerun()
 
 
@@ -1133,6 +1156,30 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
         use_container_width=True,
     )
 
+    # ── Bekräftade leads (med "Inte solceller"-knapp) ─────────────────────────
+    if "user_confirmed" in df.columns:
+        confirmed_df = df[df["user_confirmed"] == True]  # noqa: E712
+        if not confirmed_df.empty:
+            st.divider()
+            st.subheader("Bekräftade leads")
+            st.caption(f"{len(confirmed_df)} leads bekräftade — klicka om AI hade fel.")
+            _sb = get_supabase()
+            for _, c_row in confirmed_df.iterrows():
+                c_col1, c_col2 = st.columns([3, 1])
+                with c_col1:
+                    st.markdown(f"**{c_row.get('address', '–')}**")
+                with c_col2:
+                    if st.button("❌ Inte solceller", key=f"fp_{c_row['id']}", use_container_width=True):
+                        try:
+                            _sb.table("scout_leads").update({
+                                "false_positive": True,
+                                "has_solar": "Nej",
+                                "user_confirmed": False,
+                            }).eq("id", int(c_row["id"])).execute()
+                        except Exception:
+                            pass
+                        st.rerun()
+
     # ── Granska AI-leads ───────────────────────────────────────────────────────
     ai_df = df[df.get("scan_source", pd.Series(dtype=str)) == "ai"] if "scan_source" in df.columns else pd.DataFrame()
     if ai_df.empty:
@@ -1198,6 +1245,24 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
             with b1:
                 if st.button("✅ Rätt tak", key=f"ok_{row['id']}", use_container_width=True, type="primary"):
                     confirm_lead(int(row["id"]), True)
+                    # Spara bild till Supabase Storage vid bekräftelse
+                    try:
+                        _r_lat, _r_lng = row.get("lat"), row.get("lng")
+                        from scanner import _fetch_lm_wms
+                        _r_img = _fetch_lm_wms(_r_lat, _r_lng) if _r_lat and _r_lng else None
+                        if _r_img:
+                            _sb = get_supabase()
+                            _sb.storage.from_("lead-images").upload(
+                                f"{user.id}/{int(row['id'])}.jpg",
+                                _r_img,
+                                {"content-type": "image/jpeg", "upsert": "true"},
+                            )
+                            _r_url = _sb.storage.from_("lead-images").get_public_url(
+                                f"{user.id}/{int(row['id'])}.jpg"
+                            )
+                            _sb.table("scout_leads").update({"confirmed_image_url": _r_url}).eq("id", int(row["id"])).execute()
+                    except Exception:
+                        pass
                     st.rerun()
             with b2:
                 if st.button("❌ Fel tak", key=f"fel_{row['id']}", use_container_width=True):

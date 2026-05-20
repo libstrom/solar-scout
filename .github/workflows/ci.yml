@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Syntax check
+        run: |
+          python -c "import ast; ast.parse(open('scanner.py').read()); print('scanner.py OK')"
+          python -c "import ast; ast.parse(open('app.py').read()); print('app.py OK')"
+
+      - name: Unit tests (no API key required)
+        run: python -m pytest tests/ -x -q --ignore=tests/test_f1_baseline.py
+
+      - name: F1 regression (kräver ANTHROPIC_API_KEY)
+        if: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          LANTMATERIET_TOKEN: ${{ secrets.LANTMATERIET_TOKEN }}
+        run: |
+          python -m pytest tests/test_f1_baseline.py -v --tb=short
