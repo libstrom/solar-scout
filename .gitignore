@@ -6,3 +6,4 @@ venv/
 .claude/worktrees/
 .DS_Store
 *.pyc
+.agents/
