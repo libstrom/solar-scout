@@ -65,3 +65,59 @@ def test_prompt_requires_clear_identification():
     assert "any plausible" not in prompt.lower(), (
         "Prompten innehåller fortfarande 'any plausible' — för brett kriterium"
     )
+
+
+def test_prompt_denies_standing_seam_metal_roof():
+    """Standing seam metal roof (plåttak) ska vara i deny-listan.
+
+    Plåttak är ett vanligt falskt positivt i Sverige — uniformt slät yta med
+    parallella skarvar som kan se ut som solpaneler om inte prompten
+    explicit nämner dem.
+    """
+    prompt = _get_prompt_text().lower()
+    assert "standing seam" in prompt or "plåttak" in prompt, (
+        "Prompten saknar 'standing seam' / 'plåttak' i deny-listan — "
+        "vanlig svensk falsk-positiv"
+    )
+
+
+def test_prompt_unsure_tier_covers_ambiguous_eternite_with_smooth_patch():
+    """SOLAR=UNSURE ska finnas för fall som eternite + slät fläck (ambiguous).
+
+    Om ett tak har eternite men också en distinkt slät rektangulär fläck
+    ska modellen välja SOLAR=UNSURE, inte gissa SOLAR=YES eller SOLAR=NO.
+    Prompten måste (1) nämna eternite i deny-listan OCH (2) erbjuda UNSURE-tieren
+    för tvetydiga fall.
+    """
+    prompt = _get_prompt_text()
+    assert "eternite" in prompt.lower() or "fibre-cement" in prompt.lower(), (
+        "Prompten saknar eternite i deny-listan"
+    )
+    assert "SOLAR=UNSURE" in prompt, (
+        "Prompten saknar SOLAR=UNSURE-tieren — kan inte hantera tvetydiga eternitetak"
+    )
+    # Bekräfta att UNSURE är avsett för osäkra fall, inte som default för YES
+    assert "uncertain" in prompt.lower() or "could be" in prompt.lower(), (
+        "Prompten beskriver inte när UNSURE ska användas (osäkert/tvetydigt fall)"
+    )
+
+
+def test_prompt_smoothness_contrast_is_primary_signal():
+    """Smoothness contrast vs surrounding tiles ska vara det primära signalet.
+
+    Detta är nyckeln till att undvika falska positiver på typiska Småland-tak
+    (lertegelpannor med ojämn yta) — om modellen inte ser en distinkt slätare
+    rektangelplatta mot omgivande tegelpannor ska den säga SOLAR=NO.
+    """
+    prompt = _get_prompt_text().lower()
+    # Prompten ska explicit nämna smoothness contrast som primär signal
+    assert "smoothness contrast" in prompt or (
+        "smooth" in prompt and "contrast" in prompt
+    ), (
+        "Prompten saknar 'smoothness contrast' som primär signal — "
+        "riskerar falska positiver på tegeltakens ojämna yta"
+    )
+    # Prompten ska säga SOLAR=NO om ingen distinkt slätare fläck syns
+    assert "solar=no" in prompt, (
+        "Prompten saknar explicit SOLAR=NO-fallback när ingen slätare fläck syns"
+    )
