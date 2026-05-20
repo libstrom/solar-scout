@@ -12,6 +12,7 @@ samma _analyze_building som produktionsappen — så denna test verifierar exakt
 samma kodväg som AI Scanner-fliken använder.
 """
 
+import os
 import sys
 import time
 import httpx
@@ -19,10 +20,7 @@ import anthropic
 
 from scanner import _analyze_building, _fetch_lm_wms, _fetch_mapbox
 
-MAPBOX_TOKEN_FALLBACK = (
-    "pk.eyJ1IjoibGlic3Ryb20iLCJhIjoiY21wMmxsN3ZwMDJnejJzc2hhMGJicHZuMiJ9."
-    "K1GhO9yhO1EYbwzvmrJ3vQ"
-)
+MAPBOX_TOKEN_FALLBACK = os.environ.get("MAPBOX_TOKEN", "")
 
 # Kända test-fall. Lägg till fler i takt med att ni granskar leads i produktionsappen.
 #   expected_has_solar = True  → vi vet det finns solpaneler på taket
