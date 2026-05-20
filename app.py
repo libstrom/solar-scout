@@ -9,7 +9,7 @@ import urllib.parse
 import stripe
 import pandas as pd
 import streamlit as st
-from datetime import datetime
+from datetime import datetime, timedelta
 from supabase import create_client, Client
 
 try:
@@ -152,8 +152,9 @@ def init_auth():
             st.session_state["_sb_user_client"] = user_sb
             cm = _get_cookie_manager()
             if cm is not None:
-                cm.set("access_token", resp.session.access_token)
-                cm.set("refresh_token", resp.session.refresh_token)
+                _exp = datetime.now() + timedelta(days=30)
+                cm.set("access_token", resp.session.access_token, expires_at=_exp)
+                cm.set("refresh_token", resp.session.refresh_token, expires_at=_exp)
             return resp.user
     except Exception:
         pass
@@ -177,8 +178,9 @@ def do_login(email: str, password: str):
     st.session_state["_sb_user_client"] = user_sb
     cm = _get_cookie_manager()
     if cm is not None:
-        cm.set("access_token", resp.session.access_token)
-        cm.set("refresh_token", resp.session.refresh_token)
+        _exp = datetime.now() + timedelta(days=30)
+        cm.set("access_token", resp.session.access_token, expires_at=_exp)
+        cm.set("refresh_token", resp.session.refresh_token, expires_at=_exp)
     return resp.user
 
 
