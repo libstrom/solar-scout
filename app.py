@@ -1035,6 +1035,24 @@ def page_review(user):
                 }).eq("id", lead_id).execute()
             except Exception:
                 pass
+            # Spara bild för dynamisk few-shot (NO-exempel)
+            try:
+                _save_img = _img_bytes_review
+                if not _save_img:
+                    from scanner import _fetch_lm_wms
+                    _save_img = _fetch_lm_wms(lat, lng) if lat and lng else None
+                if _save_img:
+                    sb.storage.from_("lead-images").upload(
+                        f"{user.id}/{lead_id}.jpg",
+                        _save_img,
+                        {"content-type": "image/jpeg", "upsert": "true"},
+                    )
+                    _no_url = sb.storage.from_("lead-images").get_public_url(
+                        f"{user.id}/{lead_id}.jpg"
+                    )
+                    sb.table("scout_leads").update({"confirmed_image_url": _no_url}).eq("id", lead_id).execute()
+            except Exception:
+                pass
             st.rerun()
     with col_ja:
         if st.button("✅  Ja, solceller!", type="primary", use_container_width=True, key="review_yes"):
