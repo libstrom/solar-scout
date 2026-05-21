@@ -730,6 +730,8 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
         st.session_state.pop("scanner_sb_rows", None)
         st.session_state.pop("scanner_display_rows", None)
         st.session_state.pop("scanner_saved", None)
+        st.session_state.pop("scanner_leads_with_ids", None)
+        st.session_state.pop("scan_reviewed", None)
 
         from scanner import scan_city, scan_bbox, Lead
 
@@ -883,6 +885,21 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
         st.session_state["scanner_display_rows"] = display_rows
         st.session_state["scanner_saved"]        = True
 
+        # Fetch leads with DB-assigned IDs so we can call confirm_lead()
+        try:
+            _resp = get_supabase().table("scout_leads").select(
+                "id, address, scan_source, image_url, lat, lng, user_confirmed"
+            ).eq("user_id", str(user.id)).in_(
+                "address", [r["address"] for r in sb_rows]
+            ).execute()
+            st.session_state["scanner_leads_with_ids"] = _resp.data or []
+        except Exception as _fetch_exc:
+            _log.warning("fetch leads with ids failed: %s", _fetch_exc)
+            st.session_state["scanner_leads_with_ids"] = []
+
+        if "scan_reviewed" not in st.session_state:
+            st.session_state["scan_reviewed"] = set()
+
         if scan_errors:
             with st.expander(f"⚠️ {len(scan_errors)} fel under scanning (leads sparades ändå)"):
                 for err in scan_errors:
@@ -895,14 +912,19 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
     if not sb_rows:
         return
 
-    st.success(f"Scanning klar! Hittade {len(sb_rows)} tak med solceller.")
-    st.divider()
+    leads_with_ids: list[dict] = st.session_state.get("scanner_leads_with_ids", [])
+    if "scan_reviewed" not in st.session_state:
+        st.session_state["scan_reviewed"] = set()
 
-    df = pd.DataFrame(display_rows)
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    ai_count  = sum(1 for r in sb_rows if r.get("scan_source") == "ai")
+    osm_count = sum(1 for r in sb_rows if r.get("scan_source") != "ai")
 
-    st.info(f"✅ {len(sb_rows)} leads sparade i Leads-fliken.")
+    st.success(
+        f"Scanning klar! Hittade {len(sb_rows)} tak med solceller "
+        f"({ai_count} AI, {osm_count} från OSM)."
+    )
 
+    # Excel download — always visible, above review cards
     date_str = datetime.now().strftime("%y%m%d")
     export = pd.DataFrame(sb_rows).drop(columns=["lat", "lng"], errors="ignore")
     st.download_button(
@@ -913,10 +935,82 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
         use_container_width=True,
     )
 
+    st.divider()
+
+    # Build lookup: address → lead row with id
+    _id_by_addr: dict[str, dict] = {}
+    for _lr in leads_with_ids:
+        _addr = _lr.get("address", "")
+        if _addr and _addr not in _id_by_addr:
+            _id_by_addr[_addr] = _lr
+
+    # ── AI leads — reviewable cards ───────────────────────────────────────────
+    ai_rows = [r for r in sb_rows if r.get("scan_source") == "ai"]
+    if ai_rows:
+        st.subheader(f"Granska AI-leads ({ai_count} st)")
+        reviewed_set: set = st.session_state["scan_reviewed"]
+        all_reviewed = True
+        for _row in ai_rows:
+            _addr    = _row.get("address", "–")
+            _lr      = _id_by_addr.get(_addr, {})
+            _lead_id = _lr.get("id")
+            _img_url = _row.get("image_url") or (
+                f"https://minkarta.lantmateriet.se/map/ortofoto#zoom=19&lat={_row['lat']}&lon={_row['lng']}"
+                if _row.get("lat") and _row.get("lng") else None
+            )
+
+            already_reviewed = _lead_id is not None and _lead_id in reviewed_set
+            if not already_reviewed:
+                all_reviewed = False
+
+            with st.container(border=True):
+                col_img, col_info = st.columns([1, 2])
+                with col_img:
+                    if _img_url:
+                        st.link_button("🛰 Visa tak", _img_url, use_container_width=True)
+                    else:
+                        st.caption("(ingen bild)")
+                with col_info:
+                    st.markdown(f"**{_addr}**")
+                    if already_reviewed:
+                        st.caption("✓ granskad")
+                    elif _lead_id is not None:
+                        _btn_key_ok  = f"review_ok_{_lead_id}"
+                        _btn_key_bad = f"review_bad_{_lead_id}"
+                        _c1, _c2 = st.columns(2)
+                        with _c1:
+                            if st.button("✅ Rätt tak", key=_btn_key_ok, use_container_width=True):
+                                confirm_lead(_lead_id, True)
+                                st.session_state["scan_reviewed"].add(_lead_id)
+                                st.rerun()
+                        with _c2:
+                            if st.button("❌ Fel tak", key=_btn_key_bad, use_container_width=True):
+                                confirm_lead(_lead_id, False)
+                                st.session_state["scan_reviewed"].add(_lead_id)
+                                st.rerun()
+                    else:
+                        st.caption("(ID saknas — granska i Leads-fliken)")
+
+        if all_reviewed and ai_rows:
+            st.success("Alla AI-leads granskade! Tack — AI:n lär sig nu av dina svar.")
+
+    # ── OSM leads — collapsed list ────────────────────────────────────────────
+    osm_rows = [r for r in sb_rows if r.get("scan_source") != "ai"]
+    if osm_rows:
+        st.divider()
+        with st.expander(f"OSM-bekräftade (alltid rätt): {osm_count} leads"):
+            for _or in osm_rows:
+                st.caption(f"• {_or.get('address', '–')}")
+
+    st.divider()
+    st.info(f"✅ {len(sb_rows)} leads sparade i Leads-fliken.")
+
     if st.button("🔄 Ny scanning", use_container_width=True):
         st.session_state.pop("scanner_sb_rows", None)
         st.session_state.pop("scanner_display_rows", None)
         st.session_state.pop("scanner_saved", None)
+        st.session_state.pop("scanner_leads_with_ids", None)
+        st.session_state.pop("scan_reviewed", None)
         st.rerun()
 
 
