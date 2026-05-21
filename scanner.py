@@ -720,11 +720,88 @@ def _fetch_street_view(google_key: str, lat: float, lng: float) -> bytes | None:
     return None
 
 
-def _load_few_shot_images() -> list[tuple[str, str]]:
+def _load_dynamic_few_shot(user_id: str | None = None, max_each: int = 2) -> list[tuple[str, str]]:
+    """Load confirmed leads from Supabase as additional few-shot examples.
+
+    Fetches up to max_each YES and max_each NO examples that David has reviewed.
+    Falls back silently — never blocks the scan.
+    """
+    try:
+        import os, httpx as _httpx
+        from supabase import create_client as _sc
+        url = os.environ.get("SUPABASE_URL", "")
+        key = os.environ.get("SUPABASE_ANON_KEY", "")
+        if not (url and key and user_id):
+            return []
+        sb = _sc(url, key)
+        yes_rows = (
+            sb.table("scout_leads")
+            .select("confirmed_image_url,lat,lng")
+            .eq("user_id", user_id)
+            .eq("user_confirmed", True)
+            .eq("false_positive", False)
+            .not_.is_("confirmed_image_url", "null")
+            .order("created_at", desc=True)
+            .limit(max_each)
+            .execute()
+            .data or []
+        )
+        no_rows = (
+            sb.table("scout_leads")
+            .select("confirmed_image_url,lat,lng")
+            .eq("user_id", user_id)
+            .eq("false_positive", True)
+            .not_.is_("confirmed_image_url", "null")
+            .order("created_at", desc=True)
+            .limit(max_each)
+            .execute()
+            .data or []
+        )
+        examples = []
+        yes_verdict = (
+            "Roof shows a rectangular section with smooth, uniform panel texture — "
+            "clearly different from surrounding roof material. User-confirmed solar installation.\n\n"
+            "HOUSE=YES\nSOLAR=YES"
+        )
+        no_verdict = (
+            "Roof surface is uniform throughout — no panel contrast, no rectangular patches. "
+            "User-confirmed: no solar panels.\n\n"
+            "HOUSE=YES\nSOLAR=NO"
+        )
+        for row in yes_rows:
+            img_url = row.get("confirmed_image_url")
+            if img_url:
+                try:
+                    resp = _httpx.get(img_url, timeout=8)
+                    if resp.status_code == 200 and resp.content:
+                        b64 = base64.standard_b64encode(resp.content).decode()
+                        examples.append((b64, yes_verdict))
+                except Exception:
+                    pass
+        for row in no_rows:
+            img_url = row.get("confirmed_image_url")
+            if img_url:
+                try:
+                    resp = _httpx.get(img_url, timeout=8)
+                    if resp.status_code == 200 and resp.content:
+                        b64 = base64.standard_b64encode(resp.content).decode()
+                        examples.append((b64, no_verdict))
+                except Exception:
+                    pass
+        if examples:
+            _log.info("dynamic few-shot: %d examples from Supabase", len(examples))
+        return examples
+    except Exception as _e:
+        _log.debug("dynamic few-shot load failed (non-fatal): %s", _e)
+        return []
+
+
+def _load_few_shot_images(user_id: str | None = None) -> list[tuple[str, str]]:
     """Download few-shot examples from LM WMS once per session.
 
-    Returns list of (b64_jpeg, verdict_text). Returns [] if any download fails
-    so callers degrade gracefully to text-only prompts.
+    Loads hardcoded verified examples first, then appends dynamic examples
+    from Supabase (user-confirmed leads). Returns [] if hardcoded downloads
+    fail so callers degrade gracefully to text-only prompts.
     """
     examples = []
     for lat, lng, label in _FEW_SHOT_COORDS:
@@ -734,7 +811,9 @@ def _load_few_shot_images() -> list[tuple[str, str]]:
             return []
         b64 = base64.standard_b64encode(img).decode()
         examples.append((b64, _FEW_SHOT_VERDICTS[label]))
-    _log.info("few-shot examples loaded: %d", len(examples))
+    dynamic = _load_dynamic_few_shot(user_id=user_id)
+    examples.extend(dynamic)
+    _log.info("few-shot examples loaded: %d (%d dynamic)", len(examples), len(dynamic))
     return examples
 
 
@@ -1230,6 +1309,7 @@ def scan_city(
     max_leads: int | None = None,
     phase_callback: Callable[[str, int], None] | None = None,
     skip_tile_keys: frozenset[str] = frozenset(),
+    user_id: str | None = None,
 ) -> list[Lead]:
     """Scan a city for buildings with solar panels.
 
@@ -1273,7 +1353,7 @@ def scan_city(
 
     # Load few-shot examples once per full scan — shared across all residential
     # areas so LM WMS is not hit 6× per area (N_areas × 6 images otherwise).
-    few_shot = _load_few_shot_images()
+    few_shot = _load_few_shot_images(user_id=user_id)
     _log.info("scan_city few_shot=%d examples loaded", len(few_shot))
 
     # Query landuse=residential polygons within the city viewport
@@ -1364,6 +1444,7 @@ def scan_bbox(
     max_leads: int | None = None,
     phase_callback: Callable[[str, int], None] | None = None,
     skip_tile_keys: frozenset[str] = frozenset(),
+    user_id: str | None = None,
 ) -> list[Lead]:
     """Scan a bounding box for buildings with solar panels."""
     tile_count = len(_bbox_tiles(south, west, north, east))
@@ -1397,7 +1478,7 @@ def scan_bbox(
 
     # Load few-shot images once per scan (not inside scan_buildings_ai) so the
     # same 6 WMS requests are not repeated for every scan_buildings_ai call.
-    few_shot = _load_few_shot_images()
+    few_shot = _load_few_shot_images(user_id=user_id)
 
     ai_leads = scan_buildings_ai(
         buildings, google_key, anthropic_key, on_progress,

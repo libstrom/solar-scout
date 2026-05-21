@@ -698,6 +698,8 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
         total_buildings_est = [0]
         cumulative_done = [0]
 
+        current_address = [""]
+
         def on_progress(done: int, total: int, result):
             cumulative_done[0] += 1
             n = cumulative_done[0]
@@ -705,6 +707,7 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
             # this even if it raises (e.g. on a second scan in the same session).
             if result:
                 found_leads.append(result)
+                current_address[0] = result.address or ""
                 # Progressive save — persists each AI lead immediately so a crash never loses data
                 if result.source == "ai":
                     try:
@@ -716,12 +719,16 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
             known_total = total_buildings_est[0]
             if known_total > 0:
                 frac = min(n / known_total, 0.97)
+                pct = int(frac * 100)
+                addr_str = f" — {current_address[0]}" if current_address[0] else ""
+                progress_bar.progress(frac, text=f"🔍 {pct}% · Byggnad {n} av {known_total}{addr_str}")
             else:
                 # Unknown total — asymptotic: moves fast early, slows near 95 %
                 frac = min(0.02 + 0.93 * (1 - 1 / (1 + n / 15)), 0.97)
-            progress_bar.progress(frac, text=f"Analyserar byggnad {n}...")
-            if result:
-                found_count_ph.info(f"Hittade hittills: {len(found_leads)} solcellstak")
+                progress_bar.progress(frac, text=f"🔍 Analyserar byggnad {n}...")
+            leads_n = len(found_leads)
+            if leads_n > 0:
+                found_count_ph.success(f"☀️ {leads_n} solcellstak hittade hittills")
 
         def on_phase(phase: str, count: int):
             if phase == "osm_leads":
@@ -749,6 +756,7 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                     city_name, GOOGLE_API_KEY or "", anthr_key, on_progress,
                     mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads,
                     phase_callback=on_phase, skip_tile_keys=_skip_tile_keys,
+                    user_id=str(user.id),
                 )
             else:
                 status_text.info("Hämtar byggnadsdata från OSM (kan ta 20–60 s)...")
@@ -756,6 +764,7 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                     south, west, north, east, GOOGLE_API_KEY or "", anthr_key, on_progress,
                     mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads,
                     phase_callback=on_phase, skip_tile_keys=_skip_tile_keys,
+                    user_id=str(user.id),
                 )
         except ValueError as e:
             _log.error("scan ValueError: %s", e)
@@ -963,29 +972,41 @@ def page_review(user):
         queue = []
 
     if not queue:
-        st.success("Inget att granska just nu!")
-        st.caption("Leads med SOLAR=UNSURE från AI-scanningar hamnar här.")
+        st.markdown("""
+        <div style='text-align:center;padding:3rem 1rem;'>
+            <div style='font-size:3rem'>✅</div>
+            <h3 style='color:#2e7d32'>Klar! Inget kvar att granska.</h3>
+            <p style='color:#666'>Leads med SOLAR=UNSURE från AI-scanningar hamnar här.</p>
+        </div>
+        """, unsafe_allow_html=True)
         return
 
     total = len(queue)
     lead = queue[0]
-    done = max(0, total - len(queue))  # always 0 here — shown via badge elsewhere
-
-    st.markdown(f"### 🔍 Granska lead  &nbsp; <span style='color:grey;font-size:0.85em'>{total} kvar</span>", unsafe_allow_html=True)
-    st.progress(0.0 if total == 0 else (1 - total / (total + done)))
-
-    # Satellite image via LM WMS (free, no storage limit)
+    lead_id = int(lead["id"])
     lat, lng = lead.get("lat"), lead.get("lng")
+
+    # ── Rubrik med räknare ──────────────────────────────────────────────────
+    st.markdown(
+        f"<div style='display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem'>"
+        f"<span style='font-size:1.1rem;font-weight:600'>🔍 Granska tak</span>"
+        f"<span style='background:#f0f0f0;border-radius:12px;padding:2px 12px;"
+        f"font-size:0.85rem;color:#555'>{total} kvar</span></div>",
+        unsafe_allow_html=True,
+    )
+
+    # ── Satellitbild — stor ─────────────────────────────────────────────────
+    _img_bytes_review = None
     if lat and lng:
         try:
             from scanner import _fetch_lm_wms
-            img_bytes = _fetch_lm_wms(lat, lng)
-            if img_bytes:
-                st.image(img_bytes, use_container_width=True)
+            _img_bytes_review = _fetch_lm_wms(lat, lng, size_m=30)
+            if _img_bytes_review:
+                st.image(_img_bytes_review, use_container_width=True)
             elif MAPBOX_TOKEN:
                 st.image(
                     f"https://api.mapbox.com/styles/v1/mapbox/satellite-v9/static"
-                    f"/{lng},{lat},20/640x480?access_token={MAPBOX_TOKEN}",
+                    f"/{lng},{lat},20/640x640?access_token={MAPBOX_TOKEN}",
                     use_container_width=True,
                 )
             else:
@@ -993,20 +1014,32 @@ def page_review(user):
         except Exception:
             st.caption("(Kunde inte hämta bild)")
 
-    st.markdown(f"**{lead.get('address', '–')}**")
-
+    # ── Adress + AI-resonemang ──────────────────────────────────────────────
+    st.markdown(f"### {lead.get('address', '–')}")
     reasoning = lead.get("ai_reasoning", "")
     if reasoning:
-        st.info(f"AI: *\"{reasoning}\"*")
+        st.caption(f"🤖 AI: *{reasoning[:180]}{'…' if len(reasoning)>180 else ''}*")
 
     if lead.get("maps_url"):
-        st.link_button("Öppna i Google Maps", lead["maps_url"])
+        st.link_button("📍 Öppna i Google Maps", lead["maps_url"])
 
     st.write("")
-    col_ja, col_nej = st.columns(2)
-    lead_id = int(lead["id"])
+
+    # ── Tinder-knappar ──────────────────────────────────────────────────────
+    col_nej, col_ja = st.columns(2)
+    with col_nej:
+        if st.button("❌  Inte solceller", use_container_width=True, key="review_no"):
+            try:
+                sb.table("scout_leads").update({
+                    "user_confirmed": False,
+                    "needs_review": False,
+                    "false_positive": True,
+                }).eq("id", lead_id).execute()
+            except Exception:
+                pass
+            st.rerun()
     with col_ja:
-        if st.button("✅ Ja, solceller", type="primary", use_container_width=True, key="review_yes"):
+        if st.button("✅  Ja, solceller!", type="primary", use_container_width=True, key="review_yes"):
             try:
                 sb.table("scout_leads").update({
                     "user_confirmed": True,
@@ -1015,31 +1048,22 @@ def page_review(user):
                 }).eq("id", lead_id).execute()
             except Exception:
                 pass
-            # Spara bild till Supabase Storage vid bekräftelse
+            # Spara bild till Supabase Storage (används för dynamisk few-shot)
             try:
-                from scanner import _fetch_lm_wms
-                _img_bytes = _fetch_lm_wms(lat, lng) if lat and lng else None
-                if _img_bytes:
+                _save_img = _img_bytes_review
+                if not _save_img:
+                    from scanner import _fetch_lm_wms
+                    _save_img = _fetch_lm_wms(lat, lng) if lat and lng else None
+                if _save_img:
                     sb.storage.from_("lead-images").upload(
                         f"{user.id}/{lead_id}.jpg",
-                        _img_bytes,
+                        _save_img,
                         {"content-type": "image/jpeg", "upsert": "true"},
                     )
                     _public_url = sb.storage.from_("lead-images").get_public_url(
                         f"{user.id}/{lead_id}.jpg"
                     )
                     sb.table("scout_leads").update({"confirmed_image_url": _public_url}).eq("id", lead_id).execute()
-            except Exception:
-                pass
-            st.rerun()
-    with col_nej:
-        if st.button("❌ Nej, inte solceller", use_container_width=True, key="review_no"):
-            try:
-                sb.table("scout_leads").update({
-                    "user_confirmed": False,
-                    "needs_review": False,
-                    "false_positive": True,
-                }).eq("id", lead_id).execute()
             except Exception:
                 pass
             st.rerun()
