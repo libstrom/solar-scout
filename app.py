@@ -1390,6 +1390,14 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
                 lid = int(c_row["id"])
                 addr = c_row.get("address", "–")
                 with st.expander(f"**{addr}**", expanded=False):
+                    _gs_url = c_row.get("google_search_url") or f"https://www.google.com/search?q=vem+bor+p%C3%A5+{urllib.parse.quote(addr)}"
+                    _ht_url = c_row.get("hitta_url") or f"https://www.hitta.se/s%C3%B6k?vad={urllib.parse.quote(addr)}"
+                    _lnk1, _lnk2, _lnk3 = st.columns(3)
+                    _lnk1.link_button("🔍 Google", _gs_url, use_container_width=True)
+                    _lnk2.link_button("📖 Hitta.se", _ht_url, use_container_width=True)
+                    if c_row.get("maps_url"):
+                        _lnk3.link_button("📍 Maps", c_row["maps_url"], use_container_width=True)
+                    st.divider()
                     col_s, col_fp = st.columns([2, 1])
                     with col_s:
                         cur_status = c_row.get("status") or "ej_kontaktad"
