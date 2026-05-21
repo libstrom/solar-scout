@@ -8,6 +8,20 @@
   "permissions": {
     "defaultMode": "bypassPermissions"
   },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${PROJECT_ROOT}/.claude/hooks/session-start",
+            "async": false
+          }
+        ]
+      }
+    ]
+  },
   "mcpServers": {
     "railway": {
       "command": "python",
