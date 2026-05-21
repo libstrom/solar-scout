@@ -751,13 +751,38 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
         progress_bar   = st.progress(0.0, text="Startar...")
         status_text    = st.empty()
         found_leads: list[Lead] = []
-        found_count_ph = st.empty()
+        live_leads_ph  = st.empty()
         scan_debug: list[str] = []
         scan_errors: list[str] = []
         total_buildings_est = [0]
         cumulative_done = [0]
 
         current_address = [""]
+
+        def _render_live_leads():
+            with live_leads_ph.container():
+                st.caption(f"☀️ **{len(found_leads)} solcellstak hittade hittills** — ✅/❌ granskning möjlig efter scan")
+                for _live_lead in found_leads:
+                    with st.container(border=True):
+                        _col_link, _col_info = st.columns([1, 2])
+                        with _col_link:
+                            _url = _live_lead.image_url or (
+                                f"https://minkarta.lantmateriet.se/map/ortofoto"
+                                f"#zoom=19&lat={_live_lead.lat}&lon={_live_lead.lng}"
+                                if _live_lead.lat and _live_lead.lng else None
+                            )
+                            if _url:
+                                st.link_button("🛰 Visa tak", _url, use_container_width=True)
+                            else:
+                                st.caption("(ingen bild)")
+                        with _col_info:
+                            _badge = "🗺 OSM" if _live_lead.source == "osm" else "🤖 AI"
+                            st.markdown(f"**{_live_lead.address or '–'}**  {_badge}")
+                            _conf = f"{_live_lead.confidence:.0%}"
+                            _unsure = " ⚠️ Osäker" if _live_lead.needs_review else ""
+                            st.caption(f"Konfidens: {_conf}{_unsure}")
+                            if _live_lead.ai_reasoning:
+                                st.caption(f"_{_live_lead.ai_reasoning}_")
 
         def on_progress(done: int, total: int, result):
             cumulative_done[0] += 1
@@ -775,6 +800,7 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                     except Exception as _ins_exc:
                         _log.warning("progressive lead insert failed: %s", _ins_exc)
                         scan_errors.append(f"DB-sparning misslyckades ({result.address}): {_ins_exc}")
+                _render_live_leads()
             known_total = total_buildings_est[0]
             if known_total > 0:
                 frac = min(n / known_total, 0.97)
@@ -785,9 +811,6 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                 # Unknown total — asymptotic: moves fast early, slows near 95 %
                 frac = min(0.02 + 0.93 * (1 - 1 / (1 + n / 15)), 0.97)
                 progress_bar.progress(frac, text=f"🔍 Analyserar byggnad {n}...")
-            leads_n = len(found_leads)
-            if leads_n > 0:
-                found_count_ph.success(f"☀️ {leads_n} solcellstak hittade hittills")
 
         def on_phase(phase: str, count: int):
             if phase == "osm_leads":
@@ -836,7 +859,7 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
 
         progress_bar.progress(1.0, text="Klar!")
         status_text.empty()
-        found_count_ph.empty()
+        live_leads_ph.empty()  # Full results UI renders below — no duplicate
 
         # On crash: fall back to the AI leads already saved progressively
         if scan_crashed:
