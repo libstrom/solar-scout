@@ -95,9 +95,7 @@ def _sv_error(exc: Exception) -> str:
 
 
 def _get_cookie_manager():
-    if _COOKIES_AVAILABLE:
-        return stx.CookieManager(key="solar_scout_auth")
-    return None
+    return st.session_state.get("_cookie_manager")
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
@@ -1574,6 +1572,9 @@ def main():
         page_icon="🔍",
         layout="wide",
     )
+
+    if _COOKIES_AVAILABLE:
+        st.session_state["_cookie_manager"] = stx.CookieManager(key="solar_scout_auth")
 
     # Hantera offentliga sidor (innan auth-check)
     if st.query_params.get("page") == "privacy":
