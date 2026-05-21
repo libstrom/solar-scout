@@ -74,11 +74,8 @@ Lead (SOLAR=UNSURE) → needs_review=True → granskningskö
 | Koord | Etikett | Adress | Elvärde |
 |-------|---------|--------|---------|
 | 55.5706, 13.0379 | solar_yes | Risholmsgatan 8, Malmö | SE4 |
-| 55.5751, 13.0708 | solar_yes_2 | Skimmelgatan 22, Malmö | SE4 |
 | 55.5765, 13.0743 | solar_no | Remontgatan 41, Malmö | SE4 |
-| 57.6398, 14.7056 | solar_yes_3 | Queckfeldtsgatan 17, Nässjö | SE3 |
-| 57.6475, 14.7094 | solar_yes_4 | Stjärngatan 4, Nässjö | SE3 |
-| 57.6530, 14.7126 | solar_yes_5 | Norrhagagatan 14, Nässjö | SE3 |
+| 57.64119, 14.70581 | solar_yes_3 | Queckfeldtsgatan 17, Nässjö | SE3 ✓ koordinat korrigerad 2026-05-21 |
 | 57.6349, 14.7104 | solar_no_3 | Smålandsgatan 48, Nässjö | SE3 |
 | koordinater saknas | solar_yes_6 | Upplandsgatan 3, Nässjö | SE3 |
 
@@ -90,11 +87,18 @@ Lead (SOLAR=UNSURE) → needs_review=True → granskningskö
 | Mapbox | **NEJ** | 24h-regel — får bara visas i UI, aldrig lagras |
 | Google Static Maps | Ja | Fallback om LM misslyckas |
 
+## Detektionspipeline — dynamisk few-shot
+
+Sedan 2026-05-21 laddar `_load_dynamic_few_shot(user_id)` bekräftade leads
+och false positives från Supabase som extra few-shot-exempel. AI:n lär sig
+automatiskt av varje lead David bekräftar eller avvisar i granskningskön.
+
 ## Nyckelfiler
 
 | Fil | Ansvar |
 |-----|--------|
-| `scanner.py` | Hela scanpipelinen: OSM, LM WMS, Claude vision, few-shot |
-| `app.py` | Streamlit UI: login, scan-sida, granskningskö, CSV-export |
-| `tests/` | 88 tester (73 unit + 15 F1-harness, 3 kräver riktig API-nyckel) |
+| `scanner.py` | Hela scanpipelinen: OSM, LM WMS, Claude vision, few-shot, dynamisk inlärning |
+| `app.py` | Streamlit UI: login, scan, granskningskö (Tinder-vy), leads, CSV-export |
+| `tests/` | 95 tester (92 unit + 3 kräver riktig API-nyckel) |
+| `HANDOFF.md` | Fullständig överlämning med deploy-steg och status |
 | `docs/adr/` | Arkitekturbeslut (OSM-licens m.fl.) |
