@@ -3,6 +3,7 @@ Scout – Takidentifiering & Leadsgenerering
 Linus Bergström
 """
 
+import io
 import os
 import logging
 import urllib.parse
@@ -57,6 +58,20 @@ CSV_ATTRIBUTION_HEADER = (
     "# https://www.openstreetmap.org/copyright · "
     "https://creativecommons.org/licenses/by/4.0/\n"
 )
+
+
+def _to_excel_bytes(df: pd.DataFrame) -> bytes:
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Leads")
+        ws = writer.sheets["Leads"]
+        for col in ws.columns:
+            ws.column_dimensions[col[0].column_letter].width = max(
+                len(str(col[0].value or "")),
+                max((len(str(c.value or "")) for c in col[1:]), default=0),
+            ) + 4
+    return buf.getvalue()
+
 
 @st.cache_resource
 def _anon_supabase() -> Client:
@@ -890,12 +905,11 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
 
     date_str = datetime.now().strftime("%y%m%d")
     export = pd.DataFrame(sb_rows).drop(columns=["lat", "lng"], errors="ignore")
-    csv_bytes = (CSV_ATTRIBUTION_HEADER + export.to_csv(index=False)).encode("utf-8")
     st.download_button(
-        "⬇ Ladda ner CSV",
-        csv_bytes,
-        file_name=f"Scanner_Leads_{date_str}.csv",
-        mime="text/csv",
+        "⬇ Ladda ner Excel",
+        _to_excel_bytes(export),
+        file_name=f"Scanner_Leads_{date_str}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
 
@@ -1230,12 +1244,11 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
         columns={"samtomt_solar_extra": "Samtomt sol"}
     )
     date_str  = datetime.now().strftime("%y%m%d")
-    csv_bytes = (CSV_ATTRIBUTION_HEADER + export_df.to_csv(index=False)).encode("utf-8")
     st.download_button(
-        "⬇ Ladda ner CSV",
-        csv_bytes,
-        file_name=f"Scout_Leads_{date_str}.csv",
-        mime="text/csv",
+        "⬇ Ladda ner Excel",
+        _to_excel_bytes(export_df),
+        file_name=f"Scout_Leads_{date_str}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         type="primary",
         use_container_width=True,
     )

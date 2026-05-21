@@ -16,6 +16,7 @@ import io
 import math
 import base64
 import time
+import threading
 import logging
 import httpx
 try:
@@ -46,6 +47,9 @@ logging.basicConfig(
 )
 _log = logging.getLogger("solar_scout")
 
+# Limit concurrent Overpass calls — 4 parallel workers × 2 calls each can hit
+# the overpass-api.de rate limiter. Cap at 2 simultaneous requests.
+_OVERPASS_SEM = threading.Semaphore(2)
 
 
 @dataclass
@@ -98,27 +102,42 @@ def _center_bbox(lat: float, lng: float, radius_km: float = 1.0):
 # ── OSM queries ────────────────────────────────────────────────────────────────
 
 def _overpass(query: str, timeout: int = 90) -> list[dict]:
-    for attempt in range(3):
-        try:
-            _log.info("Overpass query start (timeout=%ds attempt=%d)", timeout, attempt + 1)
-            resp = httpx.post(
-                "https://overpass-api.de/api/interpreter",
-                data={"data": query},
-                timeout=timeout,
-                headers={
-                    "User-Agent": "solar-scout/1.0 (https://github.com/libstrom/solar-scout)",
-                },
-            )
-            resp.raise_for_status()
-            elements = resp.json().get("elements", [])
-            _log.info("Overpass returned %d elements", len(elements))
-            return elements
-        except Exception as exc:
-            _log.warning("Overpass attempt %d failed: %s", attempt + 1, exc)
-            if attempt < 2:
-                import time; time.sleep(2 ** attempt)
-    _log.error("Overpass failed after 3 attempts")
-    return []
+    _BACKOFF = [5, 20, 60]
+    with _OVERPASS_SEM:
+        for attempt in range(4):
+            try:
+                _log.info("Overpass query start (timeout=%ds attempt=%d)", timeout, attempt + 1)
+                resp = httpx.post(
+                    "https://overpass-api.de/api/interpreter",
+                    data={"data": query},
+                    timeout=timeout,
+                    headers={
+                        "User-Agent": "solar-scout/1.0 (https://github.com/libstrom/solar-scout)",
+                    },
+                )
+                if resp.status_code == 429:
+                    wait = max(60, _BACKOFF[min(attempt, len(_BACKOFF) - 1)])
+                    _log.warning("Overpass rate limited (429) — waiting %ds", wait)
+                    time.sleep(wait)
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                remark = data.get("remark", "")
+                if remark and ("too many" in remark.lower() or "rate" in remark.lower()):
+                    wait = _BACKOFF[min(attempt, len(_BACKOFF) - 1)]
+                    _log.warning("Overpass rate limit remark: %s — waiting %ds", remark, wait)
+                    if attempt < 3:
+                        time.sleep(wait)
+                    continue
+                elements = data.get("elements", [])
+                _log.info("Overpass returned %d elements", len(elements))
+                return elements
+            except Exception as exc:
+                _log.warning("Overpass attempt %d failed: %s", attempt + 1, exc)
+                if attempt < 3:
+                    time.sleep(_BACKOFF[min(attempt, len(_BACKOFF) - 1)])
+        _log.error("Overpass failed after 4 attempts")
+        return []
 
 
 def _tags_to_address(tags: dict) -> str:
