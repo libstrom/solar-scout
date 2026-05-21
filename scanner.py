@@ -1328,6 +1328,44 @@ def _get_residential_areas(south: float, west: float, north: float, east: float)
     return areas
 
 
+def scan_nearby_buildings(
+    lat: float,
+    lng: float,
+    google_key: str,
+    anthropic_key: str | None,
+    exclude_tile_key: str = "",
+    skip_tile_keys: frozenset[str] = frozenset(),
+    radius_m: int = 60,
+    mapbox_key: str | None = None,
+) -> list[Lead]:
+    """Scan buildings within radius_m metres of lat/lng for solar panels."""
+    dlat = radius_m / 111_000
+    dlng = radius_m / (111_000 * math.cos(math.radians(lat)))
+    south, west = lat - dlat, lng - dlng
+    north, east = lat + dlat, lng + dlng
+    buildings = _get_osm_buildings(south, west, north, east, max_count=20)
+    if not buildings or not anthropic_key:
+        return []
+    client = anthropic.Anthropic(api_key=anthropic_key)
+    few_shot = _load_few_shot_images()
+    all_skip = skip_tile_keys | ({exclude_tile_key} if exclude_tile_key else set())
+    leads: list[Lead] = []
+    for bld in buildings:
+        tile_key = f"bld/{bld['osm_id']}"
+        if tile_key in all_skip:
+            continue
+        lead = _process_building(
+            bld, google_key, client,
+            mapbox_key=mapbox_key,
+            few_shot=few_shot,
+            skip_tile_keys=all_skip,
+        )
+        if lead:
+            leads.append(lead)
+            all_skip = all_skip | {tile_key}
+    return leads
+
+
 def scan_city(
     city_name: str,
     google_key: str,
