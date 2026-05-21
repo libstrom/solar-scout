@@ -289,15 +289,10 @@ def create_portal_url(customer_id: str) -> str:
 # ── E-post ────────────────────────────────────────────────────────────────────
 
 def _send_meeting_email(address: str, note: str, lat: float | None, lng: float | None) -> bool:
-    """Skicka mail till Linus när David bokar ett möte. Kräver SMTP_* i secrets."""
-    import smtplib, ssl
-    from email.mime.text import MIMEText
-    host  = _secret("SMTP_HOST", "smtp.gmail.com")
-    port  = int(_secret("SMTP_PORT", "465"))
-    user  = _secret("SMTP_USER")
-    pwd   = _secret("SMTP_PASS")
-    if not (host and user and pwd):
-        _log.warning("SMTP ej konfigurerat — mail skickas ej")
+    """Skicka mail till Linus när David bokar ett möte. Kräver RESEND_API_KEY i secrets."""
+    api_key = _secret("RESEND_API_KEY")
+    if not api_key:
+        _log.warning("RESEND_API_KEY saknas — mail skickas ej")
         return False
     maps = f"https://maps.google.com/?q={lat},{lng}" if lat and lng else ""
     body = (
@@ -307,15 +302,19 @@ def _send_meeting_email(address: str, note: str, lat: float | None, lng: float |
         f"{('Karta: ' + maps) if maps else ''}\n\n"
         f"Logga in på solar-scout.streamlit.app för att se leadet."
     )
-    msg = MIMEText(body, "plain", "utf-8")
-    msg["Subject"] = f"☀️ Nytt möte bokat — {address}"
-    msg["From"]    = user
-    msg["To"]      = "linus.bergstrom@enspectaenergi.se"
     try:
-        ctx = ssl.create_default_context()
-        with smtplib.SMTP_SSL(host, port, context=ctx) as s:
-            s.login(user, pwd)
-            s.sendmail(user, ["linus.bergstrom@enspectaenergi.se"], msg.as_string())
+        resp = httpx.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "from":    "Solar Scout <onboarding@resend.dev>",
+                "to":      ["linus.bergstrom@enspectaenergi.se"],
+                "subject": f"☀️ Möte bokat — {address}",
+                "text":    body,
+            },
+            timeout=8,
+        )
+        resp.raise_for_status()
         _log.info("mötes-mail skickat för %s", address)
         return True
     except Exception as _e:
