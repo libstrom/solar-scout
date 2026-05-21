@@ -1599,5 +1599,30 @@ def main():
     page_app(user, profile, lead_count)
 
 
+def _report_crash(exc: Exception) -> None:
+    """Skapa GitHub Issue automatiskt vid okänt app-krasch."""
+    import traceback, httpx as _hx
+    token = _secret("GITHUB_TOKEN")
+    if not token:
+        return
+    try:
+        _hx.post(
+            "https://api.github.com/repos/libstrom/solar-scout/issues",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+            json={
+                "title": f"[Auto-crash] {type(exc).__name__}: {str(exc)[:120]}",
+                "body": f"Automatiskt rapporterat från Streamlit Cloud.\n\n```\n{traceback.format_exc()}\n```",
+                "labels": ["bug", "needs-triage"],
+            },
+            timeout=5,
+        )
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as _e:
+        _report_crash(_e)
+        raise
