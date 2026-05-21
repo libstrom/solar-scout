@@ -286,6 +286,51 @@ def create_portal_url(customer_id: str) -> str:
     )
     return session.url
 
+# ── E-post ────────────────────────────────────────────────────────────────────
+
+def _send_meeting_email(address: str, note: str, lat: float | None, lng: float | None) -> bool:
+    """Skicka mail till Linus när David bokar ett möte. Kräver SMTP_* i secrets."""
+    import smtplib, ssl
+    from email.mime.text import MIMEText
+    host  = _secret("SMTP_HOST", "smtp.gmail.com")
+    port  = int(_secret("SMTP_PORT", "465"))
+    user  = _secret("SMTP_USER")
+    pwd   = _secret("SMTP_PASS")
+    if not (host and user and pwd):
+        _log.warning("SMTP ej konfigurerat — mail skickas ej")
+        return False
+    maps = f"https://maps.google.com/?q={lat},{lng}" if lat and lng else ""
+    body = (
+        f"David har bokat ett möte!\n\n"
+        f"Adress: {address}\n"
+        f"Notering: {note or '–'}\n"
+        f"{('Karta: ' + maps) if maps else ''}\n\n"
+        f"Logga in på solar-scout.streamlit.app för att se leadet."
+    )
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["Subject"] = f"☀️ Nytt möte bokat — {address}"
+    msg["From"]    = user
+    msg["To"]      = "linus.bergstrom@enspectaenergi.se"
+    try:
+        ctx = ssl.create_default_context()
+        with smtplib.SMTP_SSL(host, port, context=ctx) as s:
+            s.login(user, pwd)
+            s.sendmail(user, ["linus.bergstrom@enspectaenergi.se"], msg.as_string())
+        _log.info("mötes-mail skickat för %s", address)
+        return True
+    except Exception as _e:
+        _log.warning("mail misslyckades: %s", _e)
+        return False
+
+
+_LEAD_STATUSES = {
+    "ej_kontaktad": "📋 Ej kontaktad",
+    "kontaktad":    "📞 Kontaktad",
+    "mote_bokat":   "📅 Möte bokat",
+    "ej_intresserad": "❌ Ej intresserad",
+    "kund":         "✅ Kund",
+}
+
 # ── Leads ─────────────────────────────────────────────────────────────────────
 
 def save_lead(user_id: str, data: dict, profile: dict | None = None):
@@ -1196,28 +1241,78 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
         use_container_width=True,
     )
 
-    # ── Bekräftade leads (med "Inte solceller"-knapp) ─────────────────────────
+    # ── Bekräftade leads med status + notering ────────────────────────────────
     if "user_confirmed" in df.columns:
         confirmed_df = df[df["user_confirmed"] == True]  # noqa: E712
         if not confirmed_df.empty:
             st.divider()
             st.subheader("Bekräftade leads")
-            st.caption(f"{len(confirmed_df)} leads bekräftade — klicka om AI hade fel.")
+
+            # Sammanfattning per status
+            if "status" in confirmed_df.columns:
+                status_counts = confirmed_df["status"].value_counts()
+                booked = int(status_counts.get("mote_bokat", 0))
+                if booked:
+                    st.success(f"📅 {booked} möte{'n' if booked > 1 else ''} bokat")
+
+            st.caption(f"{len(confirmed_df)} leads bekräftade")
             _sb = get_supabase()
             for _, c_row in confirmed_df.iterrows():
-                c_col1, c_col2 = st.columns([3, 1])
-                with c_col1:
-                    st.markdown(f"**{c_row.get('address', '–')}**")
-                with c_col2:
-                    if st.button("❌ Inte solceller", key=f"fp_{c_row['id']}", use_container_width=True):
+                lid = int(c_row["id"])
+                addr = c_row.get("address", "–")
+                with st.expander(f"**{addr}**", expanded=False):
+                    col_s, col_fp = st.columns([2, 1])
+                    with col_s:
+                        cur_status = c_row.get("status") or "ej_kontaktad"
+                        new_status = st.selectbox(
+                            "Status",
+                            options=list(_LEAD_STATUSES.keys()),
+                            format_func=lambda k: _LEAD_STATUSES[k],
+                            index=list(_LEAD_STATUSES.keys()).index(cur_status)
+                                  if cur_status in _LEAD_STATUSES else 0,
+                            key=f"status_{lid}",
+                        )
+                    with col_fp:
+                        if st.button("❌ Inte solceller", key=f"fp_{lid}", use_container_width=True):
+                            try:
+                                _sb.table("scout_leads").update({
+                                    "false_positive": True,
+                                    "has_solar": "Nej",
+                                    "user_confirmed": False,
+                                }).eq("id", lid).execute()
+                            except Exception:
+                                pass
+                            st.rerun()
+
+                    cur_note = c_row.get("david_note") or c_row.get("notes") or ""
+                    new_note = st.text_area(
+                        "Notering (synlig för Linus)",
+                        value=cur_note,
+                        placeholder="t.ex. grannhuset har sol, dåligt tak, intresserad av batteri...",
+                        key=f"note_{lid}",
+                        height=80,
+                    )
+
+                    if st.button("Spara", key=f"save_{lid}", type="primary"):
+                        update = {"status": new_status}
+                        if new_note != cur_note:
+                            update["david_note"] = new_note
                         try:
-                            _sb.table("scout_leads").update({
-                                "false_positive": True,
-                                "has_solar": "Nej",
-                                "user_confirmed": False,
-                            }).eq("id", int(c_row["id"])).execute()
+                            _sb.table("scout_leads").update(update).eq("id", lid).execute()
                         except Exception:
                             pass
+                        # Skicka mail till Linus om möte precis bokades
+                        if new_status == "mote_bokat" and cur_status != "mote_bokat":
+                            sent = _send_meeting_email(
+                                addr, new_note,
+                                c_row.get("lat"), c_row.get("lng"),
+                            )
+                            if sent:
+                                st.success("📧 Mail skickat till Linus!")
+                            else:
+                                st.info("Status sparad. (Konfigurera SMTP för automatiskt mail)")
+                        else:
+                            st.success("Sparat.")
                         st.rerun()
 
     # ── Granska AI-leads ───────────────────────────────────────────────────────
