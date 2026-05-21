@@ -1199,15 +1199,59 @@ def page_review(user):
 
     st.write("")
 
+    # Granntomt-scan triggered by previous rejection
+    _gt_key = f"review_granntomt_{lead_id}"
+    if st.session_state.get(_gt_key):
+        _gt = st.session_state.pop(_gt_key)
+        if _gt.get("lat") and _gt.get("lng"):
+            with st.spinner("🔍 Skannar granntomter..."):
+                try:
+                    from scanner import scan_nearby_buildings
+                    _existing = (
+                        sb.table("scout_leads")
+                        .select("tile_key")
+                        .eq("user_id", str(user.id))
+                        .execute()
+                    ).data or []
+                    _skip = frozenset(r["tile_key"] for r in _existing if r.get("tile_key"))
+                    _nearby = scan_nearby_buildings(
+                        _gt["lat"], _gt["lng"],
+                        google_key=GOOGLE_API_KEY or "",
+                        anthropic_key=ANTHROPIC_API_KEY,
+                        exclude_tile_key=_gt.get("tile_key", ""),
+                        skip_tile_keys=_skip,
+                    )
+                    for _nl in _nearby:
+                        try:
+                            sb.table("scout_leads").insert(
+                                {**_lead_to_sb_row(_nl), "user_id": str(user.id)}
+                            ).execute()
+                        except Exception:
+                            pass
+                    if _nearby:
+                        st.success(f"☀️ Hittade {len(_nearby)} lead(s) på granntomter — se Leads-fliken!")
+                    else:
+                        st.info("Inga solceller hittades på granntomterna.")
+                except Exception as _ge:
+                    st.warning(f"Granntomt-scan misslyckades: {_ge}")
+
+    reject_reason = st.selectbox(
+        "Avvisningsorsak",
+        ["Inga solceller", "Granntomt", "Solfångare", "Eternite"],
+        key="review_reject_reason",
+        label_visibility="collapsed",
+    )
+
     # ── Tinder-knappar ──────────────────────────────────────────────────────
     col_nej, col_ja = st.columns(2)
     with col_nej:
-        if st.button("❌  Inte solceller", use_container_width=True, key="review_no"):
+        if st.button("❌  Avvisa", use_container_width=True, key="review_no"):
             try:
                 sb.table("scout_leads").update({
                     "user_confirmed": False,
                     "needs_review": False,
                     "false_positive": True,
+                    "reject_reason": reject_reason,
                 }).eq("id", lead_id).execute()
             except Exception:
                 pass
@@ -1229,6 +1273,9 @@ def page_review(user):
                     sb.table("scout_leads").update({"confirmed_image_url": _no_url}).eq("id", lead_id).execute()
             except Exception:
                 pass
+            if reject_reason == "Granntomt" and lat and lng:
+                _tile_key = lead.get("tile_key", "") or f"bld/{lead_id}"
+                st.session_state[_gt_key] = {"lat": lat, "lng": lng, "tile_key": _tile_key}
             st.rerun()
     with col_ja:
         if st.button("✅  Ja, solceller!", type="primary", use_container_width=True, key="review_yes"):
