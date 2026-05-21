@@ -633,6 +633,7 @@ def _lead_to_sb_row(lead) -> dict:
         "solar_location":      getattr(lead, "solar_location", "roof"),
         "needs_review":        getattr(lead, "needs_review", False),
         "ai_reasoning":        getattr(lead, "ai_reasoning", ""),
+        "tile_key":            getattr(lead, "tile_key", ""),
     }
 
 
