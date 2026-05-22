@@ -982,9 +982,9 @@ def _analyze_building(
         "If you cannot confirm BOTH → SOLAR=NO.\n\n"
 
         "COMMON TRAPS — all fail the boundary test, all mean SOLAR=NO:\n"
-        "• Whole-roof dark surfaces (bitumen, EPDM, dark tiles, dark metal) — "
+        "• Whole-roof dark surfaces (bitumen, asphalt, EPDM, dark tiles, dark metal) — "
         "no sub-area boundary possible\n"
-        "• Skandiategel clay tiles — bumpy ridge texture, not flat; ubiquitous in SE3\n"
+        "• Skandiategel / tegelpannor (clay tiles) — bumpy ridge texture, not flat; ubiquitous in SE3\n"
         "• Corrugated grey fibre cement — ribbed surface, not flat rectangles; "
         "very common on 1960–1980s Swedish housing\n"
         "• Standing-seam metal (plåttak) — long parallel ribs ridge-to-eave, "
@@ -995,7 +995,7 @@ def _analyze_building(
         "• Solar thermal collectors (solfångare) — narrow tube strips, not flat panels\n\n"
 
         "CALIBRATION: Only ~5–10% of SE3 villas have solar. "
-        "When the signal is subtle or ambiguous → SOLAR=UNSURE, not YES. "
+        "When the signal is subtle, uncertain, or ambiguous → SOLAR=UNSURE, not YES. "
         "A missed panel costs less than a false alarm.\n\n"
 
         "End with exactly two lines, nothing after:\n"
