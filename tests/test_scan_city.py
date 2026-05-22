@@ -6,6 +6,8 @@ Täcker:
   2. dedup          — samma koordinat/adress från flera sources → dedupas till ett lead
   3. tom stad       — Overpass returnerar 0 byggnader → tom lista, inget krasch
   4. area_cap       — _get_osm_buildings skickar inte fler än max_count (default 600) till Overpass
+  5. all_areas      — scan_city fortsätter till nästa area tills max_leads nås (regression för
+                      max_leads//5-buggen som gav 0 leads i stora städer som Lund)
 """
 
 import sys
@@ -425,3 +427,105 @@ class TestAreaCap:
         for cap in calls_to_get_osm_buildings:
             assert cap is not None
             assert cap <= 600, f"area cap {cap} exceeds MAX expected 600"
+
+
+# ── 5. all_areas — regression för max_leads//5-buggen ─────────────────────────
+
+class TestAllAreas:
+    """scan_city ska scanna alla areas tills max_leads nås — inte stanna efter max_leads//5.
+
+    Regression för buggen som gav 0 leads i stora städer (Lund, Malmö):
+    med max_leads=10 begränsades scan till max(1, 10//5)=2 areas. Om de 2
+    första råkade vara campus/lägenhetszoner → 0 leads trots att villa-suburbs
+    med solpaneler finns längre ut.
+    """
+
+    def test_scans_beyond_first_two_areas_when_no_leads_found(self):
+        """Med 10 areas och 0 leads i area 1-2 ska area 3+ scannas.
+
+        Gamla beteendet: max_areas = max(1, 10//5) = 2 → stannar efter area 2.
+        Nya beteendet: scanna alla tills max_leads nås.
+
+        Varje area får unika buildings (olika osm_id) för att undvika
+        seen_building_ids-dedupliceringen som annars filtrerar bort dem.
+        """
+        fake_gmaps = MagicMock()
+        fake_gmaps.geocode.return_value = _make_geocode_result()
+
+        ten_areas = [
+            {"lat": 59.30 + i * 0.01, "lng": 18.05, "area_deg2": 0.01}
+            for i in range(10)
+        ]
+
+        area_scan_count = [0]
+
+        def fake_get_osm_buildings(south, west, north, east, **kwargs):
+            # Unique building per area call — avoids seen_building_ids dedup
+            area_idx = area_scan_count[0]
+            return [_make_building(f"BLD_AREA_{area_idx}", 59.30 + area_idx * 0.01, 18.05)]
+
+        def fake_scan_buildings_ai(buildings, *args, max_leads=None, **kwargs):
+            area_scan_count[0] += 1
+            # Only area 5 (call #5) produces a lead
+            if area_scan_count[0] == 5:
+                return [_make_lead(59.35, 18.05)]
+            return []
+
+        with patch("googlemaps.Client", return_value=fake_gmaps), \
+             patch.object(scanner, "scan_area_osm", return_value=[]), \
+             patch.object(scanner, "_get_residential_areas", return_value=ten_areas), \
+             patch.object(scanner, "_get_osm_buildings",
+                          side_effect=fake_get_osm_buildings), \
+             patch.object(scanner, "scan_buildings_ai",
+                          side_effect=fake_scan_buildings_ai):
+
+            result = scan_city(
+                city_name="Teststad",
+                google_key="fake",
+                anthropic_key="fake",
+                max_leads=10,
+            )
+
+        assert len(result) >= 1, "Ska hitta lead i area 5"
+        assert area_scan_count[0] >= 5, (
+            f"Bara {area_scan_count[0]} areas scannades — gamla buggen begränsade till 2"
+        )
+
+    def test_stops_scanning_areas_when_max_leads_reached(self):
+        """När max_leads är uppnått ska inga fler areas scannas."""
+        fake_gmaps = MagicMock()
+        fake_gmaps.geocode.return_value = _make_geocode_result()
+
+        twenty_areas = [
+            {"lat": 59.30 + i * 0.01, "lng": 18.05, "area_deg2": 0.01}
+            for i in range(20)
+        ]
+        building = _make_building("BLD1", 59.35, 18.05)
+
+        area_scan_count = [0]
+
+        def fake_scan_buildings_ai(buildings, *args, max_leads=None, **kwargs):
+            area_scan_count[0] += 1
+            # Every area produces max_leads leads immediately
+            leads = [_make_lead(59.35 + area_scan_count[0] * 0.0001, 18.05)]
+            if max_leads is not None:
+                leads = leads[:max_leads]
+            return leads
+
+        with patch("googlemaps.Client", return_value=fake_gmaps), \
+             patch.object(scanner, "scan_area_osm", return_value=[]), \
+             patch.object(scanner, "_get_residential_areas", return_value=twenty_areas), \
+             patch.object(scanner, "_get_osm_buildings", return_value=[building]), \
+             patch.object(scanner, "scan_buildings_ai",
+                          side_effect=fake_scan_buildings_ai):
+
+            result = scan_city(
+                city_name="Teststad",
+                google_key="fake",
+                anthropic_key="fake",
+                max_leads=3,
+            )
+
+        assert len(result) <= 3, "Ska inte returnera fler än max_leads"
+        # Should stop well before scanning all 20 areas
+        assert area_scan_count[0] < 20, "Ska sluta scanna när max_leads nås"
