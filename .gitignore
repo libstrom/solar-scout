@@ -8,3 +8,4 @@ venv/
 *.pyc
 .agents/
 spike_tile_labeled.jpg
+scan_pipeline.png
