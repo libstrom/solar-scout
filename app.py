@@ -780,10 +780,55 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
             st.warning("streamlit-folium saknas — rita-läge otillgängligt. Ange ort i fältet till vänster.")
 
     use_bbox = south is not None
+
+    # ── Cost estimate + confirmation ───────────────────────────────────────
+    # Shown after "Starta scanning" click, before scan actually runs.
+    COST_PER_BUILDING_SEK = 0.025   # Sonnet-4-6 with cache: ~$0.0025 × 10 SEK/$
+    SOLAR_RATE = 0.08               # ~8% of SE3 villas have solar
+
     if start:
         if not city_name and not use_bbox:
             st.warning("Ange en ort eller rita ett område på kartan.")
             return
+        # Store intent, show cost estimate
+        st.session_state["scan_pending"] = {
+            "city": city_name, "south": south, "west": west,
+            "north": north, "east": east, "max_leads": max_leads,
+        }
+        st.rerun()
+
+    pending = st.session_state.get("scan_pending")
+    if pending:
+        ml = pending["max_leads"]
+        # Estimate: to find N leads at 8% solar rate, analyze N/0.08 buildings
+        est_analyzed = int((ml or 200) / SOLAR_RATE)
+        est_sek = round(est_analyzed * COST_PER_BUILDING_SEK, 1)
+        area_label = pending["city"] or "ritat område"
+
+        st.warning(
+            f"**Scanningsuppskattning — {area_label}**\n\n"
+            f"- Max leads: {ml or 'obegränsat'}\n"
+            f"- Beräknat antal hus att analysera: ~{est_analyzed}\n"
+            f"- Beräknad kostnad: **~{est_sek} kr** (Claude Vision)\n\n"
+            f"_Faktisk kostnad kan variera beroende på hur tät bebyggelsen är._"
+        )
+        col_yes, col_no = st.columns(2)
+        confirmed = col_yes.button("✅ Ja, kör scanning", type="primary", use_container_width=True)
+        cancelled = col_no.button("❌ Avbryt", use_container_width=True)
+
+        if cancelled:
+            st.session_state.pop("scan_pending", None)
+            st.rerun()
+        if not confirmed:
+            return
+
+        # User confirmed — restore values and proceed
+        city_name = pending["city"]
+        south, west = pending["south"], pending["west"]
+        north, east = pending["north"], pending["east"]
+        max_leads   = pending["max_leads"]
+        use_bbox    = south is not None
+        st.session_state.pop("scan_pending", None)
 
         # Clear any previous scan results and state flags
         st.session_state.pop("scanner_sb_rows", None)
