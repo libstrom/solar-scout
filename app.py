@@ -1360,11 +1360,17 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
         "notes": "Noteringar", "image_url": "Satellitbild",
         "created_at": "Sparad",
     }
-    display_df = df[display_cols].rename(columns=rename_map)
+    display_df = df[display_cols].rename(columns=rename_map).reset_index(drop=True)
     if "Samtomt sol" in display_df.columns:
         display_df["Samtomt sol"] = display_df["Samtomt sol"].apply(_samtomt_icon)
 
-    column_config: dict = {}
+    # Checkbox-kolumn för markering/radering — alla originalkolumner är read-only
+    selectable_df = display_df.copy()
+    selectable_df.insert(0, "🗑", False)
+
+    column_config: dict = {
+        "🗑": st.column_config.CheckboxColumn("", width="small"),
+    }
     if "Satellitbild" in display_df.columns:
         column_config["Satellitbild"] = st.column_config.LinkColumn(
             "Satellitbild",
@@ -1372,12 +1378,37 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
             help="Öppnar LM WMS-bild direkt i webbläsaren",
         )
 
-    st.dataframe(
-        display_df,
+    edited = st.data_editor(
+        selectable_df,
         use_container_width=True,
         hide_index=True,
-        column_config=column_config if column_config else None,
+        num_rows="fixed",
+        column_config=column_config,
+        disabled=[c for c in display_df.columns],
+        key="leads_editor",
     )
+
+    # Raderingslogik — kräver att df har id-kolumn
+    if "id" in df.columns:
+        df_reset = df.reset_index(drop=True)
+        selected_mask = edited["🗑"] == True  # noqa: E712
+        n_selected = int(selected_mask.sum())
+        if n_selected > 0:
+            selected_addrs = edited.loc[selected_mask, "Adress"].tolist() if "Adress" in edited.columns else []
+            preview = ", ".join(selected_addrs[:3]) + ("…" if len(selected_addrs) > 3 else "")
+            st.warning(f"**{n_selected} lead(s) markerade:** {preview}")
+            col_cancel, col_delete = st.columns([1, 1])
+            with col_cancel:
+                if st.button("Avbryt", key="btn_delete_cancel", use_container_width=True):
+                    st.rerun()
+            with col_delete:
+                if st.button(f"🗑 Ta bort {n_selected} lead(s)", type="primary",
+                             key="btn_delete_confirm", use_container_width=True):
+                    sb = get_supabase()
+                    for lid in df_reset.loc[selected_mask, "id"]:
+                        delete_lead(int(lid))
+                    st.success(f"{n_selected} lead(s) borttagna.")
+                    st.rerun()
 
     with st.expander("➕ Lägg till manuell lead"):
         m_addr  = st.text_input("Adress", placeholder="Ljunggatan 12, Malmö")
@@ -1397,12 +1428,6 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
             st.success(f"Lead '{m_addr}' sparad.")
             st.rerun()
 
-    with st.expander("🗑 Ta bort en lead"):
-        lead_id = st.number_input("Lead-ID (se id-kolumnen i databasen)", min_value=1, step=1)
-        if st.button("Ta bort", type="secondary"):
-            delete_lead(int(lead_id))
-            st.success(f"Lead {lead_id} borttagen.")
-            st.rerun()
 
     st.divider()
     export_df = df.drop(columns=["id", "user_id"], errors="ignore").rename(
