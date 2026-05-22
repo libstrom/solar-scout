@@ -1833,24 +1833,27 @@ def page_app(user, profile, lead_count: int = 0):
         pass
 
     review_label = f"👁 Granska ({review_count})" if review_count else "👁 Granska"
-    tab_scanner, tab_scout, tab_leads, tab_review, tab_account = st.tabs(
-        ["🔍 AI Scanner", "🏠 Scouta Tak", "📋 Leads", review_label, "⚙ Konto"]
-    )
-
-    with tab_scanner:
-        page_scanner(user, profile, lead_count)
-
-    with tab_scout:
-        page_scout(user)
-
-    with tab_leads:
-        page_leads(user)
-
-    with tab_review:
-        page_review(user)
-
-    with tab_account:
-        page_account(user, profile)
+    if is_admin(profile):
+        tab_scanner, tab_scout, tab_leads, tab_review, tab_account = st.tabs(
+            ["🔍 AI Scanner", "🏠 Scouta Tak", "📋 Leads", review_label, "⚙ Konto"]
+        )
+        with tab_scanner:
+            page_scanner(user, profile, lead_count)
+        with tab_scout:
+            page_scout(user)
+        with tab_leads:
+            page_leads(user)
+        with tab_review:
+            page_review(user)
+        with tab_account:
+            page_account(user, profile)
+    else:
+        # Fältsäljare ser bara leads och granskningskön
+        tab_leads, tab_review = st.tabs(["📋 Leads", review_label])
+        with tab_leads:
+            page_leads(user)
+        with tab_review:
+            page_review(user)
 
     st.divider()
     st.caption(
