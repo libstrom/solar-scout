@@ -1428,7 +1428,10 @@ def scan_city(
     _log.info("scan_city residential_areas=%d", len(residential_areas))
 
     if residential_areas:
-        max_areas = max(1, (max_leads // 5)) if max_leads else len(residential_areas)
+        # Scan all areas — inner loop breaks early when max_leads is reached.
+        # The old max_leads//5 cap caused 0 leads in large cities (e.g. Lund:
+        # 465 areas but only 2 were scanned, missing all villa suburbs).
+        max_areas = len(residential_areas)
         _log.info("scan_city scanning %d/%d areas", max_areas, len(residential_areas))
         for area in residential_areas[:max_areas]:
             # Remaining lead budget for AI scan
