@@ -637,12 +637,6 @@ def _lead_to_sb_row(lead) -> dict:
 def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
     st.subheader("AI Scanner — Hitta solcellstak automatiskt")
 
-    mode = st.radio(
-        "Sök på",
-        ["Ort/stad (ange namn)", "Rita område på karta"],
-        horizontal=True,
-    )
-
     profile = profile or {}
     credits = profile.get("credits_balance", 0) or 0
     on_credit_plan = (not is_admin(profile) and
@@ -656,72 +650,139 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
     south = west = north = east = None
     city_name = ""
 
-    if mode == "Ort/stad (ange namn)":
-        city_name = st.text_input(
-            "Ort eller stad:",
-            placeholder="t.ex. Nässjö, Jönköping, Eksjö, Vetlanda",
+    ai_available = bool(ANTHROPIC_API_KEY)
+
+    # Load existing leads for map markers + last-scan context (lightweight: lat/lng/address/date only)
+    try:
+        _map_rows = (
+            get_supabase().table("scout_leads")
+            .select("lat,lng,address,created_at")
+            .eq("user_id", str(user.id))
+            .order("created_at", desc=True)
+            .limit(300)
+            .execute()
+            .data or []
         )
-    else:
+    except Exception:
+        _map_rows = []
+
+    # ── Two-column layout: controls | map ──────────────────────────────────
+    col_ctrl, col_map = st.columns([1, 2], gap="large")
+
+    with col_ctrl:
+        city_name = st.text_input(
+            "Ort eller stad",
+            placeholder="t.ex. Malmö, Nässjö, Lund, Huskvarna",
+            help="Ange ort ELLER rita ett rektangel på kartan. Ritad yta har förtur.",
+        )
+
+        if not ai_available:
+            st.warning("ANTHROPIC_API_KEY saknas — kör i OSM-läge.")
+
+        max_leads = st.number_input(
+            "Max antal leads",
+            min_value=0, max_value=500, value=30, step=5,
+            help="0 = obegränsat. Rekommenderat: 30–50 för snabb scanning.",
+        )
+        max_leads = max_leads if max_leads > 0 else None
+
+        # Last-scan summary
+        if _map_rows:
+            from datetime import datetime, timezone
+            try:
+                last_dt = datetime.fromisoformat(
+                    _map_rows[0]["created_at"].replace("Z", "+00:00")
+                )
+                days_ago = (datetime.now(timezone.utc) - last_dt).days
+                age_str = "idag" if days_ago == 0 else (
+                    "igår" if days_ago == 1 else f"{days_ago} d sedan"
+                )
+            except Exception:
+                age_str = ""
+            with st.expander(f"📍 {len(_map_rows)} leads · senast {age_str}"):
+                last_addr = _map_rows[0].get("address", "—")
+                st.caption(f"Senaste träff: {last_addr}")
+                if st.button("Zooma till leads på kartan", key="jump_to_leads"):
+                    st.session_state["scanner_zoom_to_leads"] = True
+                    st.rerun()
+
+        start = st.button("Starta scanning", type="primary", use_container_width=True)
+
+    with col_map:
         try:
             from streamlit_folium import st_folium
             import folium
             from folium.plugins import Draw
 
-            m = folium.Map(location=[57.65, 14.70], zoom_start=13)  # Nässjö
+            # Default: Skåne overview. Zoom to leads if user clicked the button.
+            if st.session_state.pop("scanner_zoom_to_leads", False) and _map_rows:
+                _lats = [r["lat"] for r in _map_rows if r.get("lat")]
+                _lngs = [r["lng"] for r in _map_rows if r.get("lng")]
+                center = [sum(_lats) / len(_lats), sum(_lngs) / len(_lngs)] if _lats else [55.8, 13.3]
+                zoom = 12
+            else:
+                center = [55.8, 13.3]   # Skåne
+                zoom = 9
+
+            m = folium.Map(location=center, zoom_start=zoom, tiles="OpenStreetMap")
+
+            # Rectangle draw only — polygon/circle/marker add complexity without value
             Draw(
+                position="topleft",
                 draw_options={
-                    "rectangle": True,
-                    "polygon": False,
-                    "circle": False,
-                    "marker": False,
-                    "polyline": False,
+                    "rectangle": {
+                        "shapeOptions": {"color": "#2563eb", "weight": 2, "fillOpacity": 0.08}
+                    },
+                    "polygon":      False,
+                    "circle":       False,
+                    "marker":       False,
+                    "polyline":     False,
                     "circlemarker": False,
                 },
-                edit_options={"edit": False},
+                edit_options={"edit": True, "remove": True},
             ).add_to(m)
-            output = st_folium(m, width="100%", height=450, returned_objects=["last_active_drawing"])
+
+            # Existing lead markers
+            for _row in _map_rows[:200]:
+                if _row.get("lat") and _row.get("lng"):
+                    folium.CircleMarker(
+                        location=[_row["lat"], _row["lng"]],
+                        radius=5,
+                        color="#f59e0b",
+                        fill=True,
+                        fill_opacity=0.75,
+                        tooltip=_row.get("address", ""),
+                    ).add_to(m)
+
+            output = st_folium(
+                m,
+                width="100%",
+                height=420,
+                returned_objects=["last_active_drawing"],
+                key="scanner_map",
+            )
 
             drawing = (output or {}).get("last_active_drawing")
             if drawing:
                 coords = drawing["geometry"]["coordinates"][0]
-                lats = [c[1] for c in coords]
-                lngs = [c[0] for c in coords]
+                lats  = [c[1] for c in coords]
+                lngs  = [c[0] for c in coords]
                 south, north = min(lats), max(lats)
-                west, east   = min(lngs), max(lngs)
-                st.success(f"Område valt: {south:.4f},{west:.4f} → {north:.4f},{east:.4f}")
+                west,  east  = min(lngs), max(lngs)
+                from scanner import _bbox_tiles, ZOOM as _ZOOM
+                tc = len(_bbox_tiles(south, west, north, east))
+                st.caption(
+                    f"Valt område · ~{tc} brickor · "
+                    f"{south:.4f},{west:.4f} → {north:.4f},{east:.4f}"
+                )
+
         except ImportError:
-            st.error("streamlit-folium är inte installerat. Kör: pip install streamlit-folium folium")
-            return
+            st.warning("streamlit-folium saknas — rita-läge otillgängligt. Ange ort i fältet till vänster.")
 
-    img_source = "mapbox" if MAPBOX_TOKEN else ("google" if GOOGLE_API_KEY else None)
-    if not img_source:
-        st.error("Varken MAPBOX_TOKEN eller GOOGLE_API_KEY är satt.")
-        return
-
-    ai_available = bool(ANTHROPIC_API_KEY)
-    if not ai_available:
-        st.warning("ANTHROPIC_API_KEY saknas — kör i OSM-läge (endast kända solcellstak från OpenStreetMap).")
-
-    if mode == "Rita område på karta" and None not in (south, west, north, east):
-        from scanner import _bbox_tiles, ZOOM as _ZOOM
-        tc = len(_bbox_tiles(south, west, north, east))
-        est_min = max(1, tc // 20)
-        st.caption(
-            f"Valda området: ~{tc} brickor à 107 m — "
-            f"{'OSM direkt' if not ai_available else f'beräknad tid ~{est_min} min med AI'}."
-        )
-
-    max_leads = st.number_input("Max antal leads (lämna 0 för obegränsat)", min_value=0, max_value=500, value=30, step=5)
-    max_leads = max_leads if max_leads > 0 else None
-
-    start = st.button("Starta scanning", type="primary", use_container_width=True)
-
+    use_bbox = south is not None
     if start:
-        if mode == "Ort/stad (ange namn)" and not city_name:
-            st.warning("Ange en ort.")
-            return
-        if mode == "Rita område på karta" and None in (south, west, north, east):
-            st.warning("Rita ett område på kartan först.")
+        if not city_name and not use_bbox:
+            st.warning("Ange en ort eller rita ett område på kartan.")
             return
 
         # Clear any previous scan results and state flags
@@ -826,11 +887,11 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                 scan_debug.append(f"AI bekräftade solceller: {count}")
 
         anthr_key = ANTHROPIC_API_KEY if ai_available else None
-        _log.info("scan start mode=%s ai=%s max_leads=%s", mode, bool(anthr_key), max_leads)
+        _log.info("scan start mode=%s ai=%s max_leads=%s", "bbox" if use_bbox else "city", bool(anthr_key), max_leads)
         leads = None
         scan_crashed = False
         try:
-            if mode == "Ort/stad (ange namn)":
+            if not use_bbox:
                 status_text.info("Söker upp ort och hämtar byggnadsdata från OSM (kan ta 20–60 s)...")
                 leads = scan_city(
                     city_name, GOOGLE_API_KEY or "", anthr_key, on_progress,
