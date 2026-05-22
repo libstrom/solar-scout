@@ -103,7 +103,12 @@ def _center_bbox(lat: float, lng: float, radius_km: float = 1.0):
 
 def _overpass(query: str, timeout: int = 90) -> list[dict]:
     _BACKOFF = [5, 20, 60]
-    with _OVERPASS_SEM:
+    # Acquire with timeout so an aborted scan's lingering threads can't block
+    # a new scan indefinitely (Streamlit reruns don't kill background threads).
+    acquired = _OVERPASS_SEM.acquire(timeout=15)
+    if not acquired:
+        _log.warning("Overpass semaphore timeout — previous scan still running, proceeding unthrottled")
+    try:
         for attempt in range(4):
             try:
                 _log.info("Overpass query start (timeout=%ds attempt=%d)", timeout, attempt + 1)
@@ -138,6 +143,9 @@ def _overpass(query: str, timeout: int = 90) -> list[dict]:
                     time.sleep(_BACKOFF[min(attempt, len(_BACKOFF) - 1)])
         _log.error("Overpass failed after 4 attempts")
         return []
+    finally:
+        if acquired:
+            _OVERPASS_SEM.release()
 
 
 def _tags_to_address(tags: dict) -> str:
