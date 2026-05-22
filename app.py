@@ -362,15 +362,12 @@ def save_lead(user_id: str, data: dict, profile: dict | None = None):
             decrement_credits(user_id)
 
 
-def load_leads(user_id: str) -> pd.DataFrame:
+def load_leads(user_id: str, include_false_positives: bool = False) -> pd.DataFrame:
     sb = get_supabase()
-    resp = (
-        sb.table("scout_leads")
-        .select("*")
-        .eq("user_id", user_id)
-        .order("created_at", desc=True)
-        .execute()
-    )
+    q = sb.table("scout_leads").select("*").eq("user_id", user_id)
+    if not include_false_positives:
+        q = q.eq("false_positive", False)
+    resp = q.order("created_at", desc=True).execute()
     return pd.DataFrame(resp.data) if resp.data else pd.DataFrame()
 
 
@@ -1360,16 +1357,21 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
         "notes": "Noteringar", "image_url": "Satellitbild",
         "created_at": "Sparad",
     }
-    display_df = df[display_cols].rename(columns=rename_map).reset_index(drop=True)
+    df_reset = df.reset_index(drop=True)
+    display_df = df_reset[display_cols].rename(columns=rename_map)
     if "Samtomt sol" in display_df.columns:
         display_df["Samtomt sol"] = display_df["Samtomt sol"].apply(_samtomt_icon)
 
-    # Checkbox-kolumn för markering/radering — alla originalkolumner är read-only
-    selectable_df = display_df.copy()
-    selectable_df.insert(0, "🗑", False)
+    # Checkbox "❌ Fel" per rad — markera falska positiver → AI lär sig
+    editable_df = display_df.copy()
+    editable_df.insert(0, "❌ Fel", False)
 
     column_config: dict = {
-        "🗑": st.column_config.CheckboxColumn("", width="small"),
+        "❌ Fel": st.column_config.CheckboxColumn(
+            "❌ Fel",
+            width="small",
+            help="Markera om AI:n hade fel — inga solceller här. Listan uppdateras och AI:n lär sig till nästa scan.",
+        ),
     }
     if "Satellitbild" in display_df.columns:
         column_config["Satellitbild"] = st.column_config.LinkColumn(
@@ -1379,7 +1381,7 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
         )
 
     edited = st.data_editor(
-        selectable_df,
+        editable_df,
         use_container_width=True,
         hide_index=True,
         num_rows="fixed",
@@ -1388,26 +1390,30 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
         key="leads_editor",
     )
 
-    # Raderingslogik — kräver att df har id-kolumn
-    if "id" in df.columns:
-        df_reset = df.reset_index(drop=True)
-        selected_mask = edited["🗑"] == True  # noqa: E712
-        n_selected = int(selected_mask.sum())
-        if n_selected > 0:
-            selected_addrs = edited.loc[selected_mask, "Adress"].tolist() if "Adress" in edited.columns else []
-            preview = ", ".join(selected_addrs[:3]) + ("…" if len(selected_addrs) > 3 else "")
-            st.warning(f"**{n_selected} lead(s) markerade:** {preview}")
-            col_cancel, col_delete = st.columns([1, 1])
+    # Hantera felmarkering — inga bekräftelsesteg, enkel klick räcker
+    if "id" in df_reset.columns:
+        wrong_mask = edited["❌ Fel"] == True  # noqa: E712
+        n_wrong = int(wrong_mask.sum())
+        if n_wrong > 0:
+            wrong_addrs = edited.loc[wrong_mask, "Adress"].tolist() if "Adress" in edited.columns else []
+            preview = ", ".join(wrong_addrs[:3]) + ("…" if len(wrong_addrs) > 3 else "")
+            st.warning(f"**{n_wrong} lead(s) markerade som fel:** {preview}")
+            col_cancel, col_confirm = st.columns(2)
             with col_cancel:
-                if st.button("Avbryt", key="btn_delete_cancel", use_container_width=True):
+                if st.button("Avbryt", key="btn_fp_cancel", use_container_width=True):
                     st.rerun()
-            with col_delete:
-                if st.button(f"🗑 Ta bort {n_selected} lead(s)", type="primary",
-                             key="btn_delete_confirm", use_container_width=True):
+            with col_confirm:
+                if st.button(
+                    f"✅ Bekräfta — AI lär sig av {n_wrong} fel",
+                    type="primary", key="btn_fp_confirm", use_container_width=True,
+                ):
                     sb = get_supabase()
-                    for lid in df_reset.loc[selected_mask, "id"]:
-                        delete_lead(int(lid))
-                    st.success(f"{n_selected} lead(s) borttagna.")
+                    for lid in df_reset.loc[wrong_mask, "id"]:
+                        sb.table("scout_leads").update({
+                            "false_positive": True,
+                            "user_confirmed": False,
+                        }).eq("id", int(lid)).execute()
+                    st.success(f"✅ {n_wrong} lead(s) markerade som fel. AI:n använder detta nästa scan.")
                     st.rerun()
 
     with st.expander("➕ Lägg till manuell lead"):
