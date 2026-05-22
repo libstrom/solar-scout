@@ -747,10 +747,13 @@ def _fetch_street_view(google_key: str, lat: float, lng: float) -> bytes | None:
     return None
 
 
-def _load_dynamic_few_shot(user_id: str | None = None, max_each: int = 2) -> list[tuple[str, str]]:
+def _load_dynamic_few_shot(user_id: str | None = None, max_each: int = 4) -> list[tuple[str, str]]:
     """Load confirmed leads from Supabase as additional few-shot examples.
 
     Fetches up to max_each YES and max_each NO examples that David has reviewed.
+    Uses confirmed_image_url when available, falls back to image_url so that
+    leads marked via the "❌ Fel" button (which sets false_positive but not
+    confirmed_image_url) are still used as negative calibration examples.
     Falls back silently — never blocks the scan.
     """
     try:
@@ -763,22 +766,21 @@ def _load_dynamic_few_shot(user_id: str | None = None, max_each: int = 2) -> lis
         sb = _sc(url, key)
         yes_rows = (
             sb.table("scout_leads")
-            .select("confirmed_image_url,lat,lng")
+            .select("confirmed_image_url,image_url,lat,lng")
             .eq("user_id", user_id)
             .eq("user_confirmed", True)
             .eq("false_positive", False)
-            .not_.is_("confirmed_image_url", "null")
             .order("created_at", desc=True)
             .limit(max_each)
             .execute()
             .data or []
         )
+        # Negative examples: both review-rejected AND "❌ Fel"-marked leads
         no_rows = (
             sb.table("scout_leads")
-            .select("confirmed_image_url,lat,lng")
+            .select("confirmed_image_url,image_url,lat,lng")
             .eq("user_id", user_id)
             .eq("false_positive", True)
-            .not_.is_("confirmed_image_url", "null")
             .order("created_at", desc=True)
             .limit(max_each)
             .execute()
@@ -791,30 +793,31 @@ def _load_dynamic_few_shot(user_id: str | None = None, max_each: int = 2) -> lis
             "HOUSE=YES\nSOLAR=YES"
         )
         no_verdict = (
-            "Roof surface is uniform throughout — no panel contrast, no rectangular patches. "
-            "User-confirmed: no solar panels.\n\n"
+            "Roof surface is uniform throughout — no panel contrast, no distinct rectangular patches. "
+            "User-confirmed: no solar panels. This is a typical SE3 Swedish villa without PV.\n\n"
             "HOUSE=YES\nSOLAR=NO"
         )
+
+        def _fetch_img(row: dict) -> bytes | None:
+            for key in ("confirmed_image_url", "image_url"):
+                img_url = row.get(key)
+                if img_url:
+                    try:
+                        resp = _httpx.get(img_url, timeout=8)
+                        if resp.status_code == 200 and resp.content:
+                            return resp.content
+                    except Exception:
+                        pass
+            return None
+
         for row in yes_rows:
-            img_url = row.get("confirmed_image_url")
-            if img_url:
-                try:
-                    resp = _httpx.get(img_url, timeout=8)
-                    if resp.status_code == 200 and resp.content:
-                        b64 = base64.standard_b64encode(resp.content).decode()
-                        examples.append((b64, yes_verdict))
-                except Exception:
-                    pass
+            content = _fetch_img(row)
+            if content:
+                examples.append((base64.standard_b64encode(content).decode(), yes_verdict))
         for row in no_rows:
-            img_url = row.get("confirmed_image_url")
-            if img_url:
-                try:
-                    resp = _httpx.get(img_url, timeout=8)
-                    if resp.status_code == 200 and resp.content:
-                        b64 = base64.standard_b64encode(resp.content).decode()
-                        examples.append((b64, no_verdict))
-                except Exception:
-                    pass
+            content = _fetch_img(row)
+            if content:
+                examples.append((base64.standard_b64encode(content).decode(), no_verdict))
         if examples:
             _log.info("dynamic few-shot: %d examples from Supabase", len(examples))
         return examples
@@ -995,9 +998,12 @@ def _analyze_building(
         "- SOLAR=YES   — clearly unambiguous rectangular smooth area, visibly "
         "different in texture from adjacent roof material. High confidence only.\n"
         "- SOLAR=UNSURE — something that COULD be panels but image quality, "
-        "shadow, or angle makes you uncertain. Use this instead of guessing.\n"
+        "shadow, or angle makes you uncertain. Use this INSTEAD of guessing YES.\n"
         "- SOLAR=NO    — no panels visible, or surface is dark tiles/EPDM/felt/"
         "metal/asphalt/skylights/ambiguous. DEFAULT when uncertain.\n\n"
+        "CALIBRATION: Only ~5–10% of SE3 villas have solar panels. If you are "
+        "tempted to say SOLAR=YES but the signal is subtle, say SOLAR=UNSURE instead. "
+        "A missed panel (false negative) is less costly than a false alarm.\n\n"
         "End with exactly two lines, nothing after:\n"
         "HOUSE=YES or HOUSE=NO\n"
         "SOLAR=YES or SOLAR=UNSURE or SOLAR=NO\n\n"
