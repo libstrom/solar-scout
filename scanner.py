@@ -775,12 +775,17 @@ def _load_dynamic_few_shot(user_id: str | None = None, max_each: int = 4) -> lis
             .execute()
             .data or []
         )
-        # Negative examples: both review-rejected AND "❌ Fel"-marked leads
+        # Negative examples: review-rejected UNSURE leads (user_confirmed=false)
+        # OR explicitly "❌ Fel"-marked leads (false_positive=true).
+        # The comment above used to match the code, but the filter only checked
+        # false_positive — so every "❌ Nej" click on an UNSURE lead was silently
+        # dropped from the few-shot pool. PostgREST .or_ restores both signals
+        # and retroactively unlocks rows already marked in the review queue.
         no_rows = (
             sb.table("scout_leads")
             .select("confirmed_image_url,image_url,lat,lng")
             .eq("user_id", user_id)
-            .eq("false_positive", True)
+            .or_("false_positive.eq.true,user_confirmed.eq.false")
             .order("created_at", desc=True)
             .limit(max_each)
             .execute()
@@ -955,16 +960,9 @@ def _analyze_building(
     )
     instruction = (
         "Swedish aerial orthophoto, ~50m wide, top-down view. "
-        "SE3 grid zone (Småland/Jönköping). Dominant roof materials: "
-        "red/brown clay tiles (Skandiategel), grey fibre cement, black bitumen/EPDM, "
-        "corrugated cement, standing-seam metal (plåttak).\n\n"
-
-        "THE BOUNDARY TEST — the only reliable solar signal:\n"
-        "A PV array always occupies a DISCRETE RECTANGULAR SUB-AREA of one roof face "
-        "with a visible EDGE between the panel field and the adjacent roofing material. "
-        "If you cannot identify that edge and that rectangular sub-area, there are no "
-        "panels. A roof face that is one uniform material — however dark or smooth — "
-        "is NOT solar.\n\n"
+        "SE3/SE4 grid zone (Småland, Skåne, Jönköping). Dominant roof materials: "
+        "red/brown clay tiles (Skandiategel, tegelpannor), grey fibre cement, "
+        "black bitumen/EPDM, corrugated cement, standing-seam metal (plåttak).\n\n"
 
         "STEP 1 — Is the CENTRAL structure a single-family home?\n"
         "(villa, parhus, radhus, fritidshus — NOT garage, carport, barn, shed, "
@@ -972,31 +970,37 @@ def _analyze_building(
         "→ If NO: HOUSE=NO, SOLAR=NO. Stop here.\n\n"
 
         "STEP 2 — Describe the roof in one sentence:\n"
-        "roof shape, dominant texture/colour, and whether you can see a rectangular "
-        "sub-area that looks distinctly different from the adjacent roof material.\n\n"
+        "roof shape, dominant texture/colour, and whether you can see any area "
+        "that looks distinctly different from the surrounding roof material.\n\n"
 
-        "STEP 3 — Apply the boundary test:\n"
-        "Can you see a rectangular area on the roof where BOTH of these are true:\n"
-        "  (a) there is a visible EDGE between that area and adjacent roofing, AND\n"
-        "  (b) the area inside is smoother / more uniform than the material outside?\n"
-        "If you cannot confirm BOTH → SOLAR=NO.\n\n"
+        "STEP 3 — Look for PV evidence. EITHER signal counts:\n"
+        "  (a) SMOOTHNESS CONTRAST — a clearly smoother, more uniform area against "
+        "      the bumpy/ribbed texture of adjacent tiles or shingles. This is the "
+        "      primary signal on tegelpannor/Skandiategel roofs.\n"
+        "  (b) RECTANGULAR BOUNDARY — a discrete rectangular sub-area with a visible "
+        "      edge against the rest of the roof. Panels can also cover a full roof "
+        "      slope; in that case look for the bottom/side edge against the roof "
+        "      gutter or ridge line, plus visible module seams.\n"
+        "Module-grid lines, mirror-bright reflections, and uniform dark-blue/black "
+        "panel colour are supporting signals.\n\n"
 
-        "COMMON TRAPS — all fail the boundary test, all mean SOLAR=NO:\n"
-        "• Whole-roof dark surfaces (bitumen, asphalt, EPDM, dark tiles, dark metal) — "
-        "no sub-area boundary possible\n"
-        "• Skandiategel / tegelpannor (clay tiles) — bumpy ridge texture, not flat; ubiquitous in SE3\n"
-        "• Corrugated grey fibre cement — ribbed surface, not flat rectangles; "
-        "very common on 1960–1980s Swedish housing\n"
-        "• Standing-seam metal (plåttak) — long parallel ribs ridge-to-eave, "
-        "no rectangular sub-area\n"
-        "• Eternite / smooth grey fibre cement — uniform grey surface, no grid\n"
-        "• Copper or green-patina metal — colour is whole-roof, no panel boundary\n"
-        "• Shadows, skylights, snow patches, dormer windows — irregular shape, no grid\n"
+        "COMMON TRAPS that are NOT solar (default SOLAR=NO):\n"
+        "• Skandiategel / tegelpannor (clay tiles) — bumpy ridge texture; ubiquitous in SE3\n"
+        "• Corrugated grey fibre cement — ribbed surface, no flat patch contrast; "
+        "common on 1960–1980s Swedish housing\n"
+        "• Standing-seam metal (plåttak) — long parallel ribs ridge-to-eave with "
+        "uniform colour — no smoother sub-area\n"
+        "• Eternite / smooth grey fibre cement — uniform grey, no module grid\n"
+        "• Copper or green-patina metal — uniform colour across the whole roof\n"
+        "• Whole-roof dark bitumen / asphalt / EPDM with no smoother patch\n"
+        "• Shadows, skylights, snow patches, dormer windows — irregular shape\n"
         "• Solar thermal collectors (solfångare) — narrow tube strips, not flat panels\n\n"
 
-        "CALIBRATION: Only ~5–10% of SE3 villas have solar. "
+        "CALIBRATION: Only ~5–10% of Swedish villas have solar. "
         "When the signal is subtle, uncertain, or ambiguous → SOLAR=UNSURE, not YES. "
-        "A missed panel costs less than a false alarm.\n\n"
+        "Reserve SOLAR=NO for clear cases where no smoother patch and no rectangular "
+        "sub-area is visible. A missed panel costs less than a false alarm, but "
+        "SOLAR=NO on a panel that's clearly visible is also a loss.\n\n"
 
         "End with exactly two lines, nothing after:\n"
         "HOUSE=YES or HOUSE=NO\n"
