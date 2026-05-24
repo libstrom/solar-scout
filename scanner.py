@@ -1069,6 +1069,33 @@ def _analyze_building(
         return False, False, False, ""
 
 
+def _prefilter_building(img_bytes: bytes, client: anthropic.Anthropic) -> bool:
+    """Cheap Haiku pre-filter — returns False if roof is obviously solar-free.
+
+    Saves ~60% of Sonnet calls. Only passes ambiguous/positive cases through.
+    On any API error returns True (fail open — let Sonnet decide).
+    """
+    b64 = base64.standard_b64encode(img_bytes).decode()
+    try:
+        msg = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=10,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
+                    {"type": "text", "text": (
+                        "Swedish roof aerial photo. Does this roof have ANY rectangular smooth patches "
+                        "that could be solar panels? Reply only YES or NO."
+                    )},
+                ],
+            }],
+        )
+        return "YES" in msg.content[0].text.upper()
+    except Exception:
+        return True  # fail open — let Sonnet decide
+
+
 def _process_building(
     building: dict,
     google_key: str,
@@ -1090,6 +1117,9 @@ def _process_building(
         return None
     img = _fetch_satellite(google_key, lat, lng, zoom=zoom, mapbox_key=mapbox_key, lm_key=lm_key, lm_layer=lm_layer)
     if img is None:
+        return None
+    if not _prefilter_building(img, anthropic_client):
+        _log.debug("_process_building haiku_prefilter=NO osm_id=%s", building.get("osm_id"))
         return None
     is_house, has_solar, is_unsure, reasoning = _analyze_building(anthropic_client, img, few_shot=few_shot)
     if not is_house:
