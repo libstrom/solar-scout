@@ -5,8 +5,10 @@ Linus Bergström
 
 import io
 import os
+import time
 import logging
 import urllib.parse
+import httpx
 import stripe
 import pandas as pd
 import streamlit as st
@@ -87,6 +89,25 @@ def get_supabase() -> Client:
     other's auth state on the shared cache_resource client.
     """
     return st.session_state.get("_sb_user_client") or _anon_supabase()
+
+
+def _sb_retry(fn, *, attempts: int = 3):
+    """Run a Supabase call, retrying transient HTTP/2 connection drops.
+
+    The postgrest httpx client keeps HTTP/2 connections that the server closes
+    after idle. The next request on a stale connection raises RemoteProtocolError,
+    which surfaced as repeated app-load crashes (the first call after an idle
+    period — get_profile). httpx drops the dead connection, so a retry on the
+    same client opens a fresh one and succeeds.
+    """
+    last: Exception | None = None
+    for i in range(attempts):
+        try:
+            return fn()
+        except (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadError) as e:
+            last = e
+            time.sleep(0.3 * (i + 1))
+    raise last
 
 
 def _sv_error(exc: Exception) -> str:
@@ -225,7 +246,9 @@ def do_logout():
 
 def get_profile(user_id: str) -> dict:
     sb = get_supabase()
-    resp = sb.table("profiles").select("*").eq("user_id", user_id).maybe_single().execute()
+    resp = _sb_retry(
+        lambda: sb.table("profiles").select("*").eq("user_id", user_id).maybe_single().execute()
+    )
     return resp.data or {}
 
 
@@ -367,7 +390,7 @@ def load_leads(user_id: str, include_false_positives: bool = False) -> pd.DataFr
     q = sb.table("scout_leads").select("*").eq("user_id", user_id)
     if not include_false_positives:
         q = q.eq("false_positive", False)
-    resp = q.order("created_at", desc=True).execute()
+    resp = _sb_retry(lambda: q.order("created_at", desc=True).execute())
     return pd.DataFrame(resp.data) if resp.data else pd.DataFrame()
 
 
