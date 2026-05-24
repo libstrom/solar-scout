@@ -634,6 +634,116 @@ def _lead_to_sb_row(lead) -> dict:
     }
 
 
+def _bulk_scan_section(user, profile, ai_available):
+    """Sektion för bulk-scanning av SE3-prioritetsorter."""
+    SE3_CITIES = [
+        "Nässjö", "Eksjö", "Vetlanda", "Huskvarna",
+        "Tranås", "Sävsjö", "Värnamo",
+    ]
+
+    with st.expander("🗺 Bulk-scan SE3-regionen", expanded=False):
+        st.caption(
+            "Scanna flera orter automatiskt i sekvens. "
+            "Leads sparas löpande — du kan stänga och öppna appen igen."
+        )
+
+        selected = []
+        cols = st.columns(3)
+        for i, city in enumerate(SE3_CITIES):
+            if cols[i % 3].checkbox(city, value=True, key=f"bulk_{city}"):
+                selected.append(city)
+
+        bulk_max = st.number_input(
+            "Max leads per ort",
+            min_value=5, max_value=100, value=20, step=5,
+            key="bulk_max",
+        )
+
+        if st.button(
+            "▶ Starta bulk-scan",
+            disabled=not selected or not ai_available,
+            key="bulk_start",
+        ):
+            COST_PER_BUILDING_SEK = 0.025
+            SOLAR_RATE = 0.08
+            est_sek = len(selected) * bulk_max / SOLAR_RATE * COST_PER_BUILDING_SEK
+            st.info(
+                f"Beräknad kostnad: ~{est_sek:.0f} kr "
+                f"för {len(selected)} orter × {bulk_max} leads"
+            )
+
+            total_leads = 0
+            overall_bar = st.progress(0.0)
+            status = st.empty()
+
+            for idx, city in enumerate(selected):
+                status.info(f"⏳ Scannar: **{city}** ({idx + 1}/{len(selected)})…")
+                overall_bar.progress(idx / len(selected))
+
+                try:
+                    from scanner import scan_city  # noqa: PLC0415
+
+                    try:
+                        _ex = (
+                            get_supabase()
+                            .table("scout_leads")
+                            .select("tile_key")
+                            .eq("user_id", str(user.id))
+                            .execute()
+                        )
+                        skip_keys = frozenset(
+                            r["tile_key"]
+                            for r in (_ex.data or [])
+                            if r.get("tile_key")
+                        )
+                    except Exception:
+                        skip_keys = frozenset()
+
+                    anthr_key = ANTHROPIC_API_KEY or ""
+                    google_key = GOOGLE_API_KEY or ""
+
+                    def _noop_progress(done, total, lead):
+                        pass
+
+                    leads = scan_city(
+                        city,
+                        google_key,
+                        anthr_key,
+                        _noop_progress,
+                        max_leads=int(bulk_max),
+                        skip_tile_keys=skip_keys,
+                        user_id=str(user.id),
+                    )
+
+                    saved = 0
+                    for lead in (leads or []):
+                        if lead.source == "ai":
+                            # AI leads may already be saved progressively — skip duplicates
+                            continue
+                        try:
+                            get_supabase().table("scout_leads").insert(
+                                {**_lead_to_sb_row(lead), "user_id": str(user.id)}
+                            ).execute()
+                            saved += 1
+                        except Exception:
+                            pass
+
+                    # Count all leads (AI ones already saved inside scan_city)
+                    ai_count = sum(1 for l in (leads or []) if l.source == "ai")
+                    total_city = saved + ai_count
+                    total_leads += total_city
+                    status.success(f"✅ {city}: {total_city} leads sparade")
+
+                except Exception as e:
+                    status.warning(f"⚠ {city} misslyckades: {e}")
+
+                overall_bar.progress((idx + 1) / len(selected))
+
+            overall_bar.progress(1.0)
+            status.success(f"🎉 Bulk-scan klar! **{total_leads} leads** sparade totalt.")
+            st.balloons()
+
+
 def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
     st.subheader("AI Scanner — Hitta solcellstak automatiskt")
 
@@ -1139,6 +1249,9 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
         st.session_state.pop("scanner_leads_with_ids", None)
         st.session_state.pop("scan_reviewed", None)
         st.rerun()
+
+    st.divider()
+    _bulk_scan_section(user, profile, ai_available)
 
 
 def page_scout(user):
