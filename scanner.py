@@ -1482,6 +1482,31 @@ def scan_city(
 
             if max_leads is not None and len(osm_leads) + len(all_ai_leads) >= max_leads:
                 break
+
+        # Glesbygd-pass: scan hela viewport utan landuse-filter.
+        # Hus utanför residential-polygoner (landsbygd, ~20-30% av villor) missas
+        # annars helt. Deduplicera via seen_building_ids.
+        if len(osm_leads) + len(all_ai_leads) < (max_leads or 9999):
+            remaining = None
+            if max_leads is not None:
+                remaining = max_leads - len(osm_leads) - len(all_ai_leads)
+            if remaining is None or remaining > 0:
+                fallback_buildings = _get_osm_buildings(south, west, north, east)
+                fallback_buildings = [
+                    b for b in fallback_buildings
+                    if b["osm_id"] not in seen_building_ids
+                    and f"{b['lat']:.4f},{b['lng']:.4f}" not in osm_keys
+                ]
+                _log.info("scan_city glesbygd fallback buildings=%d", len(fallback_buildings))
+                if fallback_buildings:
+                    glesbygd_leads = scan_buildings_ai(
+                        fallback_buildings, google_key, anthropic_key, on_progress,
+                        mapbox_key=mapbox_key, lm_key=lm_key,
+                        max_leads=remaining, few_shot=few_shot,
+                        skip_tile_keys=skip_tile_keys,
+                    )
+                    _log.info("scan_city glesbygd_leads=%d", len(glesbygd_leads))
+                    all_ai_leads.extend(glesbygd_leads)
     else:
         # Fallback: 1 km radius around city centre
         _log.info("scan_city no residential areas — fallback to 1km radius")
