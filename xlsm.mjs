@@ -143,7 +143,7 @@ function findValueByLabel(cells, labelRe) {
 
 // ── main export ──────────────────────────────────────────────────────────────
 
-export async function extractXlsm(filePath) {
+export async function extractXlsmFields(filePath) {
   const dir = join(tmpdir(), 'edek_' + randomBytes(6).toString('hex'));
   await mkdir(dir, { recursive: true });
   try {
