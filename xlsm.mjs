@@ -147,7 +147,11 @@ export async function extractXlsmFields(filePath) {
   const dir = join(tmpdir(), 'edek_' + randomBytes(6).toString('hex'));
   await mkdir(dir, { recursive: true });
   try {
-    await unzip(filePath, dir);
+    try {
+      await unzip(filePath, dir);
+    } catch {
+      return null; // password-protected or corrupt — fall back to PDF
+    }
 
     // 1. Shared strings
     let sharedStrings = [];
