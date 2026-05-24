@@ -775,12 +775,17 @@ def _load_dynamic_few_shot(user_id: str | None = None, max_each: int = 4) -> lis
             .execute()
             .data or []
         )
-        # Negative examples: both review-rejected AND "❌ Fel"-marked leads
+        # Negative examples: review-rejected UNSURE leads (user_confirmed=false)
+        # OR explicitly "❌ Fel"-marked leads (false_positive=true).
+        # The comment above used to match the code, but the filter only checked
+        # false_positive — so every "❌ Nej" click on an UNSURE lead was silently
+        # dropped from the few-shot pool. PostgREST .or_ restores both signals
+        # and retroactively unlocks rows already marked in the review queue.
         no_rows = (
             sb.table("scout_leads")
             .select("confirmed_image_url,image_url,lat,lng")
             .eq("user_id", user_id)
-            .eq("false_positive", True)
+            .or_("false_positive.eq.true,user_confirmed.eq.false")
             .order("created_at", desc=True)
             .limit(max_each)
             .execute()
