@@ -12,6 +12,17 @@
     "defaultMode": "bypassPermissions"
   },
   "hooks": {
+    "PreCompact": [
+      {
+        "matcher": "auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '{\"systemMessage\": \"Kontexten är nu stor nog att kompakteras automatiskt. Överväg att starta en ny session (/new) när detta block är klart — du får skarpare svar och billigare tokens på ett rent kontext.\"}'"
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "matcher": "startup|clear|compact",
