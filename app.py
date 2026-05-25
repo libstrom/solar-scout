@@ -461,22 +461,28 @@ def page_auth():
             submitted = st.form_submit_button("Logga in", type="primary", use_container_width=True)
         # Patch autocomplete attributes so browsers offer to save/fill credentials.
         # components.html runs in an iframe and can reach window.parent.document.
-        import streamlit.components.v1 as _stc
-        _stc.html("""
-        <script>
-        (function() {
-            function patch() {
-                var p = window.parent.document;
-                var em = p.querySelector('input[type="text"]');
-                var pw = p.querySelector('input[type="password"]');
-                if (em) { em.setAttribute('autocomplete', 'email'); em.setAttribute('name', 'email'); }
-                if (pw) { pw.setAttribute('autocomplete', 'current-password'); pw.setAttribute('name', 'password'); }
-            }
-            patch();
-            setTimeout(patch, 300);
-        })();
-        </script>
-        """, height=0)
+        # Defensive: st.components.v1.html is deprecated for removal after 2026-06-01.
+        # This autocomplete hack is cosmetic, so if a future Streamlit drops the API,
+        # skip it rather than crashing the entire login page.
+        try:
+            import streamlit.components.v1 as _stc
+            _stc.html("""
+            <script>
+            (function() {
+                function patch() {
+                    var p = window.parent.document;
+                    var em = p.querySelector('input[type="text"]');
+                    var pw = p.querySelector('input[type="password"]');
+                    if (em) { em.setAttribute('autocomplete', 'email'); em.setAttribute('name', 'email'); }
+                    if (pw) { pw.setAttribute('autocomplete', 'current-password'); pw.setAttribute('name', 'password'); }
+                }
+                patch();
+                setTimeout(patch, 300);
+            })();
+            </script>
+            """, height=0)
+        except (ImportError, AttributeError):
+            pass  # components.v1.html removed/renamed → skip cosmetic autocomplete hint
         if submitted:
             try:
                 do_login(email, password)
