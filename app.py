@@ -139,7 +139,7 @@ def init_auth():
     """Återställ session från session_state eller browser-cookies.
 
     Ordning: session_state → cookies → None.
-    Cookies överlever Railway-restarts; session_state gör det inte.
+    Cookies överlever serveromstarter; session_state gör det inte.
     """
     # Fast path: redan validerad denna session — returnera cachad användare utan
     # nätverksanrop. Radioknappar, flikar och andra widgets triggar reruns men
@@ -152,7 +152,7 @@ def init_auth():
     refresh = st.session_state.get("refresh_token")
 
     # Fallback: läs från cookies om session_state är tom.
-    # CookieManager behöver en extra render-cykel efter Railway-restart.
+    # CookieManager behöver en extra render-cykel efter en serveromstart.
     if not access or not refresh:
         cm = _get_cookie_manager()
         if cm is not None:

@@ -11,7 +11,7 @@ review → address findings → squash-merge → hand back the link.
 - **CodeRabbit skips draft PRs** — you must trigger it by hand (step 3).
 - **Draft PRs cannot be merged** — mark them ready first.
 - Merges are **squash**, with commit title `... (#NN)`.
-- `main` auto-deploys to production via Railway, so a merge goes live. Confirm the
+- `main` is the production branch — a merge ships to production, so confirm the
   user actually wants it live before merging.
 
 ## Steps
@@ -44,7 +44,7 @@ Keep one concern per PR — rebase onto `main` and drop anything unrelated
   `commit_title: "<PR title> (#NN)"`.
 
 ### 6. Hand back the link
-Give the user the PR URL + merge-commit sha, and note that Railway will deploy `main`.
+Give the user the PR URL + merge-commit sha, and note that the merge lands on `main` (production).
 
 ## Smoke-test the app first (optional but recommended)
 

@@ -70,7 +70,7 @@ if __name__ == "__main__":
     if working:
         print(f"✅ Fungerande lager: {working}")
         test_stitched(token, working[0])
-        print(f"\nSätt i .env / Railway:")
+        print(f"\nSätt i .env (eller host-miljövariabler):")
         print(f"  LANTMATERIET_KEY={token}")
         print(f"  # Fungerande lager: {working[0]}")
     else:

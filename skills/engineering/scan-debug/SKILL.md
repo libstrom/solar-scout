@@ -54,13 +54,14 @@ if blds:
 | Stage 1 fails | Overpass down or 429 | Wait, retry |
 | Stage 2 = 0, Stage 3 > 0 | Area has no OSM solar tags | Normal — use AI mode |
 | Stage 3 = 0 | Building filter too strict, or OSM data sparse | Try larger bbox, or `building=yes` filter |
-| Stage 3 > 0, 0 leads | AI key missing or image fetch fails | Check ANTHROPIC_API_KEY on Railway |
+| Stage 3 > 0, 0 leads | AI key missing or image fetch fails | Check ANTHROPIC_API_KEY in the host env |
 | Image fetch fails | LM WMS down | Test `_fetch_lm_wms(57.79, 14.29)` directly |
 
-## Checking Railway logs
+## Checking server logs
 
-Use the Railway dashboard or ask Claude to check via the MCP server
-(needs valid RAILWAY_API_TOKEN in .claude/settings.local.json).
+On Streamlit Community Cloud, open the app's "Manage app" panel to read its logs.
+Running locally, `streamlit run app.py` prints the same `[scanner]` lines to
+stdout/stderr in your terminal.
 
 Look for lines matching: `[scanner]` — these are the structured logs
 from `_log.info()` in scanner.py.

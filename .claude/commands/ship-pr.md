@@ -12,4 +12,4 @@ Quick steps:
 4. Trigger review — drafts are skipped: comment `@coderabbitai review`, then wait.
 5. Address findings critically (verify, don't blindly apply); push fixes.
 6. Mark ready (`draft: false`) → squash-merge as `<title> (#NN)`.
-7. Give the user the merge link. Note: `main` auto-deploys via Railway.
+7. Give the user the merge link. Note: `main` is the production branch.

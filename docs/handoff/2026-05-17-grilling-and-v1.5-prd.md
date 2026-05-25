@@ -29,7 +29,7 @@ V2 (framtid): scanna hus **utan** solpaneler för **solinstallatörer** som kund
 ## V1 status
 
 - ✅ Renamed edek-parser → solar-scout
-- ✅ Leaked Railway-token borttagen från `.claude/settings.json` (men är kvar i git-historik — **användaren måste roteras** den manuellt)
+- ✅ Läckt deploy-token borttagen från `.claude/settings.json` (men är kvar i git-historik — **användaren måste rotera** den manuellt)
 - ✅ Scanner tightened: building deny-list, area-filter 40–600 m², addr-snap inom 25m, OSM `out geom`-fix
 - ✅ AI-prompt: 2-stegs HOUSE→SOLAR med "describe then verdict"-mönster, max_tokens=180, F1=100% på 6 baseline-fall
 - ✅ Crop default 50m → 18m (panel-grid syns nu)
@@ -150,7 +150,7 @@ TEST_CASES i test_scanner.py:
 
 ## Known issues / gotchas
 
-- **Railway-token i git-historik:** Den läckta `64512e5e-dda5-4e45-82ef-e4ab6db8ced7` är borttagen ur filen men kvar i git-log. Användaren MÅSTE rotera den i Railway-dashboard.
+- **Läckt deploy-token i git-historik:** Den läckta `64512e5e-dda5-4e45-82ef-e4ab6db8ced7` är borttagen ur filen men kvar i git-log. Token är nu obsolet (tjänsten borttagen) men bör ändå betraktas som komprometterad.
 - **ANTHROPIC_API_KEY i chatt-logg:** `sk-ant-api03-df7-ksLD2k...` användes för test_scanner-validering. Användaren ska revoke:a den efter session. Sa "senare" när jag påminde.
 - **GitHub MCP token expired:** Issue #3 (gamla PRD-utkast med credit-modell) kunde inte uppdateras. PRD-filen är nu canonical.
 - **Anthropic prompt caching:** Försökte men prompten är ~250 tokens, under 1024-tokenströskeln. Skippad.
