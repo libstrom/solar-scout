@@ -59,7 +59,9 @@ if blds:
 
 ## Checking server logs
 
-Use the host's log viewer / deploy dashboard to read the running app's stdout.
+On Streamlit Community Cloud, open the app's "Manage app" panel to read its logs.
+Running locally, `streamlit run app.py` prints the same `[scanner]` lines to
+stdout/stderr in your terminal.
 
 Look for lines matching: `[scanner]` — these are the structured logs
 from `_log.info()` in scanner.py.
