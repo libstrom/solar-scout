@@ -178,6 +178,8 @@ def _make_process_building_patches(analyze_return, has_extra_solar=False, img_by
     from contextlib import ExitStack
     stack = ExitStack()
     stack.enter_context(patch("scanner._fetch_satellite", return_value=img_bytes))
+    # Open the Haiku gate so these tests exercise the post-gate Sonnet/lead logic.
+    stack.enter_context(patch("scanner._prefilter_building", return_value=True))
     stack.enter_context(patch("scanner._analyze_building", return_value=analyze_return))
     stack.enter_context(patch("scanner._has_extra_solar_nearby", return_value={
         "extra_solar_found": has_extra_solar,
@@ -264,6 +266,43 @@ def test_solar_unsure_address_kept_as_is_if_already_readable():
     assert lead is not None
     # The address contains alphabetical chars so no reverse geocoding should happen
     assert lead.address == "Björkvägen 12, Malmö"
+
+
+# ── Haiku prefilter gate integration ─────────────────────────────────────────
+
+def test_prefilter_reject_skips_sonnet_and_returns_none():
+    """När Haiku-grinden avvisar (icke-hus) ska Sonnet (_analyze_building)
+    ALDRIG anropas och _process_building returnera None."""
+    from contextlib import ExitStack
+    building = _make_building_dict(address="Industrigatan 1, Malmö")
+    with ExitStack() as stack:
+        stack.enter_context(patch("scanner._fetch_satellite", return_value=b"fake_image"))
+        stack.enter_context(patch("scanner._prefilter_building", return_value=False))
+        analyze = stack.enter_context(patch("scanner._analyze_building"))
+        lead = _process_building(building, google_key="fake", anthropic_client=MagicMock())
+
+    assert lead is None, "Avvisad av grinden → inget lead"
+    analyze.assert_not_called()
+
+
+def test_prefilter_pass_runs_sonnet_and_can_create_lead():
+    """När grinden släpper igenom ska Sonnet anropas och ett lead kunna skapas."""
+    from contextlib import ExitStack
+    building = _make_building_dict(address="Solvägen 5, Malmö")
+    with ExitStack() as stack:
+        stack.enter_context(patch("scanner._fetch_satellite", return_value=b"fake_image"))
+        stack.enter_context(patch("scanner._prefilter_building", return_value=True))
+        analyze = stack.enter_context(patch(
+            "scanner._analyze_building",
+            return_value=(True, True, False, "Clear rectangular array."),
+        ))
+        stack.enter_context(patch("scanner._has_extra_solar_nearby", return_value={
+            "extra_solar_found": False, "solar_locations": [], "villa_nearby": False,
+        }))
+        lead = _process_building(building, google_key="fake", anthropic_client=MagicMock())
+
+    assert lead is not None, "Grinden öppen + SOLAR=YES → lead ska skapas"
+    analyze.assert_called_once()
 
 
 # ── Import guard ───────────────────────────────────────────────────────────────
