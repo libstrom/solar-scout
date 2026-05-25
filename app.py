@@ -360,6 +360,39 @@ def _send_meeting_email(address: str, note: str, lat: float | None, lng: float |
         return False
 
 
+def _send_quota_alert(api: str, detail: str) -> None:
+    """Skicka akut mail till ägaren när ett API-konto tar slut på pengar/tokens."""
+    api_key = _secret("RESEND_API_KEY")
+    if not api_key:
+        _log.error("QUOTA ALERT (mail ej skickat — RESEND_API_KEY saknas): %s %s", api, detail)
+        return
+    body = (
+        f"AKUT: {api} har nått sin kvot/fakturagräns!\n\n"
+        f"Detalj: {detail}\n\n"
+        f"Åtgärd krävs:\n"
+        f"  • Anthropic: https://console.anthropic.com/settings/billing\n"
+        f"  • Google: https://console.cloud.google.com/billing\n\n"
+        f"Scanning är stoppad tills kontot laddas på.\n"
+        f"Användarna ser ett felmeddelande i appen."
+    )
+    try:
+        resp = httpx.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "from":    "Solar Scout <onboarding@resend.dev>",
+                "to":      ["linus.bergstrom@enspectaenergi.se", "fenomenetmusic@gmail.com"],
+                "subject": f"AKUT ☀️ Solar Scout — {api} kvot slut",
+                "text":    body,
+            },
+            timeout=8,
+        )
+        resp.raise_for_status()
+        _log.error("Quota alert mail skickat: %s", api)
+    except Exception as _e:
+        _log.error("Quota alert mail misslyckades: %s", _e)
+
+
 _LEAD_STATUSES = {
     "ej_kontaktad": "📋 Ej kontaktad",
     "kontaktad":    "📞 Kontaktad",
@@ -1090,6 +1123,16 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
             st.error(str(e))
             return
         except Exception as e:
+            from scanner import APIQuotaExceededError as _QuotaErr  # noqa: PLC0415
+            if isinstance(e, _QuotaErr):
+                _log.error("API quota exceeded: %s", e)
+                _send_quota_alert(e.api, e.detail)
+                st.error(
+                    f"**{e.api} har nått sin kvot eller saknar pengar på kontot.**\n\n"
+                    f"Scanning är stoppad. Ägaren har fått ett akut mail. "
+                    f"Försök igen om en stund eller kontakta Linus."
+                )
+                return
             _log.error("scan Exception: %s", e, exc_info=True)
             scan_crashed = True
             scan_errors.append(f"Scanning avbröts oväntat: {e}")

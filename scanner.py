@@ -47,6 +47,14 @@ logging.basicConfig(
 )
 _log = logging.getLogger("solar_scout")
 
+
+class APIQuotaExceededError(RuntimeError):
+    """Raised when an external API (Anthropic or Google) hits a quota/billing wall."""
+    def __init__(self, api: str, detail: str = ""):
+        self.api = api
+        self.detail = detail
+        super().__init__(f"{api} quota/billing limit nådd — {detail}")
+
 # Limit concurrent Overpass calls — 4 parallel workers × 2 calls each can hit
 # the overpass-api.de rate limiter. Cap at 2 simultaneous requests.
 _OVERPASS_SEM = threading.Semaphore(2)
@@ -740,8 +748,14 @@ def _fetch_street_view(google_key: str, lat: float, lng: float) -> bytes | None:
     )
     try:
         resp = httpx.get(url, timeout=10)
+        if resp.status_code == 429:
+            raise APIQuotaExceededError("Google Street View", "429 rate limit")
+        if resp.status_code == 403:
+            raise APIQuotaExceededError("Google Street View", "403 billing/API-nyckel")
         if resp.status_code == 200 and "image" in resp.headers.get("content-type", ""):
             return resp.content
+    except APIQuotaExceededError:
+        raise
     except Exception:
         pass
     return None
@@ -883,9 +897,15 @@ def _fetch_satellite(
     )
     try:
         resp = httpx.get(url, timeout=20)
+        if resp.status_code == 429:
+            raise APIQuotaExceededError("Google Static Maps", "429 rate limit")
+        if resp.status_code == 403:
+            raise APIQuotaExceededError("Google Static Maps", "403 billing/API-nyckel")
         resp.raise_for_status()
         _log.debug("_fetch_satellite source=google lat=%s lng=%s", lat, lng)
         return resp.content
+    except APIQuotaExceededError:
+        raise
     except Exception as exc:
         _log.warning("_fetch_satellite failed lat=%s lng=%s: %s", lat, lng, exc)
         return None
@@ -1068,6 +1088,15 @@ def _analyze_building(
         _log.debug("_analyze_building HOUSE=%s SOLAR=%s UNSURE=%s few_shot=%s sv=%s",
                    is_house, has_solar, is_unsure, bool(few_shot), bool(street_view_bytes))
         return is_house, has_solar, is_unsure, reasoning
+    except anthropic.RateLimitError as exc:
+        raise APIQuotaExceededError("Anthropic", "429 rate limit") from exc
+    except anthropic.APIStatusError as exc:
+        if exc.status_code in (402, 403):
+            raise APIQuotaExceededError("Anthropic", f"HTTP {exc.status_code} billing/auth") from exc
+        _log.error("_analyze_building API error: %s", exc)
+        return False, False, False, ""
+    except anthropic.AuthenticationError as exc:
+        raise APIQuotaExceededError("Anthropic", "API-nyckel ogiltig") from exc
     except Exception as exc:
         _log.error("_analyze_building API error: %s", exc)
         return False, False, False, ""
@@ -1239,6 +1268,8 @@ def scan_buildings_ai(
             except concurrent.futures.TimeoutError:
                 _log.warning("_process_building timed out after 60s, skipping")
                 result = None
+            except APIQuotaExceededError:
+                raise
             except Exception:
                 result = None
             if result:

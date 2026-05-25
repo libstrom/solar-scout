@@ -174,11 +174,12 @@ def test_multiple_buildings_all_returned_without_addr_nodes():
 
 def _make_process_building_patches(analyze_return, has_extra_solar=False, img_bytes=b"fake_image"):
     """Return a context-manager stack that stubs out _fetch_satellite,
-    _analyze_building, and _has_extra_solar_nearby for _process_building tests."""
+    _analyze_building, _fetch_street_view, and _has_extra_solar_nearby."""
     from contextlib import ExitStack
     stack = ExitStack()
     stack.enter_context(patch("scanner._fetch_satellite", return_value=img_bytes))
     stack.enter_context(patch("scanner._analyze_building", return_value=analyze_return))
+    stack.enter_context(patch("scanner._fetch_street_view", return_value=None))
     stack.enter_context(patch("scanner._has_extra_solar_nearby", return_value={
         "extra_solar_found": has_extra_solar,
         "solar_locations": [],
