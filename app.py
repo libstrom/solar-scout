@@ -481,8 +481,8 @@ def page_auth():
             })();
             </script>
             """, height=0)
-        except Exception:
-            pass
+        except (ImportError, AttributeError):
+            pass  # components.v1.html removed/renamed → skip cosmetic autocomplete hint
         if submitted:
             try:
                 do_login(email, password)
