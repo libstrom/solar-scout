@@ -48,7 +48,21 @@ The XLSM/PDF parser uses the export name `extractXlsmFields` (not `extractXlsm`)
 
 ## Data Sources
 
-The enspecta.tab register contains far more fields than match.mjs currently extracts (including interested-party data), but interested-party CONTACT data is absent from the export — do not assume it exists.
+The enspecta.tab register has 30 columns and 47 249 rows structured as follows:
+
+- **Kolumner 0–23**: Huvudpost (CaseID, Status, datum, adress, postnr, ort, kommun, namn, fastighetsbeteckning, email, telefon, etc.)
+- **Kolumner 24–28**: Intressent-kontakt (förnamn, efternamn, email, telefon1, telefon2)
+- **Tomma col0-rader**: Intressent-rader kopplade till föregående CaseID via radposition
+
+**Intressent-statistik (verifierat 2026-05-25):**
+- 12 125 huvudposter har ≥1 intressent — varav 10 892 är Säljare-besiktningar
+- 10 761 intressenter har email, 10 294 har telefon
+- Kontaktdata FINNS — match.mjs extraherar den inte än
+
+**Rätt prioritetsordning för match.mjs** (implementeras i enrichLeads.mjs):
+1. Köpare (nuvarande ägare — bäst)
+2. Intressent från Säljare-besiktning (trolig köpare — bra)
+3. Säljare (har flyttat — sämst)
 
 ## Nyckelregler
 
