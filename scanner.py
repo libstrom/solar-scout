@@ -67,6 +67,21 @@ class Lead:
     needs_review: bool = False         # AI was unsure — human should verify
     ai_reasoning: str = ""             # AI's roof description (1-2 sentences)
     image_url: str = ""                # clickable LM WMS satellite URL
+    scan_session_id: str | None = None # UUID string for grouping scan results
+
+
+@dataclass
+class ScanStats:
+    """Aggregated statistics from a scan run."""
+    yes: int = 0
+    unsure: int = 0
+    no: int = 0
+
+    @property
+    def false_positive_rate(self) -> float:
+        """Estimate of false positive rate: unsure / (yes + unsure)."""
+        denom = self.yes + self.unsure
+        return self.unsure / denom if denom > 0 else 0.0
 
 
 # ── Tile helpers (kept for UI bbox display) ────────────────────────────────────
@@ -1192,7 +1207,7 @@ def scan_buildings_ai(
     max_leads: int | None = None,
     few_shot: list[tuple[str, str]] | None = None,
     skip_tile_keys: frozenset[str] = frozenset(),
-) -> list[Lead]:
+) -> tuple[list[Lead], ScanStats]:
     """Run Claude Vision on each OSM building centroid.
 
     Args:
@@ -1203,9 +1218,14 @@ def scan_buildings_ai(
                   Pass a pre-loaded list to avoid redundant downloads when
                   scan_buildings_ai is called multiple times per scan (e.g.
                   once per residential area in scan_city).
+
+    Returns:
+        A tuple of (leads, stats) where stats tracks yes/unsure/no counts for
+        all buildings processed by the AI.
     """
+    stats = ScanStats()
     if not buildings or not anthropic_key:
-        return []
+        return [], stats
 
     client = anthropic.Anthropic(api_key=anthropic_key)
     leads: list[Lead] = []
@@ -1241,8 +1261,14 @@ def scan_buildings_ai(
                 result = None
             except Exception:
                 result = None
-            if result:
+            if result is not None:
                 leads.append(result)
+                if result.needs_review:
+                    stats.unsure += 1
+                else:
+                    stats.yes += 1
+            else:
+                stats.no += 1
             if on_progress:
                 try:
                     on_progress(done, total, result)
@@ -1255,7 +1281,7 @@ def scan_buildings_ai(
                     f.cancel()
                 break
 
-    return leads
+    return leads, stats
 
 
 # ── Merge & deduplicate ────────────────────────────────────────────────────────
@@ -1389,12 +1415,15 @@ def scan_city(
     phase_callback: Callable[[str, int], None] | None = None,
     skip_tile_keys: frozenset[str] = frozenset(),
     user_id: str | None = None,
-) -> list[Lead]:
+) -> tuple[list[Lead], ScanStats]:
     """Scan a city for buildings with solar panels.
 
     Args:
         max_leads: Stop scanning once this many confirmed leads are found.
                    None means no limit.
+
+    Returns:
+        A tuple of (leads, stats) where stats aggregates yes/unsure/no counts.
     """
     _log.info("scan_city city=%s max_leads=%s", city_name, max_leads)
     gmaps = googlemaps.Client(key=google_key)
@@ -1419,15 +1448,17 @@ def scan_city(
 
     if not anthropic_key:
         _log.info("scan_city no anthropic_key — returning OSM only")
-        return osm_leads[:max_leads] if max_leads else osm_leads
+        leads = osm_leads[:max_leads] if max_leads else osm_leads
+        return leads, ScanStats()
 
     # Check if we've already hit max_leads from OSM alone
     if max_leads is not None and len(osm_leads) >= max_leads:
         _log.info("scan_city max_leads reached by OSM alone")
-        return osm_leads[:max_leads]
+        return osm_leads[:max_leads], ScanStats()
 
     osm_keys = {f"{l.lat:.4f},{l.lng:.4f}" for l in osm_leads}
     all_ai_leads: list[Lead] = []
+    merged_stats = ScanStats()
     seen_building_ids: set[str] = set()
 
     # Load few-shot examples once per full scan — shared across all residential
@@ -1475,7 +1506,7 @@ def scan_city(
             _log.info("scan_city area lat=%s lng=%s buildings=%d", area["lat"], area["lng"], len(buildings))
             if phase_callback:
                 phase_callback("area_buildings", len(buildings))
-            area_leads = scan_buildings_ai(
+            area_leads, area_stats = scan_buildings_ai(
                 buildings, google_key, anthropic_key, on_progress,
                 mapbox_key=mapbox_key, lm_key=lm_key,
                 max_leads=remaining, few_shot=few_shot,
@@ -1483,6 +1514,9 @@ def scan_city(
             )
             _log.info("scan_city area_leads=%d", len(area_leads))
             all_ai_leads.extend(area_leads)
+            merged_stats.yes += area_stats.yes
+            merged_stats.unsure += area_stats.unsure
+            merged_stats.no += area_stats.no
 
             if max_leads is not None and len(osm_leads) + len(all_ai_leads) >= max_leads:
                 break
@@ -1500,7 +1534,7 @@ def scan_city(
         remaining = None
         if max_leads is not None:
             remaining = max_leads - len(osm_leads)
-        all_ai_leads = scan_buildings_ai(
+        all_ai_leads, merged_stats = scan_buildings_ai(
             buildings, google_key, anthropic_key, on_progress,
             mapbox_key=mapbox_key, lm_key=lm_key,
             max_leads=remaining, few_shot=few_shot,
@@ -1510,7 +1544,7 @@ def scan_city(
     merged = merge_leads(osm_leads, all_ai_leads)
     _log.info("scan_city done city=%s total_leads=%d (osm=%d ai=%d)",
               city_name, len(merged), len(osm_leads), len(all_ai_leads))
-    return merged
+    return merged, merged_stats
 
 
 def scan_bbox(
@@ -1527,8 +1561,12 @@ def scan_bbox(
     phase_callback: Callable[[str, int], None] | None = None,
     skip_tile_keys: frozenset[str] = frozenset(),
     user_id: str | None = None,
-) -> list[Lead]:
-    """Scan a bounding box for buildings with solar panels."""
+) -> tuple[list[Lead], ScanStats]:
+    """Scan a bounding box for buildings with solar panels.
+
+    Returns:
+        A tuple of (leads, stats) where stats aggregates yes/unsure/no counts.
+    """
     tile_count = len(_bbox_tiles(south, west, north, east))
     if tile_count > 1000:
         raise ValueError(
@@ -1541,11 +1579,12 @@ def scan_bbox(
         phase_callback("osm_leads", len(osm_leads))
 
     if not anthropic_key:
-        return osm_leads[:max_leads] if max_leads else osm_leads
+        leads = osm_leads[:max_leads] if max_leads else osm_leads
+        return leads, ScanStats()
 
     # Check if we've already hit max_leads from OSM alone
     if max_leads is not None and len(osm_leads) >= max_leads:
-        return osm_leads[:max_leads]
+        return osm_leads[:max_leads], ScanStats()
 
     buildings = _get_osm_buildings(south, west, north, east)
     osm_keys  = {f"{l.lat:.4f},{l.lng:.4f}" for l in osm_leads}
@@ -1562,7 +1601,7 @@ def scan_bbox(
     # same 6 WMS requests are not repeated for every scan_buildings_ai call.
     few_shot = _load_few_shot_images(user_id=user_id)
 
-    ai_leads = scan_buildings_ai(
+    ai_leads, stats = scan_buildings_ai(
         buildings, google_key, anthropic_key, on_progress,
         mapbox_key=mapbox_key, lm_key=lm_key,
         max_leads=remaining, few_shot=few_shot,
@@ -1570,4 +1609,4 @@ def scan_bbox(
     )
     if phase_callback:
         phase_callback("ai_done", len(ai_leads))
-    return merge_leads(osm_leads, ai_leads)
+    return merge_leads(osm_leads, ai_leads), stats
