@@ -933,60 +933,6 @@ def _enhance_contrast(img_bytes: bytes) -> bytes:
         return img_bytes
 
 
-def _prefilter_building(
-    client: anthropic.Anthropic,
-    img_bytes: bytes,
-) -> bool:
-    """Cheap Haiku gate run before the Sonnet _analyze_building pass.
-
-    Returns True when the central structure is plausibly a single-family home
-    (→ proceed to Sonnet), False only when it is clearly something else
-    (industrial hall, apartment block, open field/water, church/school).
-    Skipping Sonnet on clear non-houses cuts cost — most in the glesbygd
-    whole-viewport fallback pass, where many non-residential structures reach
-    the AI.
-
-    LENIENT BY DESIGN: a false reject drops a real lead (expensive, silent),
-    a false pass only costs one Sonnet call. So reject only on an explicit,
-    unambiguous HOUSE=NO; on any ambiguous reply or API error, pass through.
-    """
-    b64 = base64.standard_b64encode(img_bytes).decode()
-    instruction = (
-        "Swedish aerial orthophoto, ~50m wide, top-down. You are a CHEAP "
-        "pre-filter in front of a detailed classifier — do coarse triage only.\n\n"
-        "Is the CENTRAL structure plausibly a single-family home "
-        "(villa, parhus, radhus, fritidshus)?\n\n"
-        "Answer HOUSE=YES if it is — or if you are at all unsure. When in doubt, "
-        "pass it through. Answer HOUSE=NO only when the central area is CLEARLY "
-        "none of those: open field/forest/water/parking with no building, a large "
-        "industrial or commercial hall/warehouse, an apartment block, or a "
-        "church/school.\n\n"
-        "Reply with exactly one line: HOUSE=YES or HOUSE=NO"
-    )
-    try:
-        msg = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=16,
-            system=[
-                {"type": "text", "text": instruction, "cache_control": {"type": "ephemeral"}}
-            ],
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
-                ],
-            }],
-        )
-        text = msg.content[0].text.upper()
-        # Reject only on an explicit, unambiguous HOUSE=NO.
-        rejected = "HOUSE=NO" in text and "HOUSE=YES" not in text
-        _log.debug("_prefilter_building pass=%s", not rejected)
-        return not rejected
-    except Exception as exc:
-        _log.warning("_prefilter_building API error (passing through): %s", exc)
-        return True
-
-
 def _analyze_building(
     client: anthropic.Anthropic,
     img_bytes: bytes,
@@ -1148,9 +1094,6 @@ def _process_building(
         return None
     img = _fetch_satellite(google_key, lat, lng, zoom=zoom, mapbox_key=mapbox_key, lm_key=lm_key, lm_layer=lm_layer)
     if img is None:
-        return None
-    if not _prefilter_building(anthropic_client, img):
-        _log.debug("_process_building Haiku prefilter rejected (non-house) lat=%s lng=%s", lat, lng)
         return None
     is_house, has_solar, is_unsure, reasoning = _analyze_building(anthropic_client, img, few_shot=few_shot)
     if not is_house:
