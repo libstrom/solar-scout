@@ -48,7 +48,7 @@
 | #26 | Retroaktiv few-shot — bekräftade leads förbättrar framtida scans | Hög |
 | #29 | Review queue UX | Medium |
 | #30 | Bulk-scan Nässjö | Medium |
-| #15 | LANTMATERIET_KEY i Railway env | Låg |
+| #15 | LANTMATERIET_KEY i host-miljön | Låg |
 | #16 | Ladda upp satellitbild manuellt | Låg |
 
 ### Säkerhet — kräver manuell åtgärd av Linus

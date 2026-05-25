@@ -155,5 +155,5 @@ lead David bekräftar eller avvisar i granskningskön.
 | 26 | Retroaktiv few-shot bootstrap | ready-for-agent |
 | 29 | Granskningskö UX — tangentbord + konfidenspoäng | ready-for-agent |
 | 30 | Bulk-scan Nässjö kommun | ready-for-agent |
-| 15 | Konfigurera LANTMATERIET_KEY i Railway | ready-for-human |
+| 15 | Konfigurera LANTMATERIET_KEY i host-miljön | ready-for-human |
 | 16 | Ladda upp satellit­bild till Supabase Storage per lead | ready-for-agent |
