@@ -734,7 +734,7 @@ def _bulk_scan_section(user, profile, ai_available):
                     def _noop_progress(done, total, lead):
                         pass
 
-                    leads = scan_city(
+                    leads, _bulk_stats = scan_city(
                         city,
                         google_key,
                         anthr_key,
@@ -1077,7 +1077,7 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
         try:
             if not use_bbox:
                 status_text.info("Söker upp ort och hämtar byggnadsdata från OSM (kan ta 20–60 s)...")
-                leads = scan_city(
+                leads, scan_stats = scan_city(
                     city_name, GOOGLE_API_KEY or "", anthr_key, on_progress,
                     mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads,
                     phase_callback=on_phase, skip_tile_keys=_skip_tile_keys,
@@ -1085,7 +1085,7 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                 )
             else:
                 status_text.info("Hämtar byggnadsdata från OSM (kan ta 20–60 s)...")
-                leads = scan_bbox(
+                leads, scan_stats = scan_bbox(
                     south, west, north, east, GOOGLE_API_KEY or "", anthr_key, on_progress,
                     mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads,
                     phase_callback=on_phase, skip_tile_keys=_skip_tile_keys,
@@ -1150,6 +1150,8 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
         st.session_state["scanner_sb_rows"]      = sb_rows
         st.session_state["scanner_display_rows"] = display_rows
         st.session_state["scanner_saved"]        = True
+        if not scan_crashed:
+            st.session_state["scanner_stats"] = scan_stats
 
         # Fetch leads with DB-assigned IDs so we can call confirm_lead()
         try:
@@ -1189,6 +1191,13 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
         f"Scanning klar! Hittade {len(sb_rows)} tak med solceller "
         f"({ai_count} AI, {osm_count} från OSM)."
     )
+    _stats = st.session_state.get("scanner_stats")
+    if _stats and hasattr(_stats, "yes"):
+        _fp_pct = f"{_stats.false_positive_rate:.0%}"
+        st.info(
+            f"☀️ **{_stats.yes} YES** · ⚠️ {_stats.unsure} UNSURE · "
+            f"❌ {_stats.no} NO · ~{_fp_pct} false pos (estimat)"
+        )
 
     # Excel download — always visible, above review cards
     date_str = datetime.now().strftime("%y%m%d")
@@ -1378,7 +1387,7 @@ def page_review(user):
     try:
         resp = (
             sb.table("scout_leads")
-            .select("id,address,lat,lng,ai_reasoning,building_type,maps_url")
+            .select("id,address,lat,lng,ai_reasoning,building_type,maps_url,confidence")
             .eq("user_id", str(user.id))
             .eq("needs_review", True)
             .is_("user_confirmed", "null")
@@ -1390,6 +1399,12 @@ def page_review(user):
         # needs_review column may not exist yet in DB
         queue = []
 
+    # ── Skip set — IDs the user wants to defer without deciding ─────────────────
+    if "review_skip_ids" not in st.session_state:
+        st.session_state["review_skip_ids"] = set()
+    skip_ids: set = st.session_state["review_skip_ids"]
+    queue = [q for q in queue if q.get("id") not in skip_ids]
+
     if not queue:
         st.markdown("""
         <div style='text-align:center;padding:3rem 1rem;'>
@@ -1398,6 +1413,10 @@ def page_review(user):
             <p style='color:#666'>Leads med SOLAR=UNSURE från AI-scanningar hamnar här.</p>
         </div>
         """, unsafe_allow_html=True)
+        if skip_ids:
+            if st.button("Visa hoppade leads igen"):
+                st.session_state["review_skip_ids"] = set()
+                st.rerun()
         return
 
     total = len(queue)
@@ -1405,12 +1424,14 @@ def page_review(user):
     lead_id = int(lead["id"])
     lat, lng = lead.get("lat"), lead.get("lng")
 
-    # ── Rubrik med räknare ──────────────────────────────────────────────────
+    # ── Rubrik med räknare + tangentbordstips ───────────────────────────────
     st.markdown(
         f"<div style='display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem'>"
         f"<span style='font-size:1.1rem;font-weight:600'>🔍 Granska tak</span>"
         f"<span style='background:#f0f0f0;border-radius:12px;padding:2px 12px;"
-        f"font-size:0.85rem;color:#555'>{total} kvar</span></div>",
+        f"font-size:0.85rem;color:#555'>{total} kvar</span></div>"
+        f"<div style='font-size:0.75rem;color:#888;margin-bottom:0.5rem'>"
+        f"← / A&nbsp;= Avvisa &nbsp;·&nbsp; → / D&nbsp;= Ja &nbsp;·&nbsp; ↓ / S&nbsp;= Hoppa</div>",
         unsafe_allow_html=True,
     )
 
@@ -1433,11 +1454,17 @@ def page_review(user):
         except Exception:
             st.caption("(Kunde inte hämta bild)")
 
-    # ── Adress + AI-resonemang ──────────────────────────────────────────────
+    # ── Adress + konfidens + AI-resonemang ─────────────────────────────────
     st.markdown(f"### {lead.get('address', '–')}")
-    reasoning = lead.get("ai_reasoning", "")
+
+    # Confidence badge: LOW if "UNSURE" appeared in reasoning, else HIGH
+    reasoning = lead.get("ai_reasoning", "") or ""
+    _conf_badge = "🟡 Låg konfidens" if "UNSURE" in reasoning.upper() else "🔵 Hög konfidens"
+    st.caption(_conf_badge)
+
     if reasoning:
-        st.caption(f"🤖 AI: *{reasoning[:180]}{'…' if len(reasoning)>180 else ''}*")
+        with st.expander("🤖 AI-motivering", expanded=False):
+            st.markdown(f"*{reasoning}*")
 
     if lead.get("maps_url"):
         st.link_button("📍 Öppna i Google Maps", lead["maps_url"])
@@ -1487,8 +1514,51 @@ def page_review(user):
         label_visibility="collapsed",
     )
 
+    # ── Tangentbordsgenvägar (←/A = Avvisa, →/D = Ja, S/↓ = Hoppa över) ────
+    try:
+        import streamlit.components.v1 as _components
+        _components.html("""
+<script>
+(function() {
+  function click(id) {
+    var btn = window.parent.document.querySelector('[data-testid="' + id + '"]');
+    if (!btn) {
+      // fallback: find by key pattern inside shadow DOM
+      var btns = window.parent.document.querySelectorAll('button');
+      for (var i = 0; i < btns.length; i++) {
+        if (btns[i].innerText && btns[i].innerText.includes(id)) { btns[i].click(); return; }
+      }
+    } else { btn.click(); }
+  }
+  document.addEventListener('keydown', function(e) {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    if (e.key === 'ArrowLeft'  || e.key === 'a') {
+      window.parent.document.querySelectorAll('button').forEach(function(b){
+        if (b.innerText && b.innerText.includes('Avvisa')) b.click();
+      });
+    } else if (e.key === 'ArrowRight' || e.key === 'd') {
+      window.parent.document.querySelectorAll('button').forEach(function(b){
+        if (b.innerText && b.innerText.includes('Ja, solceller')) b.click();
+      });
+    } else if (e.key === 'ArrowDown'  || e.key === 's') {
+      window.parent.document.querySelectorAll('button').forEach(function(b){
+        if (b.innerText && b.innerText.includes('Hoppa')) b.click();
+      });
+    }
+  });
+})();
+</script>
+""", height=0)
+    except Exception:
+        pass
+
     # ── Tinder-knappar ──────────────────────────────────────────────────────
-    col_nej, col_ja = st.columns(2)
+    col_nej, col_hoppa, col_ja = st.columns([2, 1, 2])
+    with col_hoppa:
+        if st.button("⏭ Hoppa", use_container_width=True, key="review_skip",
+                     help="S / ↓ — hoppa över, behåll i kö"):
+            skip_ids.add(lead_id)
+            st.rerun()
     with col_nej:
         if st.button("❌  Avvisa", use_container_width=True, key="review_no"):
             try:
