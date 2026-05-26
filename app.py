@@ -138,12 +138,13 @@ def _get_cookie_manager():
 def init_auth():
     """Återställ session från session_state eller browser-cookies.
 
-    Ordning: session_state → cookies → None.
-    Cookies överlever Railway-restarts; session_state gör det inte.
+    Ordning: session_state → st.context.cookies → stx.CookieManager → None.
+
+    st.context.cookies läser HTTP request-headers direkt (Streamlit 1.37+) —
+    tillgängligt på FÖRSTA rendern utan JS round-trip. Det eliminerar den
+    logout-vid-refresh-bug som CookieManager.get() orsakade (behövde 1–3
+    extra render-cykler för att JS-komponenten skulle svara).
     """
-    # Fast path: redan validerad denna session — returnera cachad användare utan
-    # nätverksanrop. Radioknappar, flikar och andra widgets triggar reruns men
-    # ska ALDRIG logga ut användaren.
     cached_user = st.session_state.get("_auth_user")
     if cached_user and st.session_state.get("access_token"):
         return cached_user
@@ -151,19 +152,30 @@ def init_auth():
     access = st.session_state.get("access_token")
     refresh = st.session_state.get("refresh_token")
 
-    # Fallback: läs från cookies om session_state är tom.
-    # CookieManager behöver en extra render-cykel efter Railway-restart.
     if not access or not refresh:
+        # Primary: st.context.cookies — request-headers, inga render-cykler behövs
+        try:
+            access = st.context.cookies.get("access_token") or access
+            refresh = st.context.cookies.get("refresh_token") or refresh
+        except Exception:
+            pass
+
+    if not access or not refresh:
+        # Fallback: stx.CookieManager (behöver JS round-trip, men sessioner
+        # satta med gamla versionen av appen läses fortfarande upp)
         cm = _get_cookie_manager()
         if cm is not None:
-            access = cm.get("access_token")
-            refresh = cm.get("refresh_token")
+            access = cm.get("access_token") or access
+            refresh = cm.get("refresh_token") or refresh
+            if not access or not refresh:
+                attempts = st.session_state.get("_cookie_load_attempted", 0)
+                if attempts < 2:
+                    st.session_state["_cookie_load_attempted"] = attempts + 1
+                    st.rerun()
         if not access or not refresh:
-            attempts = st.session_state.get("_cookie_load_attempted", 0)
-            if attempts < 3:
-                st.session_state["_cookie_load_attempted"] = attempts + 1
-                st.rerun()
+            st.session_state.pop("_cookie_load_attempted", None)
             return None
+
     st.session_state.pop("_cookie_load_attempted", None)
 
     # Validera mot Supabase (körs bara vid första rendern eller efter token-refresh).
