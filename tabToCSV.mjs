@@ -8,9 +8,12 @@
  * Usage:
  *   node tabToCSV.mjs enspecta.tab [output.csv]
  *
- * Columns in enspecta.tab:
- *   0  CaseID    1  Status    5  Adress    6  Postnr    7  Ort
- *   9  Namn     12  Fastighet 20 Namn2    22  Email    23  Telefon
+ * Kända kolumner i enspecta.tab:
+ *   0  CaseID      1  Status         2  Besiktningsdatum
+ *   5  Adress      6  Postnr         7  Ort             8  Kommun
+ *   9  Namn       12  Fastighetsbeteckning             18  Byggår
+ *  19  RenoveratÅr 20  Namn2         21  Adress2
+ *  22  Email      23  Telefon
  *  24  IntFörnamn  25 IntEfternamn  26 IntEmail  27 IntTel1  28 IntTel2
  */
 
@@ -35,7 +38,7 @@ function csvVal(v) {
 
 function parseTab(tabPath) {
   const lines = readFileSync(tabPath, 'utf-8').split('\n');
-  // fastig → { köpare: [], intressenter: [], säljare: [] }
+  // fastig → { köpare: [], intressenter: [], säljare: [], meta: {} }
   const byFastig = new Map();
 
   let curFastig = null;
@@ -49,7 +52,7 @@ function parseTab(tabPath) {
       byFastig.set(curFastig, { köpare: [], intressenter: [], säljare: [] });
     }
     const b = byFastig.get(curFastig);
-    if (curStatus === 'Köpare')  b.köpare.push(curRecord);
+    if (curStatus === 'Köpare')   b.köpare.push(curRecord);
     else if (curStatus === 'Säljare') b.säljare.push(curRecord);
     if (curStatus === 'Säljare' && curInts.length > 0) {
       b.intressenter.push(...curInts);
@@ -65,39 +68,41 @@ function parseTab(tabPath) {
       const fastig = normFastig(c[12]);
       curFastig = fastig || null;
       curStatus = clean(c[1]);
+
+      const byggår = clean(c[18]).replace(/^--$/, '');
+      const renoveratAr = clean(c[19]).replace(/^--$/, '');
+
       curRecord = fastig ? {
-        namn:    clean(c[9]) || clean(c[20]),
-        adress:  clean(c[5]),
-        postnr:  clean(c[6]),
-        ort:     clean(c[7]),
-        telefon: clean(c[23]),
-        email:   clean(c[22]),
-        status:  curStatus,
+        caseId:          caseId,
+        namn:            clean(c[9]) || clean(c[20]),
+        namn2:           clean(c[20]) !== clean(c[9]) ? clean(c[20]) : '',
+        adress:          clean(c[5]),
+        adress2:         clean(c[21]),
+        postnr:          clean(c[6]),
+        ort:             clean(c[7]),
+        kommun:          clean(c[8]),
+        telefon:         clean(c[23]),
+        email:           clean(c[22]),
+        status:          curStatus,
+        besiktningsdatum: clean(c[2]),
+        byggår,
+        renoveratAr,
         fastig,
       } : null;
       curInts = [];
+
       const fn = clean(c[24]);
       if (fn) curInts.push({
         namn:    `${fn} ${clean(c[25])}`.trim(),
-        adress:  curRecord?.adress ?? '',
-        postnr:  curRecord?.postnr ?? '',
-        ort:     curRecord?.ort ?? '',
         telefon: clean(c[27]) || clean(c[28]),
         email:   clean(c[26]),
-        status:  'Intressent',
-        fastig:  curFastig ?? '',
       });
     } else {
       const fn = clean(c[24]);
       if (fn && curRecord) curInts.push({
         namn:    `${fn} ${clean(c[25])}`.trim(),
-        adress:  curRecord.adress,
-        postnr:  curRecord.postnr,
-        ort:     curRecord.ort,
         telefon: clean(c[27]) || clean(c[28]),
         email:   clean(c[26]),
-        status:  'Intressent',
-        fastig:  curFastig ?? '',
       });
     }
   }
@@ -106,11 +111,11 @@ function parseTab(tabPath) {
 }
 
 function bestContact(b) {
-  for (const r of b.köpare)      if (r.telefon || r.email) return r;
-  for (const r of b.intressenter) if (r.telefon || r.email) return r;
-  for (const r of b.säljare)     if (r.telefon || r.email) return r;
-  // fallback: any record even without contact info
-  return b.köpare[0] ?? b.intressenter[0] ?? b.säljare[0] ?? null;
+  for (const r of b.köpare)       if (r.telefon || r.email) return { ...r, kontakttyp: 'Köpare' };
+  for (const r of b.intressenter) if (r.telefon || r.email) return { ...r, kontakttyp: 'Intressent' };
+  for (const r of b.säljare)      if (r.telefon || r.email) return { ...r, kontakttyp: 'Säljare' };
+  const fallback = b.köpare[0] ?? b.säljare[0];
+  return fallback ? { ...fallback, kontakttyp: fallback.status } : null;
 }
 
 function main() {
@@ -124,29 +129,60 @@ function main() {
   const byFastig = parseTab(tabPath);
   console.log(`  ${byFastig.size} unika fastigheter`);
 
-  const header = ['namn', 'adress', 'postnr', 'ort', 'telefon', 'email', 'status', 'fastighetsbeteckning'];
+  const header = [
+    'kontakttyp',
+    'namn', 'namn2',
+    'adress', 'adress2', 'postnr', 'ort', 'kommun',
+    'telefon', 'email',
+    'int_namn', 'int_telefon', 'int_email',
+    'besiktningsdatum', 'byggår', 'renoveratAr',
+    'fastighetsbeteckning', 'caseId',
+  ];
   const rows = [header.join(',')];
-  let medTelefon = 0, medEmail = 0, ingenKontakt = 0;
+
+  let stats = { köpare: 0, intressent: 0, säljare: 0, ingenKontakt: 0, medTel: 0, medEmail: 0 };
 
   for (const [fastig, b] of byFastig) {
-    const r = bestContact(b);
-    if (!r) { ingenKontakt++; continue; }
-    if (r.telefon) medTelefon++;
-    if (r.email)   medEmail++;
-    rows.push([r.namn, r.adress, r.postnr, r.ort, r.telefon, r.email, r.status, fastig]
-      .map(csvVal).join(','));
+    const best = bestContact(b);
+    if (!best) { stats.ingenKontakt++; continue; }
+
+    const typ = best.kontakttyp ?? best.status ?? '';
+    if (typ === 'Köpare')      stats.köpare++;
+    else if (typ === 'Intressent') stats.intressent++;
+    else                           stats.säljare++;
+    if (best.telefon) stats.medTel++;
+    if (best.email)   stats.medEmail++;
+
+    // First intressent (if different from best contact)
+    const int = b.intressenter[0];
+    const intNamn  = int?.namn    ?? '';
+    const intTel   = int?.telefon ?? '';
+    const intEmail = int?.email   ?? '';
+
+    rows.push([
+      typ,
+      best.namn ?? '', best.namn2 ?? '',
+      best.adress ?? '', best.adress2 ?? '',
+      best.postnr ?? '', best.ort ?? '', best.kommun ?? '',
+      best.telefon ?? '', best.email ?? '',
+      intNamn, intTel, intEmail,
+      best.besiktningsdatum ?? '', best.byggår ?? '', best.renoveratAr ?? '',
+      fastig, best.caseId ?? '',
+    ].map(csvVal).join(','));
   }
 
   const dest = outPath ?? tabPath.replace(/\.tab$/i, '-kontakter.csv');
-  writeFileSync(dest, '﻿' + rows.join('\r\n'), 'utf-8'); // BOM för Excel
+  writeFileSync(dest, '﻿' + rows.join('\r\n'), 'utf-8');
 
   console.log(`\n=== Klar ===`);
-  console.log(`  Fastigheter totalt:  ${byFastig.size}`);
-  console.log(`  Med telefonnummer:   ${medTelefon}`);
-  console.log(`  Med e-post:          ${medEmail}`);
-  console.log(`  Ingen kontaktinfo:   ${ingenKontakt}`);
+  console.log(`  Fastigheter totalt:    ${byFastig.size}`);
+  console.log(`  Köpare (bäst):         ${stats.köpare}`);
+  console.log(`  Intressent (Säljare-besiktning): ${stats.intressent}`);
+  console.log(`  Säljare (har flyttat): ${stats.säljare}`);
+  console.log(`  Med telefonnummer:     ${stats.medTel}`);
+  console.log(`  Med e-post:            ${stats.medEmail}`);
+  console.log(`  Ingen kontaktinfo:     ${stats.ingenKontakt}`);
   console.log(`\nSparad till: ${dest}`);
-  console.log('Öppna i Excel — välj UTF-8 med BOM om tecken ser konstiga ut.');
 }
 
 main();
