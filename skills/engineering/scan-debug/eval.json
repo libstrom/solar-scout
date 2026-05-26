@@ -113,11 +113,11 @@
       "assertions": [
         {
           "id": "t5_a1",
-          "check": "Response mentions checking Railway environment variables or Railway dashboard"
+          "check": "Response mentions checking environment variables or app logs"
         },
         {
           "id": "t5_a2",
-          "check": "Response mentions checking Railway logs for _analyze_building"
+          "check": "Response mentions checking app logs for _analyze_building"
         },
         {
           "id": "t5_a3",

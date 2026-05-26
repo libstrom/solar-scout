@@ -47,7 +47,7 @@
         },
         {
           "id": "t2_a4",
-          "check": "Response mentions Railway logs"
+          "check": "Response mentions app logs or loggarna"
         },
         {
           "id": "t2_a5",
@@ -113,7 +113,7 @@
       "assertions": [
         {
           "id": "t5_a1",
-          "check": "Response mentions Railway dashboard or Railway-loggar"
+          "check": "Response mentions app logs or loggarna"
         },
         {
           "id": "t5_a2",

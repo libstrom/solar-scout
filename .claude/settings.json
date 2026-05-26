@@ -48,13 +48,6 @@
     ]
   },
   "mcpServers": {
-    "railway": {
-      "command": "python",
-      "args": ["${PROJECT_ROOT}/railway-mcp/server.py"],
-      "env": {
-        "RAILWAY_API_TOKEN": "${RAILWAY_API_TOKEN}"
-      }
-    },
     "supabase": {
       "type": "http",
       "url": "https://mcp.supabase.com/mcp?project_ref=ozmpxldmgivggbmwhtjt"
