@@ -1,0 +1,141 @@
+{
+  "skill": "leads-now",
+  "description": "25 binary assertions across 5 scenarios — tests that leads-now always gives David immediate, actionable steps without detours",
+  "tests": [
+    {
+      "id": "t1",
+      "prompt": "Vi behöver leads till David idag.",
+      "expected_output_description": "Skips setup steps, goes straight to scanning a specific city",
+      "assertions": [
+        {
+          "id": "t1.a1",
+          "check": "Output recommends at least one specific Swedish city by name (e.g. Huskvarna, Nässjö, Vetlanda)"
+        },
+        {
+          "id": "t1.a2",
+          "check": "Output does NOT suggest spending time on configuration, environment setup, or Railway deployment as a first step"
+        },
+        {
+          "id": "t1.a3",
+          "check": "Output mentions a specific max_leads number or suggests a concrete limit (e.g. 30)"
+        },
+        {
+          "id": "t1.a4",
+          "check": "Output includes a step for exporting leads (CSV or Excel)"
+        },
+        {
+          "id": "t1.a5",
+          "check": "Output is ordered as a numbered list or clear sequence of steps, not a wall of text"
+        }
+      ]
+    },
+    {
+      "id": "t2",
+      "prompt": "Scanning returnerar 0 leads. Vad gör jag?",
+      "expected_output_description": "Immediately redirects to /scan-debug, gives one quick check, doesn't re-explain the whole pipeline",
+      "assertions": [
+        {
+          "id": "t2.a1",
+          "check": "Output references scan-debug or /scan-debug skill explicitly"
+        },
+        {
+          "id": "t2.a2",
+          "check": "Output suggests trying a different city as a quick workaround, not just debugging"
+        },
+        {
+          "id": "t2.a3",
+          "check": "Output mentions Nässjö, Huskvarna, or Vetlanda as better cities to try"
+        },
+        {
+          "id": "t2.a4",
+          "check": "Output does NOT explain the full scan pipeline stages (that belongs in scan-debug, not leads-now)"
+        },
+        {
+          "id": "t2.a5",
+          "check": "Output mentions checking ANTHROPIC_API_KEY on Railway as one possible quick fix"
+        }
+      ]
+    },
+    {
+      "id": "t3",
+      "prompt": "Vilken stad ger flest leads snabbast?",
+      "expected_output_description": "Gives a concrete recommendation with reasoning, not a generic answer",
+      "assertions": [
+        {
+          "id": "t3.a1",
+          "check": "Output gives a single primary recommendation, not 'it depends' as the only answer"
+        },
+        {
+          "id": "t3.a2",
+          "check": "Output explains WHY the recommended city is good (e.g. villa density, OSM coverage)"
+        },
+        {
+          "id": "t3.a3",
+          "check": "Output explicitly warns against or discourages scanning Stockholm or Göteborg"
+        },
+        {
+          "id": "t3.a4",
+          "check": "Output mentions SE3-regionen or Småland or Jönköping-regionen as the best geographic area"
+        },
+        {
+          "id": "t3.a5",
+          "check": "Output is concise — answer fits within 200 words"
+        }
+      ]
+    },
+    {
+      "id": "t4",
+      "prompt": "Appen är nere på Railway. Hur får jag leads?",
+      "expected_output_description": "Checks Railway dashboard first, gives a fallback for running locally",
+      "assertions": [
+        {
+          "id": "t4.a1",
+          "check": "Output mentions checking Railway dashboard as the first step"
+        },
+        {
+          "id": "t4.a2",
+          "check": "Output does NOT immediately suggest complex debugging — it starts with a simple status check"
+        },
+        {
+          "id": "t4.a3",
+          "check": "Output acknowledges that leads can't be generated if the app is down, rather than pretending otherwise"
+        },
+        {
+          "id": "t4.a4",
+          "check": "Output mentions 'streamlit run app.py' or running locally as a fallback option"
+        },
+        {
+          "id": "t4.a5",
+          "check": "Output is helpful and forward-looking — doesn't just say 'wait for Railway to come back'"
+        }
+      ]
+    },
+    {
+      "id": "t5",
+      "prompt": "David har fått 50 leads. Vad är nästa steg?",
+      "expected_output_description": "Focuses on David exporting and working the leads, not on scanning more",
+      "assertions": [
+        {
+          "id": "t5.a1",
+          "check": "Output mentions exporting leads as CSV or Excel"
+        },
+        {
+          "id": "t5.a2",
+          "check": "Output mentions the Leads-flik or leads list in the app"
+        },
+        {
+          "id": "t5.a3",
+          "check": "Output does NOT primarily suggest immediately scanning for more leads when 50 are already found"
+        },
+        {
+          "id": "t5.a4",
+          "check": "Output gives David a clear next action (e.g. ring på listan, exportera, börja ringa)"
+        },
+        {
+          "id": "t5.a5",
+          "check": "Output acknowledges that 50 leads is a good result, not a failure state"
+        }
+      ]
+    }
+  ]
+}

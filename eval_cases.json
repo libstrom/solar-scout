@@ -1,0 +1,5 @@
+[
+  {"lat": 57.6785, "lng": 14.1650, "label": "yes", "note": "Nässjö confirmed lead"},
+  {"lat": 57.6720, "lng": 14.1590, "label": "no", "note": "Nässjö rejected - eternite"},
+  {"lat": 57.6800, "lng": 14.1700, "label": "unsure", "note": "edge case"}
+]

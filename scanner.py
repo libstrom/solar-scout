@@ -67,6 +67,21 @@ class Lead:
     needs_review: bool = False         # AI was unsure — human should verify
     ai_reasoning: str = ""             # AI's roof description (1-2 sentences)
     image_url: str = ""                # clickable LM WMS satellite URL
+    scan_session_id: str | None = None # UUID string for grouping scan results
+
+
+@dataclass
+class ScanStats:
+    """Aggregated statistics from a scan run."""
+    yes: int = 0
+    unsure: int = 0
+    no: int = 0
+
+    @property
+    def false_positive_rate(self) -> float:
+        """Estimate of false positive rate: unsure / (yes + unsure)."""
+        denom = self.yes + self.unsure
+        return self.unsure / denom if denom > 0 else 0.0
 
 
 # ── Tile helpers (kept for UI bbox display) ────────────────────────────────────
@@ -1192,7 +1207,7 @@ def scan_buildings_ai(
     max_leads: int | None = None,
     few_shot: list[tuple[str, str]] | None = None,
     skip_tile_keys: frozenset[str] = frozenset(),
-) -> list[Lead]:
+) -> tuple[list[Lead], ScanStats]:
     """Run Claude Vision on each OSM building centroid.
 
     Args:
@@ -1203,9 +1218,14 @@ def scan_buildings_ai(
                   Pass a pre-loaded list to avoid redundant downloads when
                   scan_buildings_ai is called multiple times per scan (e.g.
                   once per residential area in scan_city).
+
+    Returns:
+        A tuple of (leads, stats) where stats tracks yes/unsure/no counts for
+        all buildings processed by the AI.
     """
+    stats = ScanStats()
     if not buildings or not anthropic_key:
-        return []
+        return [], stats
 
     client = anthropic.Anthropic(api_key=anthropic_key)
     leads: list[Lead] = []
@@ -1241,8 +1261,14 @@ def scan_buildings_ai(
                 result = None
             except Exception:
                 result = None
-            if result:
+            if result is not None:
                 leads.append(result)
+                if result.needs_review:
+                    stats.unsure += 1
+                else:
+                    stats.yes += 1
+            else:
+                stats.no += 1
             if on_progress:
                 try:
                     on_progress(done, total, result)
@@ -1255,7 +1281,7 @@ def scan_buildings_ai(
                     f.cancel()
                 break
 
-    return leads
+    return leads, stats
 
 
 # ── Merge & deduplicate ────────────────────────────────────────────────────────
@@ -1389,12 +1415,15 @@ def scan_city(
     phase_callback: Callable[[str, int], None] | None = None,
     skip_tile_keys: frozenset[str] = frozenset(),
     user_id: str | None = None,
-) -> list[Lead]:
+) -> tuple[list[Lead], ScanStats]:
     """Scan a city for buildings with solar panels.
 
     Args:
         max_leads: Stop scanning once this many confirmed leads are found.
                    None means no limit.
+
+    Returns:
+        A tuple of (leads, stats) where stats aggregates yes/unsure/no counts.
     """
     _log.info("scan_city city=%s max_leads=%s", city_name, max_leads)
     gmaps = googlemaps.Client(key=google_key)
@@ -1419,15 +1448,17 @@ def scan_city(
 
     if not anthropic_key:
         _log.info("scan_city no anthropic_key — returning OSM only")
-        return osm_leads[:max_leads] if max_leads else osm_leads
+        leads = osm_leads[:max_leads] if max_leads else osm_leads
+        return leads, ScanStats()
 
     # Check if we've already hit max_leads from OSM alone
     if max_leads is not None and len(osm_leads) >= max_leads:
         _log.info("scan_city max_leads reached by OSM alone")
-        return osm_leads[:max_leads]
+        return osm_leads[:max_leads], ScanStats()
 
     osm_keys = {f"{l.lat:.4f},{l.lng:.4f}" for l in osm_leads}
     all_ai_leads: list[Lead] = []
+    merged_stats = ScanStats()
     seen_building_ids: set[str] = set()
 
     # Load few-shot examples once per full scan — shared across all residential
@@ -1475,7 +1506,7 @@ def scan_city(
             _log.info("scan_city area lat=%s lng=%s buildings=%d", area["lat"], area["lng"], len(buildings))
             if phase_callback:
                 phase_callback("area_buildings", len(buildings))
-            area_leads = scan_buildings_ai(
+            area_leads, area_stats = scan_buildings_ai(
                 buildings, google_key, anthropic_key, on_progress,
                 mapbox_key=mapbox_key, lm_key=lm_key,
                 max_leads=remaining, few_shot=few_shot,
@@ -1483,6 +1514,9 @@ def scan_city(
             )
             _log.info("scan_city area_leads=%d", len(area_leads))
             all_ai_leads.extend(area_leads)
+            merged_stats.yes += area_stats.yes
+            merged_stats.unsure += area_stats.unsure
+            merged_stats.no += area_stats.no
 
             if max_leads is not None and len(osm_leads) + len(all_ai_leads) >= max_leads:
                 break
@@ -1500,7 +1534,7 @@ def scan_city(
         remaining = None
         if max_leads is not None:
             remaining = max_leads - len(osm_leads)
-        all_ai_leads = scan_buildings_ai(
+        all_ai_leads, merged_stats = scan_buildings_ai(
             buildings, google_key, anthropic_key, on_progress,
             mapbox_key=mapbox_key, lm_key=lm_key,
             max_leads=remaining, few_shot=few_shot,
@@ -1510,8 +1544,83 @@ def scan_city(
     merged = merge_leads(osm_leads, all_ai_leads)
     _log.info("scan_city done city=%s total_leads=%d (osm=%d ai=%d)",
               city_name, len(merged), len(osm_leads), len(all_ai_leads))
-    return merged
+    return merged, merged_stats
 
+
+def scan_municipality(
+    cities: list[str],
+    google_key: str,
+    anthropic_key: str | None,
+    on_progress: Callable[[int, int, Lead | None], None] | None = None,
+    on_city_done: Callable[[str, int, ScanStats], None] | None = None,
+    lm_key: str | None = None,
+    mapbox_key: str | None = None,
+    max_leads_per_city: int | None = None,
+    max_leads_total: int | None = None,
+    skip_tile_keys: frozenset[str] = frozenset(),
+    user_id: str | None = None,
+) -> tuple[list[Lead], ScanStats]:
+    """Scan multiple cities/municipalities sequentially to generate large lead batches.
+
+    Designed for bulk runs (hundreds–thousands of leads across a region).
+    Deduplicates across cities so the same building is never scanned twice.
+    Calls on_city_done after each city so the caller can persist leads incrementally.
+
+    Args:
+        cities: List of city/municipality names to scan in order.
+        on_city_done: Called after each city with (city_name, leads_found, stats).
+        max_leads_per_city: Lead cap per city (None = unlimited).
+        max_leads_total: Stop scanning new cities once this total is reached.
+        skip_tile_keys: Tile keys already in the database — skip these buildings.
+
+    Returns:
+        Tuple of (all_leads, merged_stats).
+    """
+    all_leads: list[Lead] = []
+    merged_stats = ScanStats()
+    seen_tile_keys: set[str] = set(skip_tile_keys)
+
+    for city in cities:
+        if max_leads_total is not None and len(all_leads) >= max_leads_total:
+            _log.info("scan_municipality max_leads_total=%d reached after %d leads", max_leads_total, len(all_leads))
+            break
+
+        remaining_total = None
+        if max_leads_total is not None:
+            remaining_total = max_leads_total - len(all_leads)
+
+        per_city_cap = max_leads_per_city
+        if remaining_total is not None:
+            per_city_cap = min(per_city_cap, remaining_total) if per_city_cap else remaining_total
+
+        _log.info("scan_municipality city=%s cap=%s", city, per_city_cap)
+        try:
+            city_leads, city_stats = scan_city(
+                city, google_key, anthropic_key, on_progress,
+                lm_key=lm_key, mapbox_key=mapbox_key,
+                max_leads=per_city_cap,
+                skip_tile_keys=frozenset(seen_tile_keys),
+                user_id=user_id,
+            )
+        except Exception as exc:
+            _log.warning("scan_municipality city=%s failed: %s", city, exc)
+            if on_city_done:
+                on_city_done(city, 0, ScanStats())
+            continue
+
+        for lead in city_leads:
+            seen_tile_keys.add(lead.tile_key)
+
+        all_leads.extend(city_leads)
+        merged_stats.yes    += city_stats.yes
+        merged_stats.unsure += city_stats.unsure
+        merged_stats.no     += city_stats.no
+
+        _log.info("scan_municipality city=%s leads=%d total_so_far=%d", city, len(city_leads), len(all_leads))
+        if on_city_done:
+            on_city_done(city, len(city_leads), city_stats)
+
+    return all_leads, merged_stats
 
 def scan_bbox(
     south: float,
@@ -1527,47 +1636,112 @@ def scan_bbox(
     phase_callback: Callable[[str, int], None] | None = None,
     skip_tile_keys: frozenset[str] = frozenset(),
     user_id: str | None = None,
-) -> list[Lead]:
-    """Scan a bounding box for buildings with solar panels."""
-    tile_count = len(_bbox_tiles(south, west, north, east))
-    if tile_count > 1000:
-        raise ValueError(
-            f"Området är för stort ({tile_count} brickor ≈ {tile_count * 107 // 1000:.1f} km²). "
-            "Rita en mindre ruta — max ~2 km²."
-        )
+) -> tuple[list[Lead], ScanStats]:
+    """Scan a bounding box for buildings with solar panels.
 
+    Returns:
+        A tuple of (leads, stats) where stats aggregates yes/unsure/no counts.
+    """
+    tile_count = len(_bbox_tiles(south, west, north, east))
+
+    # OSM solar tags: instant, works for any bbox size
     osm_leads = scan_area_osm(south, west, north, east)
+    _log.info("scan_bbox tile_count=%d osm_leads=%d", tile_count, len(osm_leads))
     if phase_callback:
         phase_callback("osm_leads", len(osm_leads))
 
     if not anthropic_key:
-        return osm_leads[:max_leads] if max_leads else osm_leads
+        leads = osm_leads[:max_leads] if max_leads else osm_leads
+        return leads, ScanStats()
 
-    # Check if we've already hit max_leads from OSM alone
     if max_leads is not None and len(osm_leads) >= max_leads:
-        return osm_leads[:max_leads]
+        return osm_leads[:max_leads], ScanStats()
 
-    buildings = _get_osm_buildings(south, west, north, east)
     osm_keys  = {f"{l.lat:.4f},{l.lng:.4f}" for l in osm_leads}
-    buildings = [b for b in buildings
-                 if f"{b['lat']:.4f},{b['lng']:.4f}" not in osm_keys]
+    few_shot  = _load_few_shot_images(user_id=user_id)
+    all_ai_leads: list[Lead] = []
+    merged_stats = ScanStats()
+
+    if tile_count > 1000:
+        # Large bbox: chunk by OSM residential polygons — same strategy as scan_city.
+        # This lets users draw whole city districts or municipalities without limits.
+        residential_areas = _get_residential_areas(south, west, north, east)
+        _log.info("scan_bbox large area: residential_areas=%d", len(residential_areas))
+
+        if residential_areas:
+            seen_building_ids: set[str] = set()
+            for area in residential_areas:
+                remaining = None
+                if max_leads is not None:
+                    remaining = max_leads - len(osm_leads) - len(all_ai_leads)
+                    if remaining <= 0:
+                        break
+
+                a_south, a_west, a_north, a_east = _center_bbox(
+                    area["lat"], area["lng"], radius_km=1.0
+                )
+                # Clamp to drawn bbox so we don't spill outside the user's selection
+                a_south = max(a_south, south)
+                a_west  = max(a_west,  west)
+                a_north = min(a_north, north)
+                a_east  = min(a_east,  east)
+
+                buildings = _get_osm_buildings(a_south, a_west, a_north, a_east)
+                buildings = [
+                    b for b in buildings
+                    if b["osm_id"] not in seen_building_ids
+                    and f"{b['lat']:.4f},{b['lng']:.4f}" not in osm_keys
+                ]
+                for b in buildings:
+                    seen_building_ids.add(b["osm_id"])
+
+                if not buildings:
+                    continue
+
+                if phase_callback:
+                    phase_callback("area_buildings", len(buildings))
+                area_leads, area_stats = scan_buildings_ai(
+                    buildings, google_key, anthropic_key, on_progress,
+                    mapbox_key=mapbox_key, lm_key=lm_key,
+                    max_leads=remaining, few_shot=few_shot,
+                    skip_tile_keys=skip_tile_keys,
+                )
+                all_ai_leads.extend(area_leads)
+                merged_stats.yes    += area_stats.yes
+                merged_stats.unsure += area_stats.unsure
+                merged_stats.no     += area_stats.no
+
+                if max_leads is not None and len(osm_leads) + len(all_ai_leads) >= max_leads:
+                    break
+        else:
+            # No residential polygons (rural/industrial): scan full bbox directly.
+            buildings = _get_osm_buildings(south, west, north, east)
+            buildings = [b for b in buildings
+                         if f"{b['lat']:.4f},{b['lng']:.4f}" not in osm_keys]
+            if phase_callback:
+                phase_callback("buildings_found", len(buildings))
+            remaining = (max_leads - len(osm_leads)) if max_leads is not None else None
+            all_ai_leads, merged_stats = scan_buildings_ai(
+                buildings, google_key, anthropic_key, on_progress,
+                mapbox_key=mapbox_key, lm_key=lm_key,
+                max_leads=remaining, few_shot=few_shot,
+                skip_tile_keys=skip_tile_keys,
+            )
+    else:
+        # Small bbox (≤ ~2 km²): direct scan, no chunking needed
+        buildings = _get_osm_buildings(south, west, north, east)
+        buildings = [b for b in buildings
+                     if f"{b['lat']:.4f},{b['lng']:.4f}" not in osm_keys]
+        if phase_callback:
+            phase_callback("buildings_found", len(buildings))
+        remaining = (max_leads - len(osm_leads)) if max_leads is not None else None
+        all_ai_leads, merged_stats = scan_buildings_ai(
+            buildings, google_key, anthropic_key, on_progress,
+            mapbox_key=mapbox_key, lm_key=lm_key,
+            max_leads=remaining, few_shot=few_shot,
+            skip_tile_keys=skip_tile_keys,
+        )
+
     if phase_callback:
-        phase_callback("buildings_found", len(buildings))
-
-    remaining = None
-    if max_leads is not None:
-        remaining = max_leads - len(osm_leads)
-
-    # Load few-shot images once per scan (not inside scan_buildings_ai) so the
-    # same 6 WMS requests are not repeated for every scan_buildings_ai call.
-    few_shot = _load_few_shot_images(user_id=user_id)
-
-    ai_leads = scan_buildings_ai(
-        buildings, google_key, anthropic_key, on_progress,
-        mapbox_key=mapbox_key, lm_key=lm_key,
-        max_leads=remaining, few_shot=few_shot,
-        skip_tile_keys=skip_tile_keys,
-    )
-    if phase_callback:
-        phase_callback("ai_done", len(ai_leads))
-    return merge_leads(osm_leads, ai_leads)
+        phase_callback("ai_done", len(all_ai_leads))
+    return merge_leads(osm_leads, all_ai_leads), merged_stats
