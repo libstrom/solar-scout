@@ -92,11 +92,13 @@ def test_init_auth_restores_session_from_cookies():
 
 
 def test_init_auth_returns_none_without_session_or_cookies():
-    """Om varken session_state eller cookies finns → init_auth returnerar None."""
-    cm = _make_cookie_mock({})  # inga cookies
+    """Om varken session_state, st.context.cookies eller CookieManager har tokens → None."""
+    cm = _make_cookie_mock({})  # inga cookies i CookieManager
 
     st_mock = sys.modules["streamlit"]
     st_mock.session_state = {}
+    # st.context.cookies ska också vara tom
+    st_mock.context.cookies.get.return_value = None
 
     with patch("app._get_cookie_manager", return_value=cm):
         result = app.init_auth()
