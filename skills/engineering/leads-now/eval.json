@@ -1,0 +1,137 @@
+{
+  "skill": "leads-now",
+  "skill_path": "skills/engineering/leads-now/SKILL.md",
+  "description": "25 binary assertions across 5 test cases for the leads-now skill",
+  "tests": [
+    {
+      "id": "t1",
+      "prompt": "Vi behöver solar leads nu. Railway-appen är igång. Vad gör vi?",
+      "assertions": [
+        {
+          "id": "t1_a1",
+          "check": "Response contains at least one of: Huskvarna, Nässjö, Vetlanda"
+        },
+        {
+          "id": "t1_a2",
+          "check": "Response contains the word 'Scanna' or 'scanna'"
+        },
+        {
+          "id": "t1_a3",
+          "check": "Response contains the word 'CSV' or 'exportera'"
+        },
+        {
+          "id": "t1_a4",
+          "check": "Response does not recommend Stockholm or Göteborg as the first city to try"
+        },
+        {
+          "id": "t1_a5",
+          "check": "Response word count is under 200 words"
+        }
+      ]
+    },
+    {
+      "id": "t2",
+      "prompt": "Scanningen returnerar 0 leads. Vad är fel?",
+      "assertions": [
+        {
+          "id": "t2_a1",
+          "check": "Response mentions /scan-debug"
+        },
+        {
+          "id": "t2_a2",
+          "check": "Response suggests trying a different city"
+        },
+        {
+          "id": "t2_a3",
+          "check": "Response mentions ANTHROPIC_API_KEY"
+        },
+        {
+          "id": "t2_a4",
+          "check": "Response mentions Railway logs"
+        },
+        {
+          "id": "t2_a5",
+          "check": "Response does not begin with a clarifying question to the user"
+        }
+      ]
+    },
+    {
+      "id": "t3",
+      "prompt": "Vilken stad ska vi scanna för att få flest leads?",
+      "assertions": [
+        {
+          "id": "t3_a1",
+          "check": "Response names at least one of: Huskvarna, Nässjö, Vetlanda as a recommendation"
+        },
+        {
+          "id": "t3_a2",
+          "check": "Response warns against or explicitly discourages Stockholm or Göteborg"
+        },
+        {
+          "id": "t3_a3",
+          "check": "Response mentions villa density or villa-täthet as a reason"
+        },
+        {
+          "id": "t3_a4",
+          "check": "Response gives no more than three city recommendations"
+        },
+        {
+          "id": "t3_a5",
+          "check": "Response word count is under 150 words"
+        }
+      ]
+    },
+    {
+      "id": "t4",
+      "prompt": "Hur exporterar jag leads till CSV?",
+      "assertions": [
+        {
+          "id": "t4_a1",
+          "check": "Response mentions the 'Leads' tab or 'Leads'-fliken"
+        },
+        {
+          "id": "t4_a2",
+          "check": "Response contains the word 'CSV'"
+        },
+        {
+          "id": "t4_a3",
+          "check": "Response contains numbered steps or a bullet list"
+        },
+        {
+          "id": "t4_a4",
+          "check": "Response word count is under 100 words"
+        },
+        {
+          "id": "t4_a5",
+          "check": "Response does not mention Railway logs or API keys (irrelevant to this question)"
+        }
+      ]
+    },
+    {
+      "id": "t5",
+      "prompt": "Railway-appen är nere. Vad gör vi för att få leads?",
+      "assertions": [
+        {
+          "id": "t5_a1",
+          "check": "Response mentions Railway dashboard or Railway-loggar"
+        },
+        {
+          "id": "t5_a2",
+          "check": "Response does not instruct the user to try scanning anyway"
+        },
+        {
+          "id": "t5_a3",
+          "check": "Response includes at least one concrete diagnostic action"
+        },
+        {
+          "id": "t5_a4",
+          "check": "Response mentions /scan-debug or checking logs"
+        },
+        {
+          "id": "t5_a5",
+          "check": "Response word count is under 150 words"
+        }
+      ]
+    }
+  ]
+}

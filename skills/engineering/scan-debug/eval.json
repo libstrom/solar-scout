@@ -1,0 +1,137 @@
+{
+  "skill": "scan-debug",
+  "skill_path": "skills/engineering/scan-debug/SKILL.md",
+  "description": "25 binary assertions across 5 test cases for the scan-debug skill",
+  "tests": [
+    {
+      "id": "t1",
+      "prompt": "Scanningen på Huskvarna returnerar 0 leads. Hur debuggar jag det?",
+      "assertions": [
+        {
+          "id": "t1_a1",
+          "check": "Response mentions or provides a diagnostic script to run"
+        },
+        {
+          "id": "t1_a2",
+          "check": "Response mentions Overpass as one of the stages to check"
+        },
+        {
+          "id": "t1_a3",
+          "check": "Response mentions at least 3 of the 6 pipeline stages (_overpass, scan_area_osm, _get_osm_buildings, _fetch_lm_wms, _analyze_building, _has_extra_solar_nearby)"
+        },
+        {
+          "id": "t1_a4",
+          "check": "Response tells the user to check stages in order (stage 1 before stage 2, etc.)"
+        },
+        {
+          "id": "t1_a5",
+          "check": "Response includes at least one concrete action the user can take immediately"
+        }
+      ]
+    },
+    {
+      "id": "t2",
+      "prompt": "Overpass returnerar 0 element. Vad gör jag?",
+      "assertions": [
+        {
+          "id": "t2_a1",
+          "check": "Response identifies this as a Stage 1 problem"
+        },
+        {
+          "id": "t2_a2",
+          "check": "Response suggests waiting and retrying (Overpass may be down or rate-limited)"
+        },
+        {
+          "id": "t2_a3",
+          "check": "Response does not instruct the user to check ANTHROPIC_API_KEY as the primary fix"
+        },
+        {
+          "id": "t2_a4",
+          "check": "Response mentions 429 or rate limiting or Overpass being down as a possible cause"
+        },
+        {
+          "id": "t2_a5",
+          "check": "Response word count is under 150 words"
+        }
+      ]
+    },
+    {
+      "id": "t3",
+      "prompt": "Jag ser inga felmeddelanden i Railway-loggen men scanningen ger ändå 0 leads.",
+      "assertions": [
+        {
+          "id": "t3_a1",
+          "check": "Response mentions checking for the '[scanner]' log prefix"
+        },
+        {
+          "id": "t3_a2",
+          "check": "Response mentions the specific log line 'Overpass returned N elements'"
+        },
+        {
+          "id": "t3_a3",
+          "check": "Response suggests running the diagnostic script locally"
+        },
+        {
+          "id": "t3_a4",
+          "check": "Response mentions trying a larger bounding box or different area"
+        },
+        {
+          "id": "t3_a5",
+          "check": "Response is actionable without additional clarification needed"
+        }
+      ]
+    },
+    {
+      "id": "t4",
+      "prompt": "LM WMS-hämtningen misslyckas. Vad betyder det och hur fixar jag det?",
+      "assertions": [
+        {
+          "id": "t4_a1",
+          "check": "Response identifies this as a Stage 4 failure"
+        },
+        {
+          "id": "t4_a2",
+          "check": "Response mentions testing _fetch_lm_wms() directly"
+        },
+        {
+          "id": "t4_a3",
+          "check": "Response mentions that LM WMS may be intermittently down"
+        },
+        {
+          "id": "t4_a4",
+          "check": "Response does not instruct the user to change their ANTHROPIC_API_KEY as the fix"
+        },
+        {
+          "id": "t4_a5",
+          "check": "Response suggests a workaround (wait, retry, or alternative)"
+        }
+      ]
+    },
+    {
+      "id": "t5",
+      "prompt": "Hur vet jag om ANTHROPIC_API_KEY är korrekt inställd på Railway?",
+      "assertions": [
+        {
+          "id": "t5_a1",
+          "check": "Response mentions checking Railway environment variables or Railway dashboard"
+        },
+        {
+          "id": "t5_a2",
+          "check": "Response mentions checking Railway logs for _analyze_building"
+        },
+        {
+          "id": "t5_a3",
+          "check": "Response identifies this as a Stage 5 issue"
+        },
+        {
+          "id": "t5_a4",
+          "check": "Response mentions the log line '_analyze_building result' as confirmation"
+        },
+        {
+          "id": "t5_a5",
+          "check": "Response word count is under 150 words"
+        }
+      ]
+    }
+  ]
+}
