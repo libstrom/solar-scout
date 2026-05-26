@@ -1,0 +1,141 @@
+{
+  "skill": "scan-debug",
+  "description": "25 binary assertions across 5 test scenarios — each checks a concrete, measurable property of the skill output",
+  "tests": [
+    {
+      "id": "t1",
+      "prompt": "Scan returnerade 0 leads för Huskvarna. Debugga.",
+      "expected_output_description": "Stage-by-stage diagnosis starting from Overpass, including runnable Python code",
+      "assertions": [
+        {
+          "id": "t1.a1",
+          "check": "Output mentions at least one scanner.py function by name (e.g. _overpass, scan_area_osm, _get_osm_buildings, _fetch_lm_wms, _analyze_building)"
+        },
+        {
+          "id": "t1.a2",
+          "check": "Output includes a Python code block the user can run directly"
+        },
+        {
+          "id": "t1.a3",
+          "check": "Output covers Stage 3 (_get_osm_buildings) specifically, not just Stage 1"
+        },
+        {
+          "id": "t1.a4",
+          "check": "Output mentions ANTHROPIC_API_KEY or 'API key' as a potential cause"
+        },
+        {
+          "id": "t1.a5",
+          "check": "Output does NOT end with an open question asking the user for more information before providing any diagnosis"
+        }
+      ]
+    },
+    {
+      "id": "t2",
+      "prompt": "David rapporterar 0 funna leads. Scanningen fungerade fint igår.",
+      "expected_output_description": "Multiple possible causes listed, Railway logs mentioned, actionable next steps",
+      "assertions": [
+        {
+          "id": "t2.a1",
+          "check": "Output mentions checking Railway logs"
+        },
+        {
+          "id": "t2.a2",
+          "check": "Output mentions Overpass, rate limiting, or 429 as a possible cause"
+        },
+        {
+          "id": "t2.a3",
+          "check": "Output lists at least two distinct possible causes, not just one"
+        },
+        {
+          "id": "t2.a4",
+          "check": "Output is immediately actionable — it does not ONLY ask David for more info without providing any diagnosis first"
+        },
+        {
+          "id": "t2.a5",
+          "check": "Output references scanner.py log format (e.g. '[scanner]', '_log.info', or 'Overpass returned N elements')"
+        }
+      ]
+    },
+    {
+      "id": "t3",
+      "prompt": "scan_city returnerar en tom lista utan felmeddelande. Vad debuggar jag?",
+      "expected_output_description": "Distinguishes OSM vs AI causes, provides specific coordinates to test with, mentions residential areas",
+      "assertions": [
+        {
+          "id": "t3.a1",
+          "check": "Output distinguishes between OSM returning 0 results vs AI returning 0 results (two separate failure modes)"
+        },
+        {
+          "id": "t3.a2",
+          "check": "Output provides specific lat/lng coordinates to use in testing (e.g. 57.78, 14.27 or similar Swedish coordinates)"
+        },
+        {
+          "id": "t3.a3",
+          "check": "Output mentions 'residential areas' or '_get_residential_areas' as part of how scan_city works"
+        },
+        {
+          "id": "t3.a4",
+          "check": "Output suggests running a diagnostic script or specific Python commands, not just describing the problem"
+        },
+        {
+          "id": "t3.a5",
+          "check": "Output is structured (uses headers, numbered steps, or a code block) — not a single unbroken paragraph"
+        }
+      ]
+    },
+    {
+      "id": "t4",
+      "prompt": "Bildhämtningen misslyckas för varje byggnad. Scannern hittar byggnader men returnerar 0 AI-leads.",
+      "expected_output_description": "Identifies LM WMS as the image source, provides direct test command, does not blame Anthropic API key",
+      "assertions": [
+        {
+          "id": "t4.a1",
+          "check": "Output identifies LM WMS (Lantmäteriet) as the satellite image source to check"
+        },
+        {
+          "id": "t4.a2",
+          "check": "Output mentions _fetch_lm_wms by name"
+        },
+        {
+          "id": "t4.a3",
+          "check": "Output provides a specific command or code snippet to test image fetch directly"
+        },
+        {
+          "id": "t4.a4",
+          "check": "Output does NOT primarily blame ANTHROPIC_API_KEY when the symptom is image failure (wrong layer)"
+        },
+        {
+          "id": "t4.a5",
+          "check": "Output mentions minkarta.lantmateriet.se or the WMS URL as the image endpoint"
+        }
+      ]
+    },
+    {
+      "id": "t5",
+      "prompt": "Loggarna visar 'Stage 3 — Buildings: 50 byggnader' men 0 leads sparas. Vad är fel?",
+      "expected_output_description": "Correctly identifies Stage 5 (AI analysis) as the failure point, suggests checking API key, mentions _analyze_building",
+      "assertions": [
+        {
+          "id": "t5.a1",
+          "check": "Output correctly identifies that the problem is in Stage 4 or 5 (image fetch or AI analysis), NOT in Stages 1-3 which are already confirmed working"
+        },
+        {
+          "id": "t5.a2",
+          "check": "Output mentions ANTHROPIC_API_KEY as the primary suspect"
+        },
+        {
+          "id": "t5.a3",
+          "check": "Output does NOT suggest re-running Stage 1-3 diagnostics (those are already confirmed working by the log output)"
+        },
+        {
+          "id": "t5.a4",
+          "check": "Output mentions _analyze_building or the AI analysis step by name"
+        },
+        {
+          "id": "t5.a5",
+          "check": "Output suggests a concrete fix or verification step, not just a description of the problem"
+        }
+      ]
+    }
+  ]
+}
