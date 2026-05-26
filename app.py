@@ -664,112 +664,213 @@ def _lead_to_sb_row(lead) -> dict:
 
 
 def _bulk_scan_section(user, profile, ai_available):
-    """Sektion för bulk-scanning av SE3-prioritetsorter."""
-    SE3_CITIES = [
-        "Nässjö", "Eksjö", "Vetlanda", "Huskvarna",
-        "Tranås", "Sävsjö", "Värnamo",
-    ]
+    """Storskalig scanning av regioner — hundratals/tusentals leads."""
 
-    with st.expander("🗺 Bulk-scan SE3-regionen", expanded=False):
+    REGIONS = {
+        "📍 Nässjö / Jönköpingstrakten (SE3)": [
+            "Nässjö", "Eksjö", "Vetlanda", "Huskvarna",
+            "Tranås", "Sävsjö", "Värnamo", "Jönköping",
+            "Mullsjö", "Habo",
+        ],
+        "🌊 Skåne (SE4)": [
+            "Malmö", "Lund", "Helsingborg", "Kristianstad",
+            "Ystad", "Trelleborg", "Ängelholm", "Landskrona",
+            "Kävlinge", "Eslöv", "Vellinge", "Staffanstorp",
+        ],
+        "🏡 Hela Småland (SE3)": [
+            "Nässjö", "Eksjö", "Vetlanda", "Huskvarna",
+            "Värnamo", "Ljungby", "Växjö", "Alvesta",
+            "Vimmerby", "Oskarshamn", "Kalmar",
+        ],
+    }
+
+    ROLE_INFO = {
+        "innesälj": "Alla leads — ringer från kontoret, geografi spelar ingen roll.",
+        "fältsälj": "Filtrera leads inom räckhåll från ett basområde.",
+    }
+
+    with st.expander("🗺 Storskalig bulk-scan", expanded=False):
         st.caption(
-            "Scanna flera orter automatiskt i sekvens. "
-            "Leads sparas löpande — du kan stänga och öppna appen igen."
+            "Scanna hela regioner automatiskt — hundratals till tusentals leads. "
+            "Leads sparas löpande i databasen."
         )
 
+        # ── Region preset ────────────────────────────────────────────────────
+        region_name = st.selectbox(
+            "Välj region", list(REGIONS.keys()), key="bulk_region"
+        )
+        region_cities = REGIONS[region_name]
+
         selected = []
-        cols = st.columns(3)
-        for i, city in enumerate(SE3_CITIES):
-            if cols[i % 3].checkbox(city, value=True, key=f"bulk_{city}"):
+        cols = st.columns(4)
+        for i, city in enumerate(region_cities):
+            if cols[i % 4].checkbox(city, value=True, key=f"bulk2_{city}"):
                 selected.append(city)
 
-        bulk_max = st.number_input(
-            "Max leads per ort",
-            min_value=5, max_value=100, value=20, step=5,
-            key="bulk_max",
+        st.divider()
+
+        # ── Säljroll ─────────────────────────────────────────────────────────
+        col_role, col_base = st.columns([1, 2])
+        with col_role:
+            role = st.radio(
+                "Säljroll",
+                ["innesälj", "fältsälj"],
+                key="bulk_role",
+                help="Innesälj ser alla leads. Fältsälj kan filtrera på avstånd.",
+            )
+        with col_base:
+            if role == "fältsälj":
+                base_city = st.text_input(
+                    "Fältsäljarens basort",
+                    value="Huskvarna",
+                    key="bulk_base_city",
+                    help="Leads längre bort än max-km filtreras bort i exporten",
+                )
+                max_km = st.slider(
+                    "Max avstånd från basort (km)",
+                    min_value=10, max_value=200, value=80, step=10,
+                    key="bulk_max_km",
+                )
+            else:
+                st.caption(ROLE_INFO["innesälj"])
+
+        st.divider()
+
+        # ── Storlek ──────────────────────────────────────────────────────────
+        col_a, col_b = st.columns(2)
+        with col_a:
+            bulk_max = st.number_input(
+                "Max leads per ort",
+                min_value=10, max_value=500, value=100, step=10,
+                key="bulk_max",
+                help="Höj till 300–500 för ett fullständigt kommunutdrag",
+            )
+        with col_b:
+            max_total = st.number_input(
+                "Max leads totalt",
+                min_value=50, max_value=5000, value=1000, step=50,
+                key="bulk_max_total",
+            )
+
+        COST_PER_BUILDING_SEK = 0.025
+        SOLAR_RATE = 0.08
+        est_builds = int(bulk_max * len(selected) / SOLAR_RATE)
+        est_sek = est_builds * COST_PER_BUILDING_SEK
+        st.caption(
+            f"{len(selected)} orter × ~{bulk_max} leads "
+            f"≈ {est_builds:,} hus att analysera · beräknad kostnad ~{est_sek:.0f} kr"
         )
 
         if st.button(
-            "▶ Starta bulk-scan",
+            "▶ Starta storskalig scanning",
             disabled=not selected or not ai_available,
             key="bulk_start",
+            type="primary",
         ):
-            COST_PER_BUILDING_SEK = 0.025
-            SOLAR_RATE = 0.08
-            est_sek = len(selected) * bulk_max / SOLAR_RATE * COST_PER_BUILDING_SEK
-            st.info(
-                f"Beräknad kostnad: ~{est_sek:.0f} kr "
-                f"för {len(selected)} orter × {bulk_max} leads"
-            )
+            try:
+                _ex = (
+                    get_supabase()
+                    .table("scout_leads")
+                    .select("tile_key")
+                    .eq("user_id", str(user.id))
+                    .execute()
+                )
+                skip_keys = frozenset(
+                    r["tile_key"] for r in (_ex.data or []) if r.get("tile_key")
+                )
+            except Exception:
+                skip_keys = frozenset()
+
+            anthr_key = ANTHROPIC_API_KEY or ""
+            google_key = GOOGLE_API_KEY or ""
 
             total_leads = 0
             overall_bar = st.progress(0.0)
-            status = st.empty()
+            status_ph = st.empty()
+            log_ph = st.empty()
+            city_log: list[str] = []
 
-            for idx, city in enumerate(selected):
-                status.info(f"⏳ Scannar: **{city}** ({idx + 1}/{len(selected)})…")
-                overall_bar.progress(idx / len(selected))
+            from scanner import scan_municipality  # noqa: PLC0415
 
+            def _noop_progress(done, total, lead):
+                pass
+
+            def _on_city_done(city, n_leads, stats):
+                nonlocal total_leads
+                total_leads += n_leads
+                icon = "✅" if n_leads > 0 else "⚪"
+                city_log.append(
+                    f"{icon} **{city}**: {n_leads} leads "
+                    f"(☀️ {stats.yes} YES · ⚠️ {stats.unsure} UNSURE · ❌ {stats.no} NO)"
+                )
+                log_ph.markdown("\n\n".join(city_log[-8:]))
+                overall_bar.progress(
+                    min(1.0, total_leads / int(max_total)) if max_total else 0.5
+                )
+
+            status_ph.info(f"⏳ Scannar **{len(selected)} orter** i {region_name}…")
+
+            try:
+                all_leads, final_stats = scan_municipality(
+                    selected,
+                    google_key,
+                    anthr_key,
+                    on_progress=_noop_progress,
+                    on_city_done=_on_city_done,
+                    mapbox_key=MAPBOX_TOKEN or None,
+                    max_leads_per_city=int(bulk_max),
+                    max_leads_total=int(max_total),
+                    skip_tile_keys=skip_keys,
+                    user_id=str(user.id),
+                )
+            except Exception as exc:
+                status_ph.error(f"Bulk-scan avbröts: {exc}")
+                all_leads, final_stats = [], ScanStats()
+
+            # Save OSM leads (AI leads already saved progressively)
+            for lead in all_leads:
+                if lead.source == "ai":
+                    continue
                 try:
-                    from scanner import scan_city  # noqa: PLC0415
+                    get_supabase().table("scout_leads").insert(
+                        {**_lead_to_sb_row(lead), "user_id": str(user.id)}
+                    ).execute()
+                except Exception:
+                    pass
 
-                    try:
-                        _ex = (
-                            get_supabase()
-                            .table("scout_leads")
-                            .select("tile_key")
-                            .eq("user_id", str(user.id))
-                            .execute()
+            # Fältsälj: geodistance filter on export
+            if role == "fältsälj" and base_city:
+                try:
+                    import googlemaps as _gm
+                    _gc = _gm.Client(key=google_key)
+                    _res = _gc.geocode(base_city)
+                    if _res:
+                        _blat = _res[0]["geometry"]["location"]["lat"]
+                        _blng = _res[0]["geometry"]["location"]["lng"]
+                        _R = 6371
+                        def _dist(lead):
+                            dlat = math.radians(lead.lat - _blat)
+                            dlng = math.radians(lead.lng - _blng)
+                            a = (math.sin(dlat/2)**2 +
+                                 math.cos(math.radians(_blat)) *
+                                 math.cos(math.radians(lead.lat)) *
+                                 math.sin(dlng/2)**2)
+                            return _R * 2 * math.asin(math.sqrt(a))
+                        filtered = [l for l in all_leads if _dist(l) <= max_km]
+                        st.info(
+                            f"Fältsälj-filter: {len(filtered)}/{total_leads} leads "
+                            f"inom {max_km} km från {base_city}"
                         )
-                        skip_keys = frozenset(
-                            r["tile_key"]
-                            for r in (_ex.data or [])
-                            if r.get("tile_key")
-                        )
-                    except Exception:
-                        skip_keys = frozenset()
-
-                    anthr_key = ANTHROPIC_API_KEY or ""
-                    google_key = GOOGLE_API_KEY or ""
-
-                    def _noop_progress(done, total, lead):
-                        pass
-
-                    leads, _bulk_stats = scan_city(
-                        city,
-                        google_key,
-                        anthr_key,
-                        _noop_progress,
-                        max_leads=int(bulk_max),
-                        skip_tile_keys=skip_keys,
-                        user_id=str(user.id),
-                    )
-
-                    saved = 0
-                    for lead in (leads or []):
-                        if lead.source == "ai":
-                            # AI leads may already be saved progressively — skip duplicates
-                            continue
-                        try:
-                            get_supabase().table("scout_leads").insert(
-                                {**_lead_to_sb_row(lead), "user_id": str(user.id)}
-                            ).execute()
-                            saved += 1
-                        except Exception:
-                            pass
-
-                    # Count all leads (AI ones already saved inside scan_city)
-                    ai_count = sum(1 for l in (leads or []) if l.source == "ai")
-                    total_city = saved + ai_count
-                    total_leads += total_city
-                    status.success(f"✅ {city}: {total_city} leads sparade")
-
-                except Exception as e:
-                    status.warning(f"⚠ {city} misslyckades: {e}")
-
-                overall_bar.progress((idx + 1) / len(selected))
+                        all_leads = filtered
+                except Exception:
+                    pass
 
             overall_bar.progress(1.0)
-            status.success(f"🎉 Bulk-scan klar! **{total_leads} leads** sparade totalt.")
+            status_ph.success(
+                f"🎉 Klar! **{total_leads} leads** sparade · "
+                f"☀️ {final_stats.yes} YES · ⚠️ {final_stats.unsure} UNSURE · "
+                f"❌ {final_stats.no} NO"
+            )
             st.balloons()
 
 

@@ -1547,6 +1547,81 @@ def scan_city(
     return merged, merged_stats
 
 
+def scan_municipality(
+    cities: list[str],
+    google_key: str,
+    anthropic_key: str | None,
+    on_progress: Callable[[int, int, Lead | None], None] | None = None,
+    on_city_done: Callable[[str, int, ScanStats], None] | None = None,
+    lm_key: str | None = None,
+    mapbox_key: str | None = None,
+    max_leads_per_city: int | None = None,
+    max_leads_total: int | None = None,
+    skip_tile_keys: frozenset[str] = frozenset(),
+    user_id: str | None = None,
+) -> tuple[list[Lead], ScanStats]:
+    """Scan multiple cities/municipalities sequentially to generate large lead batches.
+
+    Designed for bulk runs (hundreds–thousands of leads across a region).
+    Deduplicates across cities so the same building is never scanned twice.
+    Calls on_city_done after each city so the caller can persist leads incrementally.
+
+    Args:
+        cities: List of city/municipality names to scan in order.
+        on_city_done: Called after each city with (city_name, leads_found, stats).
+        max_leads_per_city: Lead cap per city (None = unlimited).
+        max_leads_total: Stop scanning new cities once this total is reached.
+        skip_tile_keys: Tile keys already in the database — skip these buildings.
+
+    Returns:
+        Tuple of (all_leads, merged_stats).
+    """
+    all_leads: list[Lead] = []
+    merged_stats = ScanStats()
+    seen_tile_keys: set[str] = set(skip_tile_keys)
+
+    for city in cities:
+        if max_leads_total is not None and len(all_leads) >= max_leads_total:
+            _log.info("scan_municipality max_leads_total=%d reached after %d leads", max_leads_total, len(all_leads))
+            break
+
+        remaining_total = None
+        if max_leads_total is not None:
+            remaining_total = max_leads_total - len(all_leads)
+
+        per_city_cap = max_leads_per_city
+        if remaining_total is not None:
+            per_city_cap = min(per_city_cap, remaining_total) if per_city_cap else remaining_total
+
+        _log.info("scan_municipality city=%s cap=%s", city, per_city_cap)
+        try:
+            city_leads, city_stats = scan_city(
+                city, google_key, anthropic_key, on_progress,
+                lm_key=lm_key, mapbox_key=mapbox_key,
+                max_leads=per_city_cap,
+                skip_tile_keys=frozenset(seen_tile_keys),
+                user_id=user_id,
+            )
+        except Exception as exc:
+            _log.warning("scan_municipality city=%s failed: %s", city, exc)
+            if on_city_done:
+                on_city_done(city, 0, ScanStats())
+            continue
+
+        for lead in city_leads:
+            seen_tile_keys.add(lead.tile_key)
+
+        all_leads.extend(city_leads)
+        merged_stats.yes    += city_stats.yes
+        merged_stats.unsure += city_stats.unsure
+        merged_stats.no     += city_stats.no
+
+        _log.info("scan_municipality city=%s leads=%d total_so_far=%d", city, len(city_leads), len(all_leads))
+        if on_city_done:
+            on_city_done(city, len(city_leads), city_stats)
+
+    return all_leads, merged_stats
+
 def scan_bbox(
     south: float,
     west: float,
