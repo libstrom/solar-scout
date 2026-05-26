@@ -910,10 +910,17 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                 west,  east  = min(lngs), max(lngs)
                 from scanner import _bbox_tiles, ZOOM as _ZOOM
                 tc = len(_bbox_tiles(south, west, north, east))
-                st.caption(
-                    f"Valt område · ~{tc} brickor · "
-                    f"{south:.4f},{west:.4f} → {north:.4f},{east:.4f}"
-                )
+                if tc > 1000:
+                    km2 = tc * 107 // 1000
+                    st.caption(
+                        f"Stort område · ~{km2} km² · "
+                        f"scannas via OSM bostadsområden automatiskt"
+                    )
+                else:
+                    st.caption(
+                        f"Valt område · ~{tc} brickor · "
+                        f"{south:.4f},{west:.4f} → {north:.4f},{east:.4f}"
+                    )
 
         except ImportError:
             st.warning("streamlit-folium saknas — rita-läge otillgängligt. Ange ort i fältet till vänster.")

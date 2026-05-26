@@ -1568,13 +1568,10 @@ def scan_bbox(
         A tuple of (leads, stats) where stats aggregates yes/unsure/no counts.
     """
     tile_count = len(_bbox_tiles(south, west, north, east))
-    if tile_count > 1000:
-        raise ValueError(
-            f"Området är för stort ({tile_count} brickor ≈ {tile_count * 107 // 1000:.1f} km²). "
-            "Rita en mindre ruta — max ~2 km²."
-        )
 
+    # OSM solar tags: instant, works for any bbox size
     osm_leads = scan_area_osm(south, west, north, east)
+    _log.info("scan_bbox tile_count=%d osm_leads=%d", tile_count, len(osm_leads))
     if phase_callback:
         phase_callback("osm_leads", len(osm_leads))
 
@@ -1582,31 +1579,94 @@ def scan_bbox(
         leads = osm_leads[:max_leads] if max_leads else osm_leads
         return leads, ScanStats()
 
-    # Check if we've already hit max_leads from OSM alone
     if max_leads is not None and len(osm_leads) >= max_leads:
         return osm_leads[:max_leads], ScanStats()
 
-    buildings = _get_osm_buildings(south, west, north, east)
     osm_keys  = {f"{l.lat:.4f},{l.lng:.4f}" for l in osm_leads}
-    buildings = [b for b in buildings
-                 if f"{b['lat']:.4f},{b['lng']:.4f}" not in osm_keys]
+    few_shot  = _load_few_shot_images(user_id=user_id)
+    all_ai_leads: list[Lead] = []
+    merged_stats = ScanStats()
+
+    if tile_count > 1000:
+        # Large bbox: chunk by OSM residential polygons — same strategy as scan_city.
+        # This lets users draw whole city districts or municipalities without limits.
+        residential_areas = _get_residential_areas(south, west, north, east)
+        _log.info("scan_bbox large area: residential_areas=%d", len(residential_areas))
+
+        if residential_areas:
+            seen_building_ids: set[str] = set()
+            for area in residential_areas:
+                remaining = None
+                if max_leads is not None:
+                    remaining = max_leads - len(osm_leads) - len(all_ai_leads)
+                    if remaining <= 0:
+                        break
+
+                a_south, a_west, a_north, a_east = _center_bbox(
+                    area["lat"], area["lng"], radius_km=1.0
+                )
+                # Clamp to drawn bbox so we don't spill outside the user's selection
+                a_south = max(a_south, south)
+                a_west  = max(a_west,  west)
+                a_north = min(a_north, north)
+                a_east  = min(a_east,  east)
+
+                buildings = _get_osm_buildings(a_south, a_west, a_north, a_east)
+                buildings = [
+                    b for b in buildings
+                    if b["osm_id"] not in seen_building_ids
+                    and f"{b['lat']:.4f},{b['lng']:.4f}" not in osm_keys
+                ]
+                for b in buildings:
+                    seen_building_ids.add(b["osm_id"])
+
+                if not buildings:
+                    continue
+
+                if phase_callback:
+                    phase_callback("area_buildings", len(buildings))
+                area_leads, area_stats = scan_buildings_ai(
+                    buildings, google_key, anthropic_key, on_progress,
+                    mapbox_key=mapbox_key, lm_key=lm_key,
+                    max_leads=remaining, few_shot=few_shot,
+                    skip_tile_keys=skip_tile_keys,
+                )
+                all_ai_leads.extend(area_leads)
+                merged_stats.yes    += area_stats.yes
+                merged_stats.unsure += area_stats.unsure
+                merged_stats.no     += area_stats.no
+
+                if max_leads is not None and len(osm_leads) + len(all_ai_leads) >= max_leads:
+                    break
+        else:
+            # No residential polygons (rural/industrial): scan full bbox directly.
+            buildings = _get_osm_buildings(south, west, north, east)
+            buildings = [b for b in buildings
+                         if f"{b['lat']:.4f},{b['lng']:.4f}" not in osm_keys]
+            if phase_callback:
+                phase_callback("buildings_found", len(buildings))
+            remaining = (max_leads - len(osm_leads)) if max_leads is not None else None
+            all_ai_leads, merged_stats = scan_buildings_ai(
+                buildings, google_key, anthropic_key, on_progress,
+                mapbox_key=mapbox_key, lm_key=lm_key,
+                max_leads=remaining, few_shot=few_shot,
+                skip_tile_keys=skip_tile_keys,
+            )
+    else:
+        # Small bbox (≤ ~2 km²): direct scan, no chunking needed
+        buildings = _get_osm_buildings(south, west, north, east)
+        buildings = [b for b in buildings
+                     if f"{b['lat']:.4f},{b['lng']:.4f}" not in osm_keys]
+        if phase_callback:
+            phase_callback("buildings_found", len(buildings))
+        remaining = (max_leads - len(osm_leads)) if max_leads is not None else None
+        all_ai_leads, merged_stats = scan_buildings_ai(
+            buildings, google_key, anthropic_key, on_progress,
+            mapbox_key=mapbox_key, lm_key=lm_key,
+            max_leads=remaining, few_shot=few_shot,
+            skip_tile_keys=skip_tile_keys,
+        )
+
     if phase_callback:
-        phase_callback("buildings_found", len(buildings))
-
-    remaining = None
-    if max_leads is not None:
-        remaining = max_leads - len(osm_leads)
-
-    # Load few-shot images once per scan (not inside scan_buildings_ai) so the
-    # same 6 WMS requests are not repeated for every scan_buildings_ai call.
-    few_shot = _load_few_shot_images(user_id=user_id)
-
-    ai_leads, stats = scan_buildings_ai(
-        buildings, google_key, anthropic_key, on_progress,
-        mapbox_key=mapbox_key, lm_key=lm_key,
-        max_leads=remaining, few_shot=few_shot,
-        skip_tile_keys=skip_tile_keys,
-    )
-    if phase_callback:
-        phase_callback("ai_done", len(ai_leads))
-    return merge_leads(osm_leads, ai_leads), stats
+        phase_callback("ai_done", len(all_ai_leads))
+    return merge_leads(osm_leads, all_ai_leads), merged_stats
