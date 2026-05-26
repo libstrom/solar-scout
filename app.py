@@ -156,8 +156,11 @@ def init_auth():
     if not access or not refresh:
         cm = _get_cookie_manager()
         if cm is not None:
-            access = cm.get("access_token")
-            refresh = cm.get("refresh_token")
+            try:
+                access = cm.get("access_token")
+                refresh = cm.get("refresh_token")
+            except Exception:
+                pass
         if not access or not refresh:
             attempts = st.session_state.get("_cookie_load_attempted", 0)
             if attempts < 3:
@@ -187,8 +190,11 @@ def init_auth():
             cm = _get_cookie_manager()
             if cm is not None:
                 _exp = datetime.now() + timedelta(days=30)
-                cm.set("access_token", resp.session.access_token, expires_at=_exp)
-                cm.set("refresh_token", resp.session.refresh_token, expires_at=_exp)
+                try:
+                    cm.set("access_token", resp.session.access_token, expires_at=_exp, key="set_access_r")
+                    cm.set("refresh_token", resp.session.refresh_token, expires_at=_exp, key="set_refresh_r")
+                except Exception:
+                    pass
             return resp.user
     except Exception:
         pass
@@ -197,8 +203,11 @@ def init_auth():
         st.session_state.pop(k, None)
     cm = _get_cookie_manager()
     if cm is not None:
-        cm.remove("access_token")
-        cm.remove("refresh_token")
+        try:
+            cm.delete("access_token", key="del_access_i")
+            cm.delete("refresh_token", key="del_refresh_i")
+        except Exception:
+            pass
     return None
 
 
@@ -213,8 +222,11 @@ def do_login(email: str, password: str):
     cm = _get_cookie_manager()
     if cm is not None:
         _exp = datetime.now() + timedelta(days=30)
-        cm.set("access_token", resp.session.access_token, expires_at=_exp)
-        cm.set("refresh_token", resp.session.refresh_token, expires_at=_exp)
+        try:
+            cm.set("access_token", resp.session.access_token, expires_at=_exp, key="set_access_l")
+            cm.set("refresh_token", resp.session.refresh_token, expires_at=_exp, key="set_refresh_l")
+        except Exception:
+            pass
     return resp.user
 
 
@@ -239,8 +251,11 @@ def do_logout():
         st.session_state.pop(k, None)
     cm = _get_cookie_manager()
     if cm is not None:
-        cm.remove("access_token")
-        cm.remove("refresh_token")
+        try:
+            cm.delete("access_token", key="del_access_o")
+            cm.delete("refresh_token", key="del_refresh_o")
+        except Exception:
+            pass
 
 # ── Profil & subscription ─────────────────────────────────────────────────────
 
