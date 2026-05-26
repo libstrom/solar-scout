@@ -1,0 +1,63 @@
+{
+  "skill": "scan-debug",
+  "skill_path": ".claude/commands/scan-debug.md",
+  "passing_threshold": 0.92,
+  "description": "Testar att scan-debug ger konkreta, körbara diagnostiksteg när David rapporterar 0 leads.",
+  "test_cases": [
+    {
+      "id": "tc1",
+      "prompt": "David rapporterar: Scanning av Nässjö gav 0 leads, ingen feltext, bara tomt",
+      "assertions": [
+        "Svaret nämner Overpass eller OSM buildings",
+        "Svaret innehåller minst ett konkret Python-kommando eller URL att köra/testa",
+        "Svaret arbetar sig igenom minst tre distinkta diagnossteg",
+        "Svaret ger en sannolik rotorsak baserat på symptomen",
+        "Svaret avslutar med en konkret åtgärd att vidta"
+      ]
+    },
+    {
+      "id": "tc2",
+      "prompt": "Claude-anropen verkar inte gå igenom, scanning hänger på AI-steget",
+      "assertions": [
+        "Svaret nämner ANTHROPIC_API_KEY specifikt",
+        "Svaret föreslår att verifiera att API-nyckeln är satt i miljövariablerna",
+        "Svaret nämner Anthropic billing eller kvot som möjlig orsak",
+        "Svaret innehåller ett konkret steg för att bekräfta API-anslutning",
+        "Svaret ger inte upp med 'okänt fel' utan ger specifika nästa steg"
+      ]
+    },
+    {
+      "id": "tc3",
+      "prompt": "Bildhämtningen från Lantmäteriet verkar misslyckas, 0 bilder hämtade",
+      "assertions": [
+        "Svaret nämner Lantmäteriet eller LM WMS specifikt",
+        "Svaret nämner LANTMATERIET_KEY eller LM-nyckeln som möjlig bov",
+        "Svaret föreslår att testa ett WMS-anrop direkt",
+        "Svaret nämner Google Static Maps som fallback-källa",
+        "Svaret ger ett konkret test-URL eller kodstycke för LM WMS"
+      ]
+    },
+    {
+      "id": "tc4",
+      "prompt": "Scan hittar 0 byggnader från OSM trots att vi vet att det finns hus i området",
+      "assertions": [
+        "Svaret nämner Overpass API reachability",
+        "Svaret nämner bbox-koordinater eller att testa med kända koordinater",
+        "Svaret föreslår ett konkret Overpass-query eller test att köra",
+        "Svaret nämner _get_osm_buildings eller motsvarande funktion",
+        "Svaret inkluderar ett steg för att bekräfta att Overpass-servern svarar"
+      ]
+    },
+    {
+      "id": "tc5",
+      "prompt": "Scanning kraschar halvvägs med ett oväntat exceptions utan tydlig feltext",
+      "assertions": [
+        "Svaret ber om eller nämner felloggen som viktigt diagnostikverktyg",
+        "Svaret nämner att kolla Streamlit-loggar eller _log-utskrifter",
+        "Svaret ger minst två möjliga rotorsaker",
+        "Svaret har ett prioriterat steg att testa först",
+        "Svaret nämner att isolera vilket steg i pipelinen (OSM, bild, AI) som kraschar"
+      ]
+    }
+  ]
+}
