@@ -19,9 +19,11 @@ if file_path.endswith('.py'):
         compile(source, file_path, 'exec')
     except SyntaxError as e:
         print(f"SYNTAX ERROR in {file_path}: {e}")
+        sys.exit(1)
 
 elif file_path.endswith(('.mjs', '.js')):
     result = subprocess.run(['node', '--check', file_path],
                             capture_output=True, text=True)
     if result.returncode != 0:
         print(f"SYNTAX ERROR in {file_path}:\n{result.stderr.strip()}")
+        sys.exit(1)

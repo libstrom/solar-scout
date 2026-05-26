@@ -9,7 +9,7 @@ Runs overnight — never stops until 100% pass rate or manually interrupted.
 Once the loop starts:
 - Do NOT pause to ask the user if you should continue
 - Do NOT wait for confirmation between iterations
-- Do NOT stop unless: (a) 100% pass rate, (b) 10 consecutive reversions, or (c) user interrupts (Ctrl+C)
+- Do NOT stop unless: (a) 100% pass rate, (b) 10 consecutive reversions, (c) 50 total iterations, or (d) user interrupts (Ctrl+C)
 - The user is likely asleep — keep working
 
 ## Loop algorithm
@@ -24,6 +24,7 @@ Repeat:
              for each assertion: true if output satisfies the check, else false
            score = total_true / total_assertions
 3. DECIDE  if score == 1.0 → DONE (report final score, stop)
+           if iterations >= 50 → DONE (hard cap reached, report final score, stop)
            if iterations >= 10 and no improvement in last 5 → STUCK (report, stop)
 4. IMPROVE if score < 1.0:
              find the assertions that fail most often

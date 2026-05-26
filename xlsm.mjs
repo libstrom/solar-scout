@@ -130,7 +130,7 @@ function findValueByLabel(cells, labelRe) {
     // Try right (1..3 cols)
     for (let d = 1; d <= 3; d++) {
       const cand = cells.get(nextColRef(col, d) + row);
-      if (cand !== undefined && cand !== '' && toNum(cand) !== 0 || typeof cand === 'number') {
+      if (cand !== undefined && cand !== '' && (toNum(cand) !== 0 || typeof cand === 'string')) {
         return cand;
       }
     }

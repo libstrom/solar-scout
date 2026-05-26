@@ -17,8 +17,6 @@
 
 import { readFileSync, writeFileSync } from 'fs';
 
-const STATUS_PRIORITY = { 'Köpare': 0, '': 1, 'Avhoppad': 2, 'Säljare': 3 };
-
 function clean(s) {
   if (!s) return '';
   return s.replace(/[\x00-\x1f]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -32,100 +30,74 @@ function parseTab(tabPath) {
   const lines = readFileSync(tabPath, 'utf-8').split('\n');
   const byFastig = new Map(); // fastig → { köpare: [], intressenter: [], säljare: [] }
 
-  let currentCase = null;
+  let curFastig = null;
+  let curStatus = null;
+  let curCase   = null;
+  let curInts   = [];
+
+  function flushCase() {
+    if (!curFastig || !curCase) return;
+    if (!byFastig.has(curFastig)) {
+      byFastig.set(curFastig, { köpare: [], intressenter: [], säljare: [] });
+    }
+    const bucket = byFastig.get(curFastig);
+    const slot = curStatus === 'Köpare' ? 'köpare'
+               : curStatus === 'Säljare' ? 'säljare'
+               : null;
+    if (slot) bucket[slot].push(curCase);
+    // Intressenter on Säljare-besiktningar are likely buyers — use as fallback contacts
+    if (curStatus === 'Säljare' && curInts.length > 0) {
+      bucket.intressenter.push(...curInts);
+    }
+  }
 
   for (const line of lines) {
     const c = line.split('\t');
     const caseId = clean(c[0]);
 
     if (caseId) {
-      // Main record row
-      const status  = clean(c[1]);
-      const fastig  = normalizeFastig(c[12]);
-      const record  = {
+      flushCase();
+
+      const status = clean(c[1]);
+      const fastig = normalizeFastig(c[12]);
+      const record = {
         status,
-        name:      clean(c[9]),
-        name2:     clean(c[20]),
-        address:   clean(c[5]),
-        postnr:    clean(c[6]),
-        city:      clean(c[7]),
-        email:     clean(c[22]),
-        phone:     clean(c[23]),
-        // first intressent slot (often populated on same row)
-        intFirstName: clean(c[24]),
-        intLastName:  clean(c[25]),
-        intEmail:     clean(c[26]),
-        intPhone:     clean(c[27]),
+        name:    clean(c[9]),
+        name2:   clean(c[20]),
+        address: clean(c[5]),
+        postnr:  clean(c[6]),
+        city:    clean(c[7]),
+        email:   clean(c[22]),
+        phone:   clean(c[23]),
       };
 
-      currentCase = { fastig, status, record, intressenter: [] };
+      curFastig = fastig || null;
+      curStatus = status;
+      curCase   = fastig ? { fastig, status, record } : null;
+      curInts   = [];
 
-      // If there's an intressent embedded on this row, collect it
-      if (record.intFirstName) {
-        currentCase.intressenter.push({
-          name:  `${record.intFirstName} ${record.intLastName}`.trim(),
-          email: record.intEmail,
-          phone: record.intPhone || clean(c[28]),
+      // Intressent data may appear on the same row as the main record
+      const fname = clean(c[24]);
+      if (fname) {
+        curInts.push({
+          name:  `${fname} ${clean(c[25])}`.trim(),
+          email: clean(c[26]),
+          phone: clean(c[27]) || clean(c[28]),
         });
       }
-
-      if (!fastig) continue; // skip rows with no fastighetsbeteckning
-
-      if (!byFastig.has(fastig)) {
-        byFastig.set(fastig, { köpare: [], intressenter: [], säljare: [] });
-      }
-      const bucket = byFastig.get(fastig);
-      const slot = status === 'Köpare' ? 'köpare'
-                 : status === 'Säljare' ? 'säljare'
-                 : null;
-      if (slot) bucket[slot].push(currentCase);
-
     } else {
-      // Intressent continuation row (empty col0)
+      // Continuation row: intressent contact data (col0 is empty)
       const fname = clean(c[24]);
-      if (!fname || !currentCase) continue;
-      currentCase.intressenter.push({
-        name:  `${fname} ${clean(c[25])}`.trim(),
-        email: clean(c[26]),
-        phone: clean(c[27]) || clean(c[28]),
-      });
+      if (fname && curCase) {
+        curInts.push({
+          name:  `${fname} ${clean(c[25])}`.trim(),
+          email: clean(c[26]),
+          phone: clean(c[27]) || clean(c[28]),
+        });
+      }
     }
   }
-
-  // Attach intressenter to each fastig bucket
-  // Walk again to associate intressenter to their parent case's fastig
-  // (already done above inline — now push intressenter buckets to byFastig)
-  // Re-walk to propagate collected intressenter to fastig map
-  const lines2 = readFileSync(tabPath, 'utf-8').split('\n');
-  let curFastig = null;
-  let curStatus = null;
-  let curInts   = [];
-
-  for (const line of lines2) {
-    const c = line.split('\t');
-    const caseId = clean(c[0]);
-
-    if (caseId) {
-      // Flush previous
-      if (curFastig && curStatus === 'Säljare' && curInts.length > 0) {
-        if (!byFastig.has(curFastig)) byFastig.set(curFastig, { köpare: [], intressenter: [], säljare: [] });
-        byFastig.get(curFastig).intressenter.push(...curInts);
-      }
-      curFastig = normalizeFastig(c[12]);
-      curStatus = clean(c[1]);
-      curInts   = [];
-      const fname = clean(c[24]);
-      if (fname) curInts.push({ name: `${fname} ${clean(c[25])}`.trim(), email: clean(c[26]), phone: clean(c[27]) || clean(c[28]) });
-    } else {
-      const fname = clean(c[24]);
-      if (fname) curInts.push({ name: `${fname} ${clean(c[25])}`.trim(), email: clean(c[26]), phone: clean(c[27]) || clean(c[28]) });
-    }
-  }
-  // Flush last
-  if (curFastig && curStatus === 'Säljare' && curInts.length > 0) {
-    if (!byFastig.has(curFastig)) byFastig.set(curFastig, { köpare: [], intressenter: [], säljare: [] });
-    byFastig.get(curFastig).intressenter.push(...curInts);
-  }
+  flushCase(); // flush last case
 
   return byFastig;
 }
@@ -166,7 +138,7 @@ function main() {
   const leads = JSON.parse(readFileSync(leadsPath, 'utf-8'));
   console.log(`Enriching ${leads.length} leads …`);
 
-  let stats = { köpare: 0, intressent: 0, säljare: 0, none: 0, same: 0, upgraded: 0 };
+  let stats = { köpare: 0, intressent: 0, säljare: 0, none: 0, same: 0, changed: 0 };
 
   for (const lead of leads) {
     const key = normalizeFastig(lead.fastighetsbeteckning || '');
@@ -192,7 +164,7 @@ function main() {
     lead.email        = contact.email;
     stats[contact.type === 'Köpare' ? 'köpare' : contact.type === 'Intressent' ? 'intressent' : 'säljare']++;
 
-    if (prevType && prevType !== contact.type) stats.upgraded++;
+    if (prevType && prevType !== contact.type) stats.changed++;
     else if (prevType === contact.type) stats.same++;
   }
 
@@ -204,7 +176,7 @@ function main() {
   console.log(`  Intressent:         ${stats.intressent}`);
   console.log(`  Säljare (sämst):    ${stats.säljare}`);
   console.log(`  Ingen matchning:    ${stats.none}`);
-  console.log(`  Uppgraderade:       ${stats.upgraded}`);
+  console.log(`  Ändrad kontakttyp:  ${stats.changed}`);
   console.log(`\nSkriven till: ${out}`);
 }
 
