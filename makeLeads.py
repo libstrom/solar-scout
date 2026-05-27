@@ -10,7 +10,7 @@ Flikar:
 Usage:
     python makeLeads.py enspecta.tab [leads.xlsx]
 """
-import sys, re
+import sys, re, functools
 from collections import Counter
 from datetime import date
 
@@ -29,9 +29,11 @@ except ImportError:
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
+_CTRL = re.compile(r'[\x00-\x1f]')
+
 def clean(s):
     if not s: return ''
-    return re.sub(r'[\x00-\x1f]', ' ', s).strip()
+    return _CTRL.sub(' ', s).strip()
 
 def norm(s):
     return clean(s).lower().replace('  ', ' ')
@@ -142,7 +144,7 @@ def pitch_text(namn, adress, ort, byggår_str, bucket_str):
 
 def parse_tab(path):
     with open(path, encoding='utf-8', errors='replace') as f:
-        lines = f.read().split('\n')
+        lines = (l.rstrip('\r\n') for l in f)
 
     by_fastig = {}
     cur_fastig = cur_status = cur_rec = None
@@ -228,9 +230,11 @@ def best_contact(b):
 
 # ── Excel styling ─────────────────────────────────────────────────────────────
 
+@functools.lru_cache(maxsize=64)
 def F(h):  return PatternFill('solid', fgColor=h)
 def Fn(*a,**k): return Font(*a,**k)
 
+@functools.lru_cache(maxsize=8)
 def border(color='DDDDDD'):
     s = Side(style='thin', color=color)
     return Border(left=s, right=s, top=s, bottom=s)
@@ -322,42 +326,58 @@ def make_ringlista(wb, rows):
     TYPE_FILL = {'Köpare': F(GRN), 'Intressent': F(YLW), 'Säljare': F(ORG)}
     TYPE_FILL_HOT = {'Köpare': F('C8E6C9'), 'Intressent': F('FFF176'), 'Säljare': F('FFCC80')}
 
+    # Pre-create shared style objects — avoids re-allocating per cell
+    _border_std  = border()
+    _align_std   = Alignment(vertical='center', wrap_text=False)
+    _align_ctr   = Alignment(horizontal='center', vertical='center')
+    _align_wrap  = Alignment(vertical='center', wrap_text=True)
+    _font_status = Fn(color='777777', italic=True, size=10)
+    _font_mono   = Fn(name='Consolas', size=10)
+    _font_pitch  = Fn(size=9, color='333333')
+    _font_why    = Fn(size=9, color='777777', italic=True)
+    _bkt_fills   = {'☀️🔋 SOL + BATTERI': (F('FFF8E1'), Fn(bold=True, color='E65100', size=10)),
+                    '☀️ SOL':              (F('E8F5E9'), Fn(bold=True, color='1B5E20', size=10)),
+                    '🔋 BATTERI / VP':     (F('E3F2FD'), Fn(bold=True, color='1565C0', size=10))}
+    _typ_fonts   = {'Köpare':     Fn(bold=True, size=9, color=GRN2),
+                    'Intressent': Fn(bold=True, size=9, color=YLW2),
+                    'Säljare':    Fn(bold=True, size=9, color=ORG2)}
+    _score_fonts = {c: Fn(bold=True, size=12, color=c)
+                    for c in ('B71C1C','E65100','F9A825','555555')}
+
     for ri, row in enumerate(rows, 4):
         sc   = row[0]
         typ  = row[13]
         hot  = sc >= 70
         rfill = TYPE_FILL_HOT.get(typ, F('FFFDE7')) if hot else TYPE_FILL.get(typ, F('FAFAFA'))
+        sc_font = _score_fonts[score_color(sc)]
+        typ_font = _typ_fonts.get(typ, Fn(bold=True, size=9))
 
         for ci, val in enumerate(row, 1):
             c = ws.cell(ri, ci, val)
-            c.fill   = rfill
-            c.border = border()
-            c.alignment = Alignment(vertical='center', wrap_text=False)
+            c.fill      = rfill
+            c.border    = _border_std
+            c.alignment = _align_std
 
             if ci == 1:    # Score
-                c.font = Fn(bold=True, size=12, color=score_color(sc))
-                c.alignment = Alignment(horizontal='center', vertical='center')
+                c.font = sc_font
+                c.alignment = _align_ctr
             elif ci == 2:  # Bucket
-                bkt_colors = {'☀️🔋 SOL + BATTERI': ('FFF8E1','E65100'),
-                              '☀️ SOL':              ('E8F5E9','1B5E20'),
-                              '🔋 BATTERI / VP':     ('E3F2FD','1565C0')}
-                bg, fg = bkt_colors.get(val, ('FFFFFF','000000'))
-                c.fill = F(bg)
-                c.font = Fn(bold=True, color=fg, size=10)
-                c.alignment = Alignment(horizontal='center', vertical='center')
+                bfill, bfont = _bkt_fills.get(val, (F('FFFFFF'), Fn(bold=True, size=10)))
+                c.fill = bfill
+                c.font = bfont
+                c.alignment = _align_ctr
             elif ci == 3:  # Status default
                 c.value = 'Ej kontaktad'
-                c.font  = Fn(color='777777', italic=True, size=10)
+                c.font  = _font_status
             elif ci in (7, 8):  # Tel/email
-                c.font = Fn(name='Consolas', size=10)
+                c.font = _font_mono
             elif ci == 18:  # Pitch-text
-                c.font = Fn(size=9, color='333333')
-                c.alignment = Alignment(vertical='center', wrap_text=True)
+                c.font = _font_pitch
+                c.alignment = _align_wrap
             elif ci == 19:  # Score-förklaring
-                c.font = Fn(size=9, color='777777', italic=True)
+                c.font = _font_why
             elif ci == 14:  # Kontakttyp
-                cc = {'Köpare': GRN2, 'Intressent': YLW2, 'Säljare': ORG2}
-                c.font = Fn(bold=True, size=9, color=cc.get(typ,'000000'))
+                c.font = typ_font
 
         ws.row_dimensions[ri].height = 32 if hot else 20
 
