@@ -8,9 +8,13 @@ Flikar:
   • Översikt    — statistik per kontakttyp, kommun, byggår
 
 Usage:
-    python makeLeads.py enspecta.tab [leads.xlsx]
+    python makeLeads.py enspecta.tab [leads.xlsx] [--energy energy-data.json]
+
+Med --energy används verklig energiklass + elförbrukning från XLSM-filerna
+(genereras av: node batchXlsm.mjs <mapp-med-xlsm> energy-data.json).
+Utan --energy används estimat baserat på byggår.
 """
-import sys, re, functools
+import sys, re, functools, json
 from collections import Counter
 from datetime import date
 
@@ -48,31 +52,66 @@ def yr(s):
 
 # ── scoring ───────────────────────────────────────────────────────────────────
 
-def score_lead(byggår_str, kontakttyp, besdat_str, telefon, email):
+def score_lead(byggår_str, kontakttyp, besdat_str, telefon, email, energy=None):
     """
-    Score 0–100. Approximation baserad på enspecta.tab — ingen XLSM-data.
-    Faktorer: husålder (tyngst), kontakttyp, besiktningsdatum, kontaktinfo.
+    Score 0–100.
+    Med energy-data (XLSM): energiklass + elförbrukning + solceller används.
+    Utan energy-data: estimat baserat på byggår.
     """
     points = 0
     reasons = []
 
-    y = yr(byggår_str)
-    if y:
-        if y <= 1960:
-            points += 40; reasons.append(f'Byggt {y} (+40)')
-        elif y <= 1970:
-            points += 35; reasons.append(f'Byggt {y} (+35)')
-        elif y <= 1980:
-            points += 28; reasons.append(f'Byggt {y} (+28)')
-        elif y <= 1990:
-            points += 18; reasons.append(f'Byggt {y} (+18)')
-        elif y <= 2000:
-            points += 10; reasons.append(f'Byggt {y} (+10)')
+    if energy:
+        # ── XLSM-baserad husålder/energi (max 45p) ──────────────────────────
+        ek = (energy.get('energiklass') or '').upper()
+        ek_pts = {'A': 0, 'B': 5, 'C': 10, 'D': 20, 'E': 30, 'F': 38, 'G': 45}.get(ek)
+        if ek_pts is not None:
+            points += ek_pts; reasons.append(f'Energiklass {ek} (+{ek_pts})')
         else:
-            points += 4;  reasons.append(f'Byggt {y} (+4)')
-    else:
-        points += 15; reasons.append('Byggår okänt (+15, antas äldre)')
+            y = yr(byggår_str) or yr(str(energy.get('nybyggnadsar', '')))
+            if y:
+                p = 40 if y<=1960 else 35 if y<=1970 else 28 if y<=1980 else 18 if y<=1990 else 10 if y<=2000 else 4
+                points += p; reasons.append(f'Byggt {y} (+{p})')
 
+        # ── direktel-bonus (max +20) ─────────────────────────────────────────
+        epk = energy.get('energi_per_kalla') or {}
+        el_direkt = (epk.get('el_direkt') or 0) + (epk.get('el_vattenburen') or 0)
+        if el_direkt > 5000:
+            points += 20; reasons.append(f'Direktel {el_direkt:.0f} kWh (+20)')
+        elif el_direkt > 1000:
+            points += 10; reasons.append(f'El-uppvärmd (+10)')
+
+        # ── total elförbrukning ──────────────────────────────────────────────
+        total_el = energy.get('total_el_kwh') or 0
+        if total_el > 25000:
+            points += 8; reasons.append(f'Elförbrukning {total_el:.0f} kWh (+8)')
+        elif total_el > 15000:
+            points += 4; reasons.append(f'Elförbrukning {total_el:.0f} kWh (+4)')
+
+        # ── har redan solceller (negativt) ──────────────────────────────────
+        if energy.get('har_solceller'):
+            points -= 20; reasons.append('Har redan solceller (-20)')
+
+        # ── åtgärdsförslag nämner sol/batteri ───────────────────────────────
+        atg = energy.get('atgardsforslag') or {}
+        atg_text = (atg.get('text') or '') if isinstance(atg, dict) else str(atg)
+        if re.search(r'solcell|batteri|v[äa]rmepump', atg_text, re.I):
+            points += 8; reasons.append('Åtgärdsförslag: sol/batteri/VP (+8)')
+
+    else:
+        # ── Estimat baserat på byggår (ingen XLSM) ───────────────────────────
+        y = yr(byggår_str)
+        if y:
+            if y <= 1960:   points += 40; reasons.append(f'Byggt {y} (+40)')
+            elif y <= 1970: points += 35; reasons.append(f'Byggt {y} (+35)')
+            elif y <= 1980: points += 28; reasons.append(f'Byggt {y} (+28)')
+            elif y <= 1990: points += 18; reasons.append(f'Byggt {y} (+18)')
+            elif y <= 2000: points += 10; reasons.append(f'Byggt {y} (+10)')
+            else:           points += 4;  reasons.append(f'Byggt {y} (+4)')
+        else:
+            points += 15; reasons.append('Byggår okänt (+15, antas äldre)')
+
+    # ── Kontakttyp (samma oavsett XLSM) ─────────────────────────────────────
     if kontakttyp == 'Köpare':
         points += 30; reasons.append('Köpare/nuv. ägare (+30)')
     elif kontakttyp == 'Intressent':
@@ -80,24 +119,25 @@ def score_lead(byggår_str, kontakttyp, besdat_str, telefon, email):
     else:
         points += 8;  reasons.append('Säljare/har flyttat (+8)')
 
+    # ── Besiktningsdatum ─────────────────────────────────────────────────────
     bd = yr(besdat_str)
     if bd:
         age = date.today().year - bd
-        if age <= 2:
-            points += 20; reasons.append(f'Besiktning {bd} (+20)')
-        elif age <= 5:
-            points += 12; reasons.append(f'Besiktning {bd} (+12)')
-        elif age <= 10:
-            points += 6;  reasons.append(f'Besiktning {bd} (+6)')
+        if age <= 2:   points += 20; reasons.append(f'Besiktning {bd} (+20)')
+        elif age <= 5: points += 12; reasons.append(f'Besiktning {bd} (+12)')
+        elif age <= 10:points += 6;  reasons.append(f'Besiktning {bd} (+6)')
 
-    if telefon:  points += 8;  reasons.append('Har telefon (+8)')
-    if email:    points += 4;  reasons.append('Har e-post (+4)')
+    # ── Kontaktinfo ──────────────────────────────────────────────────────────
+    if telefon: points += 8; reasons.append('Har telefon (+8)')
+    if email:   points += 4; reasons.append('Har e-post (+4)')
 
-    score = min(points, 100)
-    return score, ' | '.join(reasons)
+    return min(max(points, 0), 100), ' | '.join(reasons)
 
 
-def bucket(score, byggår_str):
+def bucket(score, byggår_str, energy=None):
+    har_sol = energy.get('har_solceller') if energy else False
+    if har_sol:
+        return '🔋 BATTERI (har sol)'
     y = yr(byggår_str)
     if score >= 65:
         return '☀️🔋 SOL + BATTERI'
@@ -115,19 +155,32 @@ def score_color(score):
     return '555555'                    # grå
 
 
-def pitch_text(namn, adress, ort, byggår_str, bucket_str):
+def pitch_text(namn, adress, ort, byggår_str, bucket_str, energy=None):
     """Färdig pitch-text för David att klistra in i mötesbok."""
     y = yr(byggår_str)
     fornamn = namn.split()[0] if namn else 'du'
+    har_sol = energy.get('har_solceller') if energy else False
+    ek      = (energy.get('energiklass') or '').upper() if energy else ''
+    epk     = (energy.get('energi_per_kalla') or {}) if energy else {}
+    el_dir  = (epk.get('el_direkt') or 0) + (epk.get('el_vattenburen') or 0)
 
-    if y and y <= 1980:
-        behov = f"hus från {y}-talet har ofta höga elkostnader och stor potential för solceller"
+    if har_sol:
+        behov   = "du har redan solceller — nu är det rätt tid att lägga till batteri"
+        produkt = "batterilagring som gör att du kan spara och använda din egenproducerade el på kvällen"
+    elif ek in ('F', 'G'):
+        behov   = f"fastigheten har energiklass {ek} — det finns stor besparingspotential"
+        produkt = "sol + batteri + möjlig VP — vi kan halvera er energikostnad"
+    elif el_dir > 5000:
+        behov   = "huset värms med el — det är det dyraste uppvärmningssättet just nu"
+        produkt = "sol + batteri — du kan kapa elräkningen med upp till 70%"
+    elif y and y <= 1980:
+        behov   = f"hus från {y}-talet har ofta höga elkostnader och stor potential"
         produkt = "sol + batteri — du kan kapa elräkningen med upp till 70%"
     elif y and y <= 1995:
-        behov = f"villaägare i {ort or 'ert område'} väljer allt oftare solceller"
+        behov   = f"villaägare i {ort or 'ert område'} väljer allt oftare solceller"
         produkt = "solceller med batteri — du lagrar överskottet och säljer resten"
     else:
-        behov = "många väljer nu att komplettera med batteri för att maximera egenkonsumtion"
+        behov   = "många väljer nu att komplettera med batteri för att maximera egenkonsumtion"
         produkt = "batterilagring — perfekt om du redan har sol eller funderar på det"
 
     return (
@@ -249,32 +302,33 @@ HOT='FFF8E1'  # score ≥ 70
 STATUS_OPTS  = '"Ej kontaktad,Bokad möte,Ej intresserad,Återkom,Fel nummer,Röstbrevlåda,Såld"'
 SALJARE_OPTS = '"Ivan,David,Linus,Annan"'
 
-# (header, width)
+# (header, width, col-index-0-based)
 COLS = [
-    ('Score',              7),
-    ('Bucket',            18),
-    ('Status',            16),
-    ('Säljare',           10),
-    ('Nästa kontakt',     14),
-    ('Namn',              26),
-    ('Telefon',           16),
-    ('E-post',            30),
-    ('Adress',            28),
-    ('Postnr',             8),
-    ('Ort',               16),
-    ('Kommun',            16),
-    ('Byggår',             8),
-    ('Kontakttyp',        13),
-    ('Namn 2',            20),
-    ('Intressent — Namn', 22),
-    ('Intressent — Tel',  16),
-    ('Pitch-text',        55),
-    ('Score-förklaring',  45),
-    ('Besiktningsdatum',  16),
-    ('Renoverat',          9),
-    ('Fastighetsbeteckning', 24),
-    ('Anteckningar',      35),
-    ('CaseID',            12),
+    ('Score',              7),   # 0
+    ('Bucket',            18),   # 1
+    ('Status',            16),   # 2
+    ('Säljare',           10),   # 3
+    ('Nästa kontakt',     14),   # 4
+    ('Namn',              26),   # 5
+    ('Telefon',           16),   # 6
+    ('E-post',            30),   # 7
+    ('Adress',            28),   # 8
+    ('Postnr',             8),   # 9
+    ('Ort',               16),   # 10
+    ('Kommun',            16),   # 11
+    ('Byggår',             8),   # 12
+    ('Energiklass',        9),   # 13  ← ny
+    ('Kontakttyp',        13),   # 14
+    ('Namn 2',            20),   # 15
+    ('Intressent — Namn', 22),   # 16
+    ('Intressent — Tel',  16),   # 17
+    ('Pitch-text',        55),   # 18
+    ('Score-förklaring',  45),   # 19
+    ('Besiktningsdatum',  16),   # 20
+    ('Renoverat',          9),   # 21
+    ('Fastighetsbeteckning', 24),# 22
+    ('Anteckningar',      35),   # 23
+    ('CaseID',            12),   # 24
 ]
 
 
@@ -346,7 +400,7 @@ def make_ringlista(wb, rows):
 
     for ri, row in enumerate(rows, 4):
         sc   = row[0]
-        typ  = row[13]
+        typ  = row[14]   # Kontakttyp at index 14
         hot  = sc >= 70
         rfill = TYPE_FILL_HOT.get(typ, F('FFFDE7')) if hot else TYPE_FILL.get(typ, F('FAFAFA'))
         sc_font = _score_fonts[score_color(sc)]
@@ -371,13 +425,17 @@ def make_ringlista(wb, rows):
                 c.font  = _font_status
             elif ci in (7, 8):  # Tel/email
                 c.font = _font_mono
-            elif ci == 18:  # Pitch-text
+            elif ci == 14:  # Energiklass
+                ek_colors = {'A':'1B5E20','B':'2E7D32','C':'388E3C','D':'F9A825','E':'E65100','F':'C62828','G':'B71C1C'}
+                c.font = Fn(bold=True, size=11, color=ek_colors.get(val or '', '555555'))
+                c.alignment = _align_ctr
+            elif ci == 15:  # Kontakttyp
+                c.font = typ_font
+            elif ci == 19:  # Pitch-text
                 c.font = _font_pitch
                 c.alignment = _align_wrap
-            elif ci == 19:  # Score-förklaring
+            elif ci == 20:  # Score-förklaring
                 c.font = _font_why
-            elif ci == 14:  # Kontakttyp
-                c.font = typ_font
 
         ws.row_dimensions[ri].height = 32 if hot else 20
 
@@ -497,7 +555,7 @@ def make_oversikt(wb, rows):
     r = 1
     hdr(r, f'☀️  Enspecta Leads — Översikt  ({date.today()})', 15); r += 2
 
-    stats = Counter(row[13] for row in rows)
+    stats = Counter(row[14] for row in rows)
     hdr(r, 'Kontakttyp'); r += 1
     kv(r, '🟢  Köpare',      stats['Köpare'],     GRN2); r += 1
     kv(r, '🟡  Intressent',  stats['Intressent'], YLW2); r += 1
@@ -516,7 +574,7 @@ def make_oversikt(wb, rows):
         kv(r, label, score_dist[label]); r += 1
     r += 1
 
-    bucket_dist = Counter(row[1] for row in rows)
+    bucket_dist = Counter(row[1] for row in rows)  # col 1 = Bucket
     hdr(r, 'Produktbuckets'); r += 1
     for bk, cnt in bucket_dist.most_common():
         kv(r, bk, cnt); r += 1
@@ -527,7 +585,7 @@ def make_oversikt(wb, rows):
     ws.cell(r, 2, 'Antal').font  = Fn(bold=True)
     ws.cell(r, 2).alignment = Alignment(horizontal='right')
     r += 1
-    for kom, cnt in Counter(row[11] for row in rows if row[11]).most_common(20):
+    for kom, cnt in Counter(row[11] for row in rows if row[11]).most_common(20):  # col 11 = Kommun
         ws.cell(r, 1, kom)
         ws.cell(r, 2, cnt).alignment = Alignment(horizontal='right')
         r += 1
@@ -539,7 +597,7 @@ def make_oversikt(wb, rows):
     r += 1
     dcnt = Counter()
     for row in rows:
-        y = yr(row[12])
+        y = yr(row[12])   # col 12 = Byggår
         dcnt[(y//10)*10 if y else 'Okänt'] += 1
     for dec in sorted(d for d in dcnt if d != 'Okänt'):
         ws.cell(r, 1, f'{dec}-talet')
@@ -557,12 +615,31 @@ def make_oversikt(wb, rows):
 
 def main():
     args = sys.argv[1:]
-    if not args:
-        print('Usage: python makeLeads.py enspecta.tab [leads.xlsx]')
+    # Parse flags
+    energy_path = None
+    positional  = []
+    i = 0
+    while i < len(args):
+        if args[i] == '--energy' and i + 1 < len(args):
+            energy_path = args[i + 1]; i += 2
+        else:
+            positional.append(args[i]); i += 1
+
+    if not positional:
+        print('Usage: python makeLeads.py enspecta.tab [leads.xlsx] [--energy energy-data.json]')
         sys.exit(1)
 
-    tab_path = args[0]
-    out_path = args[1] if len(args)>1 else tab_path.replace('.tab', '-leads.xlsx')
+    tab_path = positional[0]
+    out_path = positional[1] if len(positional) > 1 else tab_path.replace('.tab', '-leads.xlsx')
+
+    # Load energy index (fastighetsbeteckning → energy record)
+    energy_index = {}
+    if energy_path:
+        with open(energy_path, encoding='utf-8') as f:
+            energy_index = json.load(f)
+        print(f'Energidata: {len(energy_index)} fastigheter från {energy_path}')
+    else:
+        print('Obs: kör med --energy energy-data.json för exakt scoring (node batchXlsm.mjs ...)')
 
     print(f'Läser {tab_path} ...')
     by_fastig = parse_tab(tab_path)
@@ -571,6 +648,7 @@ def main():
     print('Scorar och bygger rader ...')
     rows = []
     stats = Counter()
+    energy_matched = 0
 
     for fastig, b in by_fastig.items():
         typ, r, ints = best_contact(b)
@@ -586,10 +664,14 @@ def main():
         adr_str = r.get('adress','')
         namn    = r.get('namn','')
 
-        sc, sc_why = score_lead(bår, typ, besdat, tel, epost)
-        bkt        = bucket(sc, bår)
-        pitch      = pitch_text(namn, adr_str, ort_str, bår, bkt)
+        energy  = energy_index.get(fastig)   # fastig is already normalized
+        if energy: energy_matched += 1
 
+        sc, sc_why = score_lead(bår, typ, besdat, tel, epost, energy)
+        bkt        = bucket(sc, bår, energy)
+        pitch      = pitch_text(namn, adr_str, ort_str, bår, bkt, energy)
+
+        ek_str = (energy.get('energiklass') or '') if energy else ''
         rows.append([
             sc,                                                          # 0  Score
             bkt,                                                         # 1  Bucket
@@ -604,17 +686,18 @@ def main():
             ort_str,                                                     # 10 Ort
             tc(r.get('kommun','')),                                      # 11 Kommun
             bår,                                                         # 12 Byggår
-            typ,                                                         # 13 Kontakttyp
-            r.get('namn2','') if r.get('namn2')!=namn else '',           # 14 Namn 2
-            int0.get('namn',''),                                         # 15 Intressent namn
-            int0.get('telefon',''),                                      # 16 Intressent tel
-            pitch,                                                       # 17 Pitch-text
-            sc_why,                                                      # 18 Score-förklaring
-            besdat,                                                      # 19 Besiktningsdatum
-            r.get('renovat',''),                                         # 20 Renoverat
-            tc(fastig),                                                  # 21 Fastighetsbeteckning
-            '',                                                          # 22 Anteckningar
-            r.get('case_id',''),                                         # 23 CaseID
+            ek_str,                                                      # 13 Energiklass
+            typ,                                                         # 14 Kontakttyp
+            r.get('namn2','') if r.get('namn2')!=namn else '',           # 15 Namn 2
+            int0.get('namn',''),                                         # 16 Intressent namn
+            int0.get('telefon',''),                                      # 17 Intressent tel
+            pitch,                                                       # 18 Pitch-text
+            sc_why,                                                      # 19 Score-förklaring
+            besdat,                                                      # 20 Besiktningsdatum
+            r.get('renovat',''),                                         # 21 Renoverat
+            tc(fastig),                                                  # 22 Fastighetsbeteckning
+            '',                                                          # 23 Anteckningar
+            r.get('case_id',''),                                         # 24 CaseID
         ])
 
     rows.sort(key=lambda r: -r[0])   # Score fallande
@@ -634,6 +717,8 @@ def main():
     print(f'  Köpare:           {stats["Köpare"]}')
     print(f'  Intressent:       {stats["Intressent"]}')
     print(f'  Säljare:          {stats["Säljare"]}')
+    if energy_index:
+        print(f'  Med energidata:   {energy_matched} / {len(rows)} ({energy_matched*100//max(len(rows),1)}% träff)')
     print(f'  Score ≥ 70 (het): {hot}')
     print(f'  Score 55–69:      {warm}')
     print(f'  SOL+BATTERI:      {sb}')
