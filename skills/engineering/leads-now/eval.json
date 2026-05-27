@@ -13,7 +13,7 @@
         },
         {
           "id": "t1.a2",
-          "check": "Output does NOT suggest spending time on configuration, environment setup, or Railway deployment as a first step"
+          "check": "Output does NOT suggest spending time on configuration or environment setup as a first step"
         },
         {
           "id": "t1.a3",
@@ -52,7 +52,7 @@
         },
         {
           "id": "t2.a5",
-          "check": "Output mentions checking ANTHROPIC_API_KEY on Railway as one possible quick fix"
+          "check": "Output mentions checking ANTHROPIC_API_KEY i miljövariablerna as one possible quick fix"
         }
       ]
     },
@@ -85,12 +85,12 @@
     },
     {
       "id": "t4",
-      "prompt": "Appen är nere på Railway. Hur får jag leads?",
-      "expected_output_description": "Checks Railway dashboard first, gives a fallback for running locally",
+      "prompt": "Appen är nere. Hur får jag leads?",
+      "expected_output_description": "Checks app logs or restarts app first, gives steps for running locally with streamlit run app.py",
       "assertions": [
         {
           "id": "t4.a1",
-          "check": "Output mentions checking Railway dashboard as the first step"
+          "check": "Output mentions checking app logs or restarting locally as the first step"
         },
         {
           "id": "t4.a2",
@@ -106,7 +106,7 @@
         },
         {
           "id": "t4.a5",
-          "check": "Output is helpful and forward-looking — doesn't just say 'wait for Railway to come back'"
+          "check": "Output is helpful and forward-looking — doesn't just say 'wait for the app to come back'"
         }
       ]
     },

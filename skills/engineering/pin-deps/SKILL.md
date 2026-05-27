@@ -6,7 +6,7 @@ drift-breakage (e.g. an unpinned Streamlit dropping a deprecated API on redeploy
 
 ## Why
 
-`requirements.txt` lists bare package names (no versions). Railway redeploys `main`
+`requirements.txt` lists bare package names (no versions). Streamlit Cloud redeploys `main`
 and reinstalls latest → "works today, breaks on next deploy". Pinning freezes a
 known-good set.
 

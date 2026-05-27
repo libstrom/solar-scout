@@ -32,11 +32,11 @@
     {
       "id": "t2",
       "prompt": "David rapporterar 0 funna leads. Scanningen fungerade fint igår.",
-      "expected_output_description": "Multiple possible causes listed, Railway logs mentioned, actionable next steps",
+      "expected_output_description": "Multiple possible causes listed, app logs mentioned, actionable next steps",
       "assertions": [
         {
           "id": "t2.a1",
-          "check": "Output mentions checking Railway logs"
+          "check": "Output mentions checking app logs"
         },
         {
           "id": "t2.a2",

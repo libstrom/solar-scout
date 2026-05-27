@@ -1,6 +1,6 @@
 ---
 name: pin-deps
-description: Pins this repo's unpinned requirements.txt to verified-working versions so a Railway redeploy can't silently pull a breaking dependency. Use when hardening dependencies, when the user says "pin deps" / "pinna beroenden", or after a dependency-drift breakage.
+description: Pins this repo's unpinned requirements.txt to verified-working versions so a Streamlit Cloud redeploy can't silently pull a breaking dependency. Use when hardening dependencies, when the user says "pin deps" / "pinna beroenden", or after a dependency-drift breakage.
 ---
 
 Follow the pin-deps skill from skills/engineering/pin-deps/SKILL.md.
