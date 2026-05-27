@@ -8,6 +8,9 @@ import os
 import time
 import logging
 import urllib.parse
+import secrets
+import hashlib
+import base64
 import httpx
 import stripe
 import pandas as pd
@@ -211,7 +214,42 @@ def init_auth():
     if cm is not None:
         cm.remove("access_token")
         cm.remove("refresh_token")
+
+    # OAuth callback — Microsoft/Azure PKCE code exchange
+    _oauth_code = st.query_params.get("code")
+    _verifier   = st.session_state.get("_oauth_code_verifier")
+    if _oauth_code and _verifier:
+        st.session_state.pop("_oauth_code_verifier", None)
+        try:
+            user_sb = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+            resp = user_sb.auth.exchange_code_for_session(
+                {"auth_code": _oauth_code, "code_verifier": _verifier}
+            )
+            if resp.session and resp.user:
+                st.session_state["access_token"]    = resp.session.access_token
+                st.session_state["refresh_token"]   = resp.session.refresh_token
+                st.session_state["_auth_user"]      = resp.user
+                st.session_state["_sb_user_client"] = user_sb
+                _cm = _get_cookie_manager()
+                if _cm is not None:
+                    _exp = datetime.now() + timedelta(days=30)
+                    _cm.set("access_token", resp.session.access_token, expires_at=_exp)
+                    _cm.set("refresh_token", resp.session.refresh_token, expires_at=_exp)
+                st.query_params.pop("code", None)
+                return resp.user
+        except Exception as _oe:
+            _log.warning("oauth code exchange failed: %s", _oe)
+            st.session_state["_oauth_error"] = str(_oe)
+
     return None
+
+
+def _pkce_pair() -> tuple[str, str]:
+    """Return (verifier, challenge) for OAuth PKCE S256 flow."""
+    verifier = secrets.token_urlsafe(32)
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return verifier, challenge
 
 
 def do_login(email: str, password: str):
@@ -501,6 +539,40 @@ def page_auth():
                 st.rerun()
             except Exception as e:
                 st.error(_sv_error(e))
+
+        # Microsoft OAuth button — requires Azure provider enabled in Supabase dashboard
+        st.divider()
+        if st.button(
+            "**Logga in med Microsoft**",
+            icon=":material/microsoft:",
+            use_container_width=True,
+            key="ms_oauth_btn",
+        ):
+            _v, _ch = _pkce_pair()
+            st.session_state["_oauth_code_verifier"] = _v
+            try:
+                _anon_sb = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+                _oa = _anon_sb.auth.sign_in_with_oauth({
+                    "provider": "azure",
+                    "options": {
+                        "redirect_to": APP_URL,
+                        "scopes": "email",
+                        "query_params": {
+                            "code_challenge": _ch,
+                            "code_challenge_method": "S256",
+                        },
+                    },
+                })
+                import streamlit.components.v1 as _stc_ms
+                _stc_ms.html(
+                    f'<script>window.top.location.replace("{_oa.url}")</script>',
+                    height=0,
+                )
+            except Exception as _mse:
+                st.error(f"Microsoft-inloggning misslyckades: {_mse}")
+
+        if "_oauth_error" in st.session_state:
+            st.error(f"Microsoft-inloggning: {st.session_state.pop('_oauth_error')}")
 
     with tab_up:
         with st.form("signup_form"):
