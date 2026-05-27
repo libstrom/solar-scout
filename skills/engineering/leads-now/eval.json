@@ -1,139 +1,135 @@
 {
   "skill": "leads-now",
-  "description": "25 binary assertions across 5 scenarios — tests that leads-now always gives David immediate, actionable steps without detours",
+  "skill_path": "skills/engineering/leads-now/SKILL.md",
+  "description": "25 binary assertions across 5 test cases for the leads-now skill",
   "tests": [
     {
       "id": "t1",
-      "prompt": "Vi behöver leads till David idag.",
-      "expected_output_description": "Skips setup steps, goes straight to scanning a specific city",
+      "prompt": "Vi behöver solar leads nu. Railway-appen är igång. Vad gör vi?",
       "assertions": [
         {
-          "id": "t1.a1",
-          "check": "Output recommends at least one specific Swedish city by name (e.g. Huskvarna, Nässjö, Vetlanda)"
+          "id": "t1_a1",
+          "check": "Response contains at least one of: Huskvarna, Nässjö, Vetlanda"
         },
         {
-          "id": "t1.a2",
-          "check": "Output does NOT suggest spending time on configuration or environment setup as a first step"
+          "id": "t1_a2",
+          "check": "Response contains the word 'Scanna' or 'scanna'"
         },
         {
-          "id": "t1.a3",
-          "check": "Output mentions a specific max_leads number or suggests a concrete limit (e.g. 30)"
+          "id": "t1_a3",
+          "check": "Response contains the word 'CSV' or 'exportera'"
         },
         {
-          "id": "t1.a4",
-          "check": "Output includes a step for exporting leads (CSV or Excel)"
+          "id": "t1_a4",
+          "check": "Response does not recommend Stockholm or Göteborg as the first city to try"
         },
         {
-          "id": "t1.a5",
-          "check": "Output is ordered as a numbered list or clear sequence of steps, not a wall of text"
+          "id": "t1_a5",
+          "check": "Response word count is under 200 words"
         }
       ]
     },
     {
       "id": "t2",
-      "prompt": "Scanning returnerar 0 leads. Vad gör jag?",
-      "expected_output_description": "Immediately redirects to /scan-debug, gives one quick check, doesn't re-explain the whole pipeline",
+      "prompt": "Scanningen returnerar 0 leads. Vad är fel?",
       "assertions": [
         {
-          "id": "t2.a1",
-          "check": "Output references scan-debug or /scan-debug skill explicitly"
+          "id": "t2_a1",
+          "check": "Response mentions /scan-debug"
         },
         {
-          "id": "t2.a2",
-          "check": "Output suggests trying a different city as a quick workaround, not just debugging"
+          "id": "t2_a2",
+          "check": "Response suggests trying a different city"
         },
         {
-          "id": "t2.a3",
-          "check": "Output mentions Nässjö, Huskvarna, or Vetlanda as better cities to try"
+          "id": "t2_a3",
+          "check": "Response mentions ANTHROPIC_API_KEY"
         },
         {
-          "id": "t2.a4",
-          "check": "Output does NOT explain the full scan pipeline stages (that belongs in scan-debug, not leads-now)"
+          "id": "t2_a4",
+          "check": "Response mentions app logs or loggarna"
         },
         {
-          "id": "t2.a5",
-          "check": "Output mentions checking ANTHROPIC_API_KEY i miljövariablerna as one possible quick fix"
+          "id": "t2_a5",
+          "check": "Response does not begin with a clarifying question to the user"
         }
       ]
     },
     {
       "id": "t3",
-      "prompt": "Vilken stad ger flest leads snabbast?",
-      "expected_output_description": "Gives a concrete recommendation with reasoning, not a generic answer",
+      "prompt": "Vilken stad ska vi scanna för att få flest leads?",
       "assertions": [
         {
-          "id": "t3.a1",
-          "check": "Output gives a single primary recommendation, not 'it depends' as the only answer"
+          "id": "t3_a1",
+          "check": "Response names at least one of: Huskvarna, Nässjö, Vetlanda as a recommendation"
         },
         {
-          "id": "t3.a2",
-          "check": "Output explains WHY the recommended city is good (e.g. villa density, OSM coverage)"
+          "id": "t3_a2",
+          "check": "Response warns against or explicitly discourages Stockholm or Göteborg"
         },
         {
-          "id": "t3.a3",
-          "check": "Output explicitly warns against or discourages scanning Stockholm or Göteborg"
+          "id": "t3_a3",
+          "check": "Response mentions villa density or villa-täthet as a reason"
         },
         {
-          "id": "t3.a4",
-          "check": "Output mentions SE3-regionen or Småland or Jönköping-regionen as the best geographic area"
+          "id": "t3_a4",
+          "check": "Response gives no more than three city recommendations"
         },
         {
-          "id": "t3.a5",
-          "check": "Output is concise — answer fits within 200 words"
+          "id": "t3_a5",
+          "check": "Response word count is under 150 words"
         }
       ]
     },
     {
       "id": "t4",
-      "prompt": "Appen är nere. Hur får jag leads?",
-      "expected_output_description": "Checks app logs or restarts app first, gives steps for running locally with streamlit run app.py",
+      "prompt": "Hur exporterar jag leads till CSV?",
       "assertions": [
         {
-          "id": "t4.a1",
-          "check": "Output mentions checking app logs or restarting locally as the first step"
+          "id": "t4_a1",
+          "check": "Response mentions the 'Leads' tab or 'Leads'-fliken"
         },
         {
-          "id": "t4.a2",
-          "check": "Output does NOT immediately suggest complex debugging — it starts with a simple status check"
+          "id": "t4_a2",
+          "check": "Response contains the word 'CSV'"
         },
         {
-          "id": "t4.a3",
-          "check": "Output acknowledges that leads can't be generated if the app is down, rather than pretending otherwise"
+          "id": "t4_a3",
+          "check": "Response contains numbered steps or a bullet list"
         },
         {
-          "id": "t4.a4",
-          "check": "Output mentions 'streamlit run app.py' or running locally as a fallback option"
+          "id": "t4_a4",
+          "check": "Response word count is under 100 words"
         },
         {
-          "id": "t4.a5",
-          "check": "Output is helpful and forward-looking — doesn't just say 'wait for the app to come back'"
+          "id": "t4_a5",
+          "check": "Response does not mention Railway logs or API keys (irrelevant to this question)"
         }
       ]
     },
     {
       "id": "t5",
-      "prompt": "David har fått 50 leads. Vad är nästa steg?",
-      "expected_output_description": "Focuses on David exporting and working the leads, not on scanning more",
+      "prompt": "Railway-appen är nere. Vad gör vi för att få leads?",
       "assertions": [
         {
-          "id": "t5.a1",
-          "check": "Output mentions exporting leads as CSV or Excel"
+          "id": "t5_a1",
+          "check": "Response mentions app logs or loggarna"
         },
         {
-          "id": "t5.a2",
-          "check": "Output mentions the Leads-flik or leads list in the app"
+          "id": "t5_a2",
+          "check": "Response does not instruct the user to try scanning anyway"
         },
         {
-          "id": "t5.a3",
-          "check": "Output does NOT primarily suggest immediately scanning for more leads when 50 are already found"
+          "id": "t5_a3",
+          "check": "Response includes at least one concrete diagnostic action"
         },
         {
-          "id": "t5.a4",
-          "check": "Output gives David a clear next action (e.g. ring på listan, exportera, börja ringa)"
+          "id": "t5_a4",
+          "check": "Response mentions /scan-debug or checking logs"
         },
         {
-          "id": "t5.a5",
-          "check": "Output acknowledges that 50 leads is a good result, not a failure state"
+          "id": "t5_a5",
+          "check": "Response word count is under 150 words"
         }
       ]
     }

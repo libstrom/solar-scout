@@ -1,139 +1,135 @@
 {
   "skill": "scan-debug",
-  "description": "25 binary assertions across 5 test scenarios — each checks a concrete, measurable property of the skill output",
+  "skill_path": "skills/engineering/scan-debug/SKILL.md",
+  "description": "25 binary assertions across 5 test cases for the scan-debug skill",
   "tests": [
     {
       "id": "t1",
-      "prompt": "Scan returnerade 0 leads för Huskvarna. Debugga.",
-      "expected_output_description": "Stage-by-stage diagnosis starting from Overpass, including runnable Python code",
+      "prompt": "Scanningen på Huskvarna returnerar 0 leads. Hur debuggar jag det?",
       "assertions": [
         {
-          "id": "t1.a1",
-          "check": "Output mentions at least one scanner.py function by name (e.g. _overpass, scan_area_osm, _get_osm_buildings, _fetch_lm_wms, _analyze_building)"
+          "id": "t1_a1",
+          "check": "Response mentions or provides a diagnostic script to run"
         },
         {
-          "id": "t1.a2",
-          "check": "Output includes a Python code block the user can run directly"
+          "id": "t1_a2",
+          "check": "Response mentions Overpass as one of the stages to check"
         },
         {
-          "id": "t1.a3",
-          "check": "Output covers Stage 3 (_get_osm_buildings) specifically, not just Stage 1"
+          "id": "t1_a3",
+          "check": "Response mentions at least 3 of the 6 pipeline stages (_overpass, scan_area_osm, _get_osm_buildings, _fetch_lm_wms, _analyze_building, _has_extra_solar_nearby)"
         },
         {
-          "id": "t1.a4",
-          "check": "Output mentions ANTHROPIC_API_KEY or 'API key' as a potential cause"
+          "id": "t1_a4",
+          "check": "Response tells the user to check stages in order (stage 1 before stage 2, etc.)"
         },
         {
-          "id": "t1.a5",
-          "check": "Output does NOT end with an open question asking the user for more information before providing any diagnosis"
+          "id": "t1_a5",
+          "check": "Response includes at least one concrete action the user can take immediately"
         }
       ]
     },
     {
       "id": "t2",
-      "prompt": "David rapporterar 0 funna leads. Scanningen fungerade fint igår.",
-      "expected_output_description": "Multiple possible causes listed, app logs mentioned, actionable next steps",
+      "prompt": "Overpass returnerar 0 element. Vad gör jag?",
       "assertions": [
         {
-          "id": "t2.a1",
-          "check": "Output mentions checking app logs"
+          "id": "t2_a1",
+          "check": "Response identifies this as a Stage 1 problem"
         },
         {
-          "id": "t2.a2",
-          "check": "Output mentions Overpass, rate limiting, or 429 as a possible cause"
+          "id": "t2_a2",
+          "check": "Response suggests waiting and retrying (Overpass may be down or rate-limited)"
         },
         {
-          "id": "t2.a3",
-          "check": "Output lists at least two distinct possible causes, not just one"
+          "id": "t2_a3",
+          "check": "Response does not instruct the user to check ANTHROPIC_API_KEY as the primary fix"
         },
         {
-          "id": "t2.a4",
-          "check": "Output is immediately actionable — it does not ONLY ask David for more info without providing any diagnosis first"
+          "id": "t2_a4",
+          "check": "Response mentions 429 or rate limiting or Overpass being down as a possible cause"
         },
         {
-          "id": "t2.a5",
-          "check": "Output references scanner.py log format (e.g. '[scanner]', '_log.info', or 'Overpass returned N elements')"
+          "id": "t2_a5",
+          "check": "Response word count is under 150 words"
         }
       ]
     },
     {
       "id": "t3",
-      "prompt": "scan_city returnerar en tom lista utan felmeddelande. Vad debuggar jag?",
-      "expected_output_description": "Distinguishes OSM vs AI causes, provides specific coordinates to test with, mentions residential areas",
+      "prompt": "Jag ser inga felmeddelanden i Railway-loggen men scanningen ger ändå 0 leads.",
       "assertions": [
         {
-          "id": "t3.a1",
-          "check": "Output distinguishes between OSM returning 0 results vs AI returning 0 results (two separate failure modes)"
+          "id": "t3_a1",
+          "check": "Response mentions checking for the '[scanner]' log prefix"
         },
         {
-          "id": "t3.a2",
-          "check": "Output provides specific lat/lng coordinates to use in testing (e.g. 57.78, 14.27 or similar Swedish coordinates)"
+          "id": "t3_a2",
+          "check": "Response mentions the specific log line 'Overpass returned N elements'"
         },
         {
-          "id": "t3.a3",
-          "check": "Output mentions 'residential areas' or '_get_residential_areas' as part of how scan_city works"
+          "id": "t3_a3",
+          "check": "Response suggests running the diagnostic script locally"
         },
         {
-          "id": "t3.a4",
-          "check": "Output suggests running a diagnostic script or specific Python commands, not just describing the problem"
+          "id": "t3_a4",
+          "check": "Response mentions trying a larger bounding box or different area"
         },
         {
-          "id": "t3.a5",
-          "check": "Output is structured (uses headers, numbered steps, or a code block) — not a single unbroken paragraph"
+          "id": "t3_a5",
+          "check": "Response is actionable without additional clarification needed"
         }
       ]
     },
     {
       "id": "t4",
-      "prompt": "Bildhämtningen misslyckas för varje byggnad. Scannern hittar byggnader men returnerar 0 AI-leads.",
-      "expected_output_description": "Identifies LM WMS as the image source, provides direct test command, does not blame Anthropic API key",
+      "prompt": "LM WMS-hämtningen misslyckas. Vad betyder det och hur fixar jag det?",
       "assertions": [
         {
-          "id": "t4.a1",
-          "check": "Output identifies LM WMS (Lantmäteriet) as the satellite image source to check"
+          "id": "t4_a1",
+          "check": "Response identifies this as a Stage 4 failure"
         },
         {
-          "id": "t4.a2",
-          "check": "Output mentions _fetch_lm_wms by name"
+          "id": "t4_a2",
+          "check": "Response mentions testing _fetch_lm_wms() directly"
         },
         {
-          "id": "t4.a3",
-          "check": "Output provides a specific command or code snippet to test image fetch directly"
+          "id": "t4_a3",
+          "check": "Response mentions that LM WMS may be intermittently down"
         },
         {
-          "id": "t4.a4",
-          "check": "Output does NOT primarily blame ANTHROPIC_API_KEY when the symptom is image failure (wrong layer)"
+          "id": "t4_a4",
+          "check": "Response does not instruct the user to change their ANTHROPIC_API_KEY as the fix"
         },
         {
-          "id": "t4.a5",
-          "check": "Output mentions minkarta.lantmateriet.se or the WMS URL as the image endpoint"
+          "id": "t4_a5",
+          "check": "Response suggests a workaround (wait, retry, or alternative)"
         }
       ]
     },
     {
       "id": "t5",
-      "prompt": "Loggarna visar 'Stage 3 — Buildings: 50 byggnader' men 0 leads sparas. Vad är fel?",
-      "expected_output_description": "Correctly identifies Stage 5 (AI analysis) as the failure point, suggests checking API key, mentions _analyze_building",
+      "prompt": "Hur vet jag om ANTHROPIC_API_KEY är korrekt inställd på Railway?",
       "assertions": [
         {
-          "id": "t5.a1",
-          "check": "Output correctly identifies that the problem is in Stage 4 or 5 (image fetch or AI analysis), NOT in Stages 1-3 which are already confirmed working"
+          "id": "t5_a1",
+          "check": "Response mentions checking environment variables or app logs"
         },
         {
-          "id": "t5.a2",
-          "check": "Output mentions ANTHROPIC_API_KEY as the primary suspect"
+          "id": "t5_a2",
+          "check": "Response mentions checking app logs for _analyze_building"
         },
         {
-          "id": "t5.a3",
-          "check": "Output does NOT suggest re-running Stage 1-3 diagnostics (those are already confirmed working by the log output)"
+          "id": "t5_a3",
+          "check": "Response identifies this as a Stage 5 issue"
         },
         {
-          "id": "t5.a4",
-          "check": "Output mentions _analyze_building or the AI analysis step by name"
+          "id": "t5_a4",
+          "check": "Response mentions the log line '_analyze_building result' as confirmation"
         },
         {
-          "id": "t5.a5",
-          "check": "Output suggests a concrete fix or verification step, not just a description of the problem"
+          "id": "t5_a5",
+          "check": "Response word count is under 150 words"
         }
       ]
     }
