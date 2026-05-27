@@ -3,14 +3,16 @@
 makeLeads.py — Genererar leads.xlsx optimerat för telefon-mötesbokning
 
 Flikar:
-  • Ringlista   — prioriterat ringköö med status-kolumner för Ivan/David
-  • Översikt    — statistik + prioritet-guide
+  • Ringlista   — scorad ringköö med pitch-text, produkt-bucket, CRM-kolumner
+  • Scoring     — förklaring av scoringmodellen
+  • Översikt    — statistik per kontakttyp, kommun, byggår
 
 Usage:
     python makeLeads.py enspecta.tab [leads.xlsx]
 """
 import sys, re
 from collections import Counter
+from datetime import date
 
 try:
     from openpyxl import Workbook
@@ -34,29 +36,106 @@ def clean(s):
 def norm(s):
     return clean(s).lower().replace('  ', ' ')
 
-def title_case(s):
+def tc(s):
     return clean(s).title() if s else ''
 
-def extract_year(s):
+def yr(s):
     m = re.match(r'(\d{4})', str(s or ''))
     return int(m.group(1)) if m else None
 
-def priority(byggår_str):
-    """Prioritet 1-3 baserat på husålder. 1=högst (gamla hus, störst behov)."""
-    y = extract_year(byggår_str)
-    if not y: return 2
-    if y <= 1980: return 1   # Eldningsolja/direktel, sämst isolering
-    if y <= 1995: return 2   # Bra kandidater
-    return 3                  # Nyare, lägre potential
 
-def pitch_hint(byggår_str):
-    """Kort pitch-poäng baserat på byggår."""
-    y = extract_year(byggår_str)
-    if not y: return ''
-    if y <= 1960: return 'Gammalt hus — troligen direktel/olja. Sol+VP-pitch.'
-    if y <= 1980: return 'Energiklass D-F sannolikt. Sol+batteri stark pitch.'
-    if y <= 1995: return 'Bra sol-kandidat. Fråga om uppvärmning.'
-    return 'Nyare hus — fråga om solceller redan finns.'
+# ── scoring ───────────────────────────────────────────────────────────────────
+
+def score_lead(byggår_str, kontakttyp, besdat_str, telefon, email):
+    """
+    Score 0–100. Approximation baserad på enspecta.tab — ingen XLSM-data.
+    Faktorer: husålder (tyngst), kontakttyp, besiktningsdatum, kontaktinfo.
+    """
+    points = 0
+    reasons = []
+
+    y = yr(byggår_str)
+    if y:
+        if y <= 1960:
+            points += 40; reasons.append(f'Byggt {y} (+40)')
+        elif y <= 1970:
+            points += 35; reasons.append(f'Byggt {y} (+35)')
+        elif y <= 1980:
+            points += 28; reasons.append(f'Byggt {y} (+28)')
+        elif y <= 1990:
+            points += 18; reasons.append(f'Byggt {y} (+18)')
+        elif y <= 2000:
+            points += 10; reasons.append(f'Byggt {y} (+10)')
+        else:
+            points += 4;  reasons.append(f'Byggt {y} (+4)')
+    else:
+        points += 15; reasons.append('Byggår okänt (+15, antas äldre)')
+
+    if kontakttyp == 'Köpare':
+        points += 30; reasons.append('Köpare/nuv. ägare (+30)')
+    elif kontakttyp == 'Intressent':
+        points += 20; reasons.append('Intressent/visning (+20)')
+    else:
+        points += 8;  reasons.append('Säljare/har flyttat (+8)')
+
+    bd = yr(besdat_str)
+    if bd:
+        age = date.today().year - bd
+        if age <= 2:
+            points += 20; reasons.append(f'Besiktning {bd} (+20)')
+        elif age <= 5:
+            points += 12; reasons.append(f'Besiktning {bd} (+12)')
+        elif age <= 10:
+            points += 6;  reasons.append(f'Besiktning {bd} (+6)')
+
+    if telefon:  points += 8;  reasons.append('Har telefon (+8)')
+    if email:    points += 4;  reasons.append('Har e-post (+4)')
+
+    score = min(points, 100)
+    return score, ' | '.join(reasons)
+
+
+def bucket(score, byggår_str):
+    y = yr(byggår_str)
+    if score >= 65:
+        return '☀️🔋 SOL + BATTERI'
+    if score >= 45:
+        if y and y <= 2005:
+            return '☀️🔋 SOL + BATTERI'
+        return '☀️ SOL'
+    return '🔋 BATTERI / VP'
+
+
+def score_color(score):
+    if score >= 70: return 'B71C1C'   # mörkröd = het
+    if score >= 55: return 'E65100'   # orange
+    if score >= 40: return 'F9A825'   # gul
+    return '555555'                    # grå
+
+
+def pitch_text(namn, adress, ort, byggår_str, bucket_str):
+    """Färdig pitch-text för David att klistra in i mötesbok."""
+    y = yr(byggår_str)
+    fornamn = namn.split()[0] if namn else 'du'
+
+    if y and y <= 1980:
+        behov = f"hus från {y}-talet har ofta höga elkostnader och stor potential för solceller"
+        produkt = "sol + batteri — du kan kapa elräkningen med upp till 70%"
+    elif y and y <= 1995:
+        behov = f"villaägare i {ort or 'ert område'} väljer allt oftare solceller"
+        produkt = "solceller med batteri — du lagrar överskottet och säljer resten"
+    else:
+        behov = "många väljer nu att komplettera med batteri för att maximera egenkonsumtion"
+        produkt = "batterilagring — perfekt om du redan har sol eller funderar på det"
+
+    return (
+        f"Hej {fornamn}! Jag heter [säljare] och ringer från Enspecta Ensolar. "
+        f"Vi hjälper villaägare i {ort or 'Sverige'} att sänka sina energikostnader — "
+        f"{behov}. "
+        f"Vi erbjuder {produkt}. "
+        f"Får jag boka in ett kostnadsfritt hembesök på {adress or 'er fastighet'} "
+        f"så går vi igenom er potential tillsammans?"
+    )
 
 
 # ── parse enspecta.tab ────────────────────────────────────────────────────────
@@ -74,7 +153,7 @@ def parse_tab(path):
         if cur_fastig not in by_fastig:
             by_fastig[cur_fastig] = {'kopare': [], 'intressenter': [], 'saljare': []}
         b = by_fastig[cur_fastig]
-        if cur_status == 'Köpare':   b['kopare'].append(cur_rec)
+        if cur_status == 'Köpare':    b['kopare'].append(cur_rec)
         elif cur_status == 'Säljare': b['saljare'].append(cur_rec)
         if cur_status == 'Säljare' and cur_ints:
             b['intressenter'].extend(cur_ints)
@@ -149,53 +228,49 @@ def best_contact(b):
 
 # ── Excel styling ─────────────────────────────────────────────────────────────
 
-def F(hex_):  return PatternFill('solid', fgColor=hex_)
-def Fn(*a, **k): return Font(*a, **k)
+def F(h):  return PatternFill('solid', fgColor=h)
+def Fn(*a,**k): return Font(*a,**k)
 
-def thin_border(color='DDDDDD'):
+def border(color='DDDDDD'):
     s = Side(style='thin', color=color)
     return Border(left=s, right=s, top=s, bottom=s)
 
-# Palette
-BLU  = '1A237E'; BLU2 = '283593'; BLU3 = 'E8EAF6'
-GRN  = 'E8F5E9'; GRN2 = '1B5E20'
-YLW  = 'FFFDE7'; YLW2 = 'F57F17'
-ORG  = 'FFF3E0'; ORG2 = 'E65100'
-RED  = 'FFEBEE'; RED2 = 'B71C1C'
-LGRY = 'FAFAFA'
+BLU='1A237E'; BLU2='283593'; BLU3='E8EAF6'
+GRN='E8F5E9'; GRN2='1B5E20'
+YLW='FFFDE7'; YLW2='F57F17'
+ORG='FFF3E0'; ORG2='E65100'
+RED='FFEBEE'; RED2='B71C1C'
+HOT='FFF8E1'  # score ≥ 70
 
-STATUS_OPTS = '"Ej kontaktad,Bokad möte,Ej intresserad,Återkom,Fel nummer,Röstbrevlåda,Såld"'
+STATUS_OPTS  = '"Ej kontaktad,Bokad möte,Ej intresserad,Återkom,Fel nummer,Röstbrevlåda,Såld"'
 SALJARE_OPTS = '"Ivan,David,Linus,Annan"'
 
-# Column definitions: (header, width, note)
+# (header, width)
 COLS = [
-    # ── CRM-kolumner ──────────────────────────────────
-    ('Prio',              5,  '1=gammalt hus, 3=nytt'),
-    ('Status',            16, 'Välj från lista'),
-    ('Säljare',           10, 'Vem ringer?'),
-    ('Nästa kontakt',     14, 'Datum för uppföljning'),
-    ('Anteckningar',      35, 'Fritext — vad sa kunden?'),
-    # ── Kontaktinfo ───────────────────────────────────
-    ('Namn',              26, ''),
-    ('Namn 2',            20, 'Partner/medsökande'),
-    ('Telefon',           16, ''),
-    ('E-post',            30, ''),
-    # ── Adress ────────────────────────────────────────
-    ('Adress',            28, ''),
-    ('Postnr',             8, ''),
-    ('Ort',               16, ''),
-    ('Kommun',            16, ''),
-    # ── Fastighetsfakta ───────────────────────────────
-    ('Byggår',             8, ''),
-    ('Renoverat',          9, ''),
-    ('Besiktningsdatum',  16, ''),
-    ('Pitch',             42, 'Automatiskt baserat på byggår'),
-    # ── Metadata ──────────────────────────────────────
-    ('Kontakttyp',        13, 'Köpare/Intressent/Säljare'),
-    ('Intressent — Namn', 22, ''),
-    ('Intressent — Tel',  16, ''),
-    ('Fastighetsbeteckning', 24, ''),
-    ('CaseID',            12, ''),
+    ('Score',              7),
+    ('Bucket',            18),
+    ('Status',            16),
+    ('Säljare',           10),
+    ('Nästa kontakt',     14),
+    ('Namn',              26),
+    ('Telefon',           16),
+    ('E-post',            30),
+    ('Adress',            28),
+    ('Postnr',             8),
+    ('Ort',               16),
+    ('Kommun',            16),
+    ('Byggår',             8),
+    ('Kontakttyp',        13),
+    ('Namn 2',            20),
+    ('Intressent — Namn', 22),
+    ('Intressent — Tel',  16),
+    ('Pitch-text',        55),
+    ('Score-förklaring',  45),
+    ('Besiktningsdatum',  16),
+    ('Renoverat',          9),
+    ('Fastighetsbeteckning', 24),
+    ('Anteckningar',      35),
+    ('CaseID',            12),
 ]
 
 
@@ -203,82 +278,91 @@ def make_ringlista(wb, rows):
     ws = wb.active
     ws.title = 'Ringlista'
     ws.sheet_view.showGridLines = False
-
     ncols = len(COLS)
-    last_col_letter = get_column_letter(ncols)
+    LC = get_column_letter(ncols)
 
-    # ── Row 1: banner ──
-    ws.merge_cells(f'A1:{last_col_letter}1')
+    # Banner
+    ws.merge_cells(f'A1:{LC}1')
     b = ws['A1']
-    b.value     = '☀️  ENSPECTA RINGLISTA  —  Mötesbokning sol + batteri + VP  |  Prio 1 = ring idag'
-    b.font      = Fn(bold=True, size=12, color='FFFFFF')
-    b.fill      = F(BLU)
+    b.value = ('☀️  ENSPECTA LEADS — Telefon-mötesbokning  |  '
+               'Sortera Score högt→lågt  •  Filtrera Ort för daglig körning  •  '
+               'Pitch-text i kolumn R — klistra in i mötesbok')
+    b.font = Fn(bold=True, size=11, color='FFFFFF')
+    b.fill = F(BLU)
     b.alignment = Alignment(horizontal='center', vertical='center')
     ws.row_dimensions[1].height = 28
 
-    # ── Row 2: filter guide ──
-    ws.merge_cells(f'A2:{last_col_letter}2')
+    # Guide-rad
+    ws.merge_cells(f'A2:{LC}2')
     g = ws['A2']
-    g.value     = (
-        'FILTER-TIPS:  Klicka ▾ på kolumnrubriken för att filtrera  •  '
-        'Status → visa bara "Ej kontaktad"  •  Prio → visa bara "1"  •  '
-        'Kommun → välj ett område att jobba med idag'
-    )
-    g.font      = Fn(size=10, color='1A237E', italic=True)
-    g.fill      = F(BLU3)
+    g.value = ('FILTER:  Score ▾ → sortera fallande  •  Status = "Ej kontaktad"  •  '
+               'Bucket = "☀️🔋 SOL + BATTERI"  •  Kommun = valfritt område')
+    g.font  = Fn(size=10, color=BLU, italic=True)
+    g.fill  = F(BLU3)
     g.alignment = Alignment(horizontal='left', vertical='center')
     ws.row_dimensions[2].height = 20
 
-    # ── Row 3: column headers ──
-    for ci, (hdr, w, _) in enumerate(COLS, 1):
-        c = ws.cell(3, ci, hdr)
-        c.fill      = F(BLU2)
-        c.font      = Fn(bold=True, color='FFFFFF', size=10)
+    # Headers
+    for ci, (h, _) in enumerate(COLS, 1):
+        c = ws.cell(3, ci, h)
+        c.fill = F(BLU2)
+        c.font = Fn(bold=True, color='FFFFFF', size=10)
         c.alignment = Alignment(horizontal='center', vertical='center')
-        c.border    = thin_border('1A237E')
+        c.border = border('1A237E')
     ws.row_dimensions[3].height = 24
 
-    # ── Data validation dropdowns ──
+    # Validations
     dv_status  = DataValidation(type='list', formula1=STATUS_OPTS,  showDropDown=False, showErrorMessage=False)
     dv_saljare = DataValidation(type='list', formula1=SALJARE_OPTS, showDropDown=False, showErrorMessage=False)
-    dv_status.sqref  = f'B4:B{len(rows)+3}'
-    dv_saljare.sqref = f'C4:C{len(rows)+3}'
+    dv_status.sqref  = f'C4:C{len(rows)+3}'
+    dv_saljare.sqref = f'D4:D{len(rows)+3}'
     ws.add_data_validation(dv_status)
     ws.add_data_validation(dv_saljare)
 
-    # ── Data rows ──
     TYPE_FILL = {'Köpare': F(GRN), 'Intressent': F(YLW), 'Säljare': F(ORG)}
-    PRIO_FONT = {1: Fn(bold=True, color=RED2), 2: Fn(color=YLW2), 3: Fn(color='555555')}
+    TYPE_FILL_HOT = {'Köpare': F('C8E6C9'), 'Intressent': F('FFF176'), 'Säljare': F('FFCC80')}
 
     for ri, row in enumerate(rows, 4):
-        typ   = row[17]   # Kontakttyp column
-        rfill = TYPE_FILL.get(typ, F(LGRY))
-        prio  = row[0]
+        sc   = row[0]
+        typ  = row[13]
+        hot  = sc >= 70
+        rfill = TYPE_FILL_HOT.get(typ, F('FFFDE7')) if hot else TYPE_FILL.get(typ, F('FAFAFA'))
 
         for ci, val in enumerate(row, 1):
             c = ws.cell(ri, ci, val)
             c.fill   = rfill
-            c.border = thin_border()
+            c.border = border()
             c.alignment = Alignment(vertical='center', wrap_text=False)
 
-            if ci == 1:   # Prio
-                c.font      = PRIO_FONT.get(prio, Fn())
+            if ci == 1:    # Score
+                c.font = Fn(bold=True, size=12, color=score_color(sc))
                 c.alignment = Alignment(horizontal='center', vertical='center')
-            elif ci == 2:  # Status — default
+            elif ci == 2:  # Bucket
+                bkt_colors = {'☀️🔋 SOL + BATTERI': ('FFF8E1','E65100'),
+                              '☀️ SOL':              ('E8F5E9','1B5E20'),
+                              '🔋 BATTERI / VP':     ('E3F2FD','1565C0')}
+                bg, fg = bkt_colors.get(val, ('FFFFFF','000000'))
+                c.fill = F(bg)
+                c.font = Fn(bold=True, color=fg, size=10)
+                c.alignment = Alignment(horizontal='center', vertical='center')
+            elif ci == 3:  # Status default
                 c.value = 'Ej kontaktad'
-                c.font  = Fn(color='555555', italic=True, size=10)
-            elif ci in (8, 9):   # Telefon, e-post
+                c.font  = Fn(color='777777', italic=True, size=10)
+            elif ci in (7, 8):  # Tel/email
                 c.font = Fn(name='Consolas', size=10)
-            elif ci == 17:  # Pitch
-                c.font = Fn(size=9, color='444444', italic=True)
-            elif ci == 18:  # Kontakttyp
-                col_map = {'Köpare': GRN2, 'Intressent': YLW2, 'Säljare': ORG2}
-                c.font = Fn(bold=True, size=9, color=col_map.get(typ, '000000'))
+            elif ci == 18:  # Pitch-text
+                c.font = Fn(size=9, color='333333')
+                c.alignment = Alignment(vertical='center', wrap_text=True)
+            elif ci == 19:  # Score-förklaring
+                c.font = Fn(size=9, color='777777', italic=True)
+            elif ci == 14:  # Kontakttyp
+                cc = {'Köpare': GRN2, 'Intressent': YLW2, 'Säljare': ORG2}
+                c.font = Fn(bold=True, size=9, color=cc.get(typ,'000000'))
 
-        ws.row_dimensions[ri].height = 18
+        ws.row_dimensions[ri].height = 32 if hot else 20
 
-    # ── Excel Table ──
-    tbl = Table(displayName='Ringlista', ref=f'A3:{last_col_letter}{len(rows)+3}')
+    # Excel Table
+    tbl = Table(displayName='Leads', ref=f'A3:{LC}{len(rows)+3}')
     tbl.tableStyleInfo = TableStyleInfo(
         name='TableStyleLight1',
         showFirstColumn=False, showLastColumn=False,
@@ -286,24 +370,95 @@ def make_ringlista(wb, rows):
     )
     ws.add_table(tbl)
 
-    # ── Conditional formatting: "Bokad möte" → grön rad ──
-    booked_fill = F('C8E6C9')
-    ds_booked = DifferentialStyle(fill=booked_fill)
-    rule_booked = Rule(type='expression', dxf=ds_booked,
-                       formula=['$B4="Bokad möte"'])
-    ws.conditional_formatting.add(f'A4:{last_col_letter}{len(rows)+3}', rule_booked)
+    # Conditional: Bokad möte → grön
+    ds = DifferentialStyle(fill=F('C8E6C9'))
+    ws.conditional_formatting.add(f'A4:{LC}{len(rows)+3}',
+        Rule(type='expression', dxf=ds, formula=['$C4="Bokad möte"']))
 
-    # ── Conditional formatting: "Ej intresserad" → gråtonad ──
-    grey_fill = F('EEEEEE')
-    grey_font = DifferentialStyle(fill=grey_fill, font=Fn(color='AAAAAA'))
-    rule_nej = Rule(type='expression', dxf=grey_font,
-                    formula=['$B4="Ej intresserad"'])
-    ws.conditional_formatting.add(f'A4:{last_col_letter}{len(rows)+3}', rule_nej)
+    # Conditional: Ej intresserad → grå
+    ds2 = DifferentialStyle(fill=F('EEEEEE'), font=Fn(color='AAAAAA'))
+    ws.conditional_formatting.add(f'A4:{LC}{len(rows)+3}',
+        Rule(type='expression', dxf=ds2, formula=['$C4="Ej intresserad"']))
 
     ws.freeze_panes = 'A4'
-
-    for ci, (_, w, _) in enumerate(COLS, 1):
+    for ci, (_, w) in enumerate(COLS, 1):
         ws.column_dimensions[get_column_letter(ci)].width = w
+
+
+def make_scoring(wb):
+    ws = wb.create_sheet('Scoring-modell')
+    ws.sheet_view.showGridLines = False
+
+    def hdr(r, txt, size=13):
+        c = ws.cell(r, 1, txt)
+        c.font = Fn(bold=True, size=size, color=BLU)
+
+    def row3(r, factor, pts, note):
+        ws.cell(r, 1, factor).font = Fn(bold=True, size=10)
+        ws.cell(r, 2, pts).font    = Fn(size=10, color=RED2)
+        ws.cell(r, 2).alignment    = Alignment(horizontal='right')
+        ws.cell(r, 3, note).font   = Fn(size=10, color='444444', italic=True)
+
+    r = 1
+    hdr(r, '☀️  Scoring-modell — så beräknas poängen', 15); r += 2
+    ws.cell(r, 1, 'Obs: Score är ett estimat baserat på enspecta.tab. '
+                   'Med XLSM-data (energiklass, uppvärmning, elförbrukning) '
+                   'kan precision förbättras till ±5p.').font = Fn(size=10, italic=True, color='777777')
+    r += 2
+
+    hdr(r, 'Husålder (max 40p)'); r += 1
+    for factor, pts, note in [
+        ('Byggd ≤ 1960', '+40', 'Troligen direktel/olja — störst behov, bäst pitch'),
+        ('Byggd 1961–1970', '+35', 'Ofta Energiklass E–G'),
+        ('Byggd 1971–1980', '+28', 'Energiklass D–F sannolikt'),
+        ('Byggd 1981–1990', '+18', 'Blandad potential'),
+        ('Byggd 1991–2000', '+10', 'Lägre behov, men sol kan löna sig'),
+        ('Byggd > 2000',    '+4',  'Nyare hus — fråga om sol redan finns'),
+        ('Byggår saknas',   '+15', 'Konservativt antagande — troligen äldre'),
+    ]:
+        row3(r, factor, pts, note); r += 1
+    r += 1
+
+    hdr(r, 'Kontakttyp (max 30p)'); r += 1
+    for f, p, n in [
+        ('Köpare',     '+30', 'Bor på fastigheten nu — direkt beslutare'),
+        ('Intressent', '+20', 'Var på visning — troligen ny ägare'),
+        ('Säljare',    '+8',  'Har flyttat — lägre sannolikhet'),
+    ]:
+        row3(r, f, p, n); r += 1
+    r += 1
+
+    hdr(r, 'Besiktningsdatum (max 20p)'); r += 1
+    for f, p, n in [
+        ('≤ 2 år sedan', '+20', 'Nytt ägarbyte — varmt lead'),
+        ('3–5 år sedan', '+12', 'Relativt nytt'),
+        ('6–10 år sedan','+6',  'Äldre besiktning'),
+    ]:
+        row3(r, f, p, n); r += 1
+    r += 1
+
+    hdr(r, 'Kontaktinfo'); r += 1
+    for f, p, n in [
+        ('Har telefonnummer', '+8', 'Kan ringas direkt'),
+        ('Har e-postadress',  '+4', 'Kan mailas som komplement'),
+    ]:
+        row3(r, f, p, n); r += 1
+    r += 2
+
+    hdr(r, 'Produktbuckets'); r += 1
+    for f, p, n in [
+        ('☀️🔋 SOL + BATTERI', 'Score ≥ 65', 'Prioritera dessa — störst affär'),
+        ('☀️ SOL',             'Score 45–64', 'Bra kandidat, fokus på sol'),
+        ('🔋 BATTERI / VP',    'Score < 45',  'Fokus på batteri eller VP-tillägg'),
+    ]:
+        ws.cell(r, 1, f).font   = Fn(bold=True, size=10)
+        ws.cell(r, 2, p).font   = Fn(size=10, color=RED2)
+        ws.cell(r, 3, n).font   = Fn(size=10, italic=True, color='444444')
+        r += 1
+
+    ws.column_dimensions['A'].width = 26
+    ws.column_dimensions['B'].width = 12
+    ws.column_dimensions['C'].width = 52
 
 
 def make_oversikt(wb, rows):
@@ -311,52 +466,60 @@ def make_oversikt(wb, rows):
     ws.sheet_view.showGridLines = False
 
     def hdr(r, txt, size=13):
-        c = ws.cell(r, 1, txt)
-        c.font = Fn(bold=True, size=size, color=BLU)
-        ws.cell(r, 2).fill = F('FFFFFF')
+        ws.cell(r, 1, txt).font = Fn(bold=True, size=size, color=BLU)
 
     def kv(r, k, v, vc=None):
-        ws.cell(r, 1, k).font  = Fn(bold=True, size=11)
+        ws.cell(r, 1, k).font = Fn(bold=True, size=11)
         c = ws.cell(r, 2, v)
         c.font = Fn(bold=True, size=11, color=vc or '000000')
         c.alignment = Alignment(horizontal='right')
 
     r = 1
-    hdr(r, '☀️  Enspecta Leads — Statistik & Prioritetsguide', 15); r += 2
+    hdr(r, f'☀️  Enspecta Leads — Översikt  ({date.today()})', 15); r += 2
 
-    stats = Counter(row[17] for row in rows)  # Kontakttyp
+    stats = Counter(row[13] for row in rows)
     hdr(r, 'Kontakttyp'); r += 1
-    kv(r, '🟢  Köpare — bor på fastigheten nu',          stats['Köpare'],     GRN2); r += 1
-    kv(r, '🟡  Intressent — var på säljarbesiktning',    stats['Intressent'], YLW2); r += 1
-    kv(r, '🟠  Säljare — har flyttat',                   stats['Säljare'],    ORG2); r += 1
-    kv(r, '    Totalt med kontaktinfo',                   sum(stats.values()), BLU);  r += 2
+    kv(r, '🟢  Köpare',      stats['Köpare'],     GRN2); r += 1
+    kv(r, '🟡  Intressent',  stats['Intressent'], YLW2); r += 1
+    kv(r, '🟠  Säljare',     stats['Säljare'],    ORG2); r += 1
+    kv(r, '    Totalt',       sum(stats.values()), BLU);  r += 2
 
-    prios = Counter(row[0] for row in rows)
-    hdr(r, 'Prioritet (byggår)'); r += 1
-    kv(r, '🔴  Prio 1 — byggd ≤1980  (direktel/olja, störst behov)', prios[1], RED2); r += 1
-    kv(r, '🟡  Prio 2 — byggd 1981–1995 (bra kandidater)',           prios[2], YLW2); r += 1
-    kv(r, '⚪  Prio 3 — byggd >1995 (nyare hus)',                    prios[3], '555555'); r += 2
+    score_dist = Counter()
+    for row in rows:
+        s = row[0]
+        if s >= 70:   score_dist['≥ 70 (het)'] += 1
+        elif s >= 55: score_dist['55–69 (varm)'] += 1
+        elif s >= 40: score_dist['40–54 (ok)'] += 1
+        else:         score_dist['< 40 (kall)'] += 1
+    hdr(r, 'Score-distribution'); r += 1
+    for label in ['≥ 70 (het)', '55–69 (varm)', '40–54 (ok)', '< 40 (kall)']:
+        kv(r, label, score_dist[label]); r += 1
+    r += 1
+
+    bucket_dist = Counter(row[1] for row in rows)
+    hdr(r, 'Produktbuckets'); r += 1
+    for bk, cnt in bucket_dist.most_common():
+        kv(r, bk, cnt); r += 1
+    r += 1
 
     hdr(r, 'Topp 20 kommuner'); r += 1
     ws.cell(r, 1, 'Kommun').font = Fn(bold=True)
     ws.cell(r, 2, 'Antal').font  = Fn(bold=True)
     ws.cell(r, 2).alignment = Alignment(horizontal='right')
     r += 1
-    for kom, cnt in Counter(row[12] for row in rows if row[12]).most_common(20):
+    for kom, cnt in Counter(row[11] for row in rows if row[11]).most_common(20):
         ws.cell(r, 1, kom)
-        c = ws.cell(r, 2, cnt)
-        c.alignment = Alignment(horizontal='right')
+        ws.cell(r, 2, cnt).alignment = Alignment(horizontal='right')
         r += 1
     r += 1
 
     hdr(r, 'Byggår per decennium'); r += 1
     ws.cell(r, 1, 'Decennium').font = Fn(bold=True)
     ws.cell(r, 2, 'Antal').font     = Fn(bold=True)
-    ws.cell(r, 2).alignment = Alignment(horizontal='right')
     r += 1
     dcnt = Counter()
     for row in rows:
-        y = extract_year(row[13])
+        y = yr(row[12])
         dcnt[(y//10)*10 if y else 'Okänt'] += 1
     for dec in sorted(d for d in dcnt if d != 'Okänt'):
         ws.cell(r, 1, f'{dec}-talet')
@@ -365,24 +528,8 @@ def make_oversikt(wb, rows):
     if 'Okänt' in dcnt:
         ws.cell(r, 1, 'Okänt')
         ws.cell(r, 2, dcnt['Okänt']).alignment = Alignment(horizontal='right')
-        r += 1
-    r += 1
 
-    hdr(r, 'Hur du jobbar med ringlistan'); r += 1
-    tips = [
-        'Filtrera Prio = 1 + Status = "Ej kontaktad" för att få dagens ringköö.',
-        'Filtrera Kommun för att ringa ett område åt gången — effektivare restid.',
-        'Skriv datum i "Nästa kontakt" direkt i samtalet.',
-        'Bokad möte → raden färgas grön automatiskt.',
-        'Ej intresserad → raden tonas ned automatiskt.',
-        'Exportera filtrerad vy (Ctrl+Skift+L) för att dela med teamet.',
-    ]
-    for tip in tips:
-        ws.cell(r, 1, f'• {tip}').font = Fn(size=10)
-        ws.row_dimensions[r].height = 16
-        r += 1
-
-    ws.column_dimensions['A'].width = 56
+    ws.column_dimensions['A'].width = 38
     ws.column_dimensions['B'].width = 12
 
 
@@ -401,8 +548,7 @@ def main():
     by_fastig = parse_tab(tab_path)
     print(f'  {len(by_fastig)} unika fastigheter')
 
-    print('Sorterar och rangordnar ...')
-    ORDER = {'Köpare': 0, 'Intressent': 1, 'Säljare': 2}
+    print('Scorar och bygger rader ...')
     rows = []
     stats = Counter()
 
@@ -412,52 +558,67 @@ def main():
         stats[typ] += 1
         int0 = ints[0] if ints and typ != 'Intressent' else {}
 
-        bår   = r.get('byggår', '')
-        prio  = priority(bår)
-        pitch = pitch_hint(bår)
+        bår     = r.get('byggår', '')
+        besdat  = r.get('besdat','') or r.get('besiktningsdatum','')
+        tel     = r.get('telefon','')
+        epost   = r.get('email','')
+        ort_str = tc(r.get('ort',''))
+        adr_str = r.get('adress','')
+        namn    = r.get('namn','')
+
+        sc, sc_why = score_lead(bår, typ, besdat, tel, epost)
+        bkt        = bucket(sc, bår)
+        pitch      = pitch_text(namn, adr_str, ort_str, bår, bkt)
 
         rows.append([
-            prio,                                                   # 0  Prio
-            '',                                                     # 1  Status (fylls av säljare)
-            '',                                                     # 2  Säljare
-            '',                                                     # 3  Nästa kontakt
-            '',                                                     # 4  Anteckningar
-            r.get('namn', ''),                                      # 5  Namn
-            r.get('namn2','') if r.get('namn2')!=r.get('namn') else '', # 6 Namn2
-            r.get('telefon', ''),                                   # 7  Telefon
-            r.get('email', ''),                                     # 8  E-post
-            r.get('adress', ''),                                    # 9  Adress
-            r.get('postnr', ''),                                    # 10 Postnr
-            title_case(r.get('ort', '')),                           # 11 Ort
-            title_case(r.get('kommun', '')),                        # 12 Kommun
-            bår,                                                    # 13 Byggår
-            r.get('renovat', ''),                                   # 14 Renoverat
-            r.get('besdat','') or r.get('besiktningsdatum',''),     # 15 Besiktningsdatum
-            pitch,                                                  # 16 Pitch
-            typ,                                                    # 17 Kontakttyp
-            int0.get('namn',''),                                    # 18 Int namn
-            int0.get('telefon',''),                                 # 19 Int tel
-            title_case(fastig),                                     # 20 Fastighetsbeteckning
-            r.get('case_id',''),                                    # 21 CaseID
+            sc,                                                          # 0  Score
+            bkt,                                                         # 1  Bucket
+            '',                                                          # 2  Status
+            '',                                                          # 3  Säljare
+            '',                                                          # 4  Nästa kontakt
+            namn,                                                        # 5  Namn
+            tel,                                                         # 6  Telefon
+            epost,                                                       # 7  E-post
+            adr_str,                                                     # 8  Adress
+            r.get('postnr',''),                                          # 9  Postnr
+            ort_str,                                                     # 10 Ort
+            tc(r.get('kommun','')),                                      # 11 Kommun
+            bår,                                                         # 12 Byggår
+            typ,                                                         # 13 Kontakttyp
+            r.get('namn2','') if r.get('namn2')!=namn else '',           # 14 Namn 2
+            int0.get('namn',''),                                         # 15 Intressent namn
+            int0.get('telefon',''),                                      # 16 Intressent tel
+            pitch,                                                       # 17 Pitch-text
+            sc_why,                                                      # 18 Score-förklaring
+            besdat,                                                      # 19 Besiktningsdatum
+            r.get('renovat',''),                                         # 20 Renoverat
+            tc(fastig),                                                  # 21 Fastighetsbeteckning
+            '',                                                          # 22 Anteckningar
+            r.get('case_id',''),                                         # 23 CaseID
         ])
 
-    # Sort: Prio 1 first, then Köpare > Intressent > Säljare
-    rows.sort(key=lambda r: (r[0], ORDER.get(r[17], 9)))
+    rows.sort(key=lambda r: -r[0])   # Score fallande
 
-    print(f'Bygger Excel ({len(rows)} rader) ...')
+    print(f'Bygger Excel ({len(rows)} rader, 3 flikar) ...')
     wb = Workbook()
     make_ringlista(wb, rows)
+    make_scoring(wb)
     make_oversikt(wb, rows)
     wb.save(out_path)
 
+    hot   = sum(1 for r in rows if r[0] >= 70)
+    warm  = sum(1 for r in rows if 55 <= r[0] < 70)
+    sb    = sum(1 for r in rows if r[1] == '☀️🔋 SOL + BATTERI')
+
     print(f'\n=== Klar ===')
-    print(f'  Köpare:      {stats["Köpare"]}')
-    print(f'  Intressent:  {stats["Intressent"]}')
-    print(f'  Säljare:     {stats["Säljare"]}')
-    print(f'  Prio 1:      {sum(1 for r in rows if r[0]==1)}')
-    print(f'  Totalt:      {sum(stats.values())}')
+    print(f'  Köpare:           {stats["Köpare"]}')
+    print(f'  Intressent:       {stats["Intressent"]}')
+    print(f'  Säljare:          {stats["Säljare"]}')
+    print(f'  Score ≥ 70 (het): {hot}')
+    print(f'  Score 55–69:      {warm}')
+    print(f'  SOL+BATTERI:      {sb}')
     print(f'\nSparad till: {out_path}')
-    print('\nTips: Filtrera Prio=1 + Status="Ej kontaktad" för dagens ringköö.')
+    print('Tips: Sortera Score fallande → de hetaste leadsen överst.')
 
 
 if __name__ == '__main__':
