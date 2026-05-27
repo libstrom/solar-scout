@@ -307,7 +307,7 @@ _NON_RESIDENTIAL_TYPES = {
 # most Swedish villor are 80-300 m²; 400+ m² is more likely a parhus-cluster or
 # multi-unit residence we don't want.
 MIN_BUILDING_AREA_M2 = 40
-MAX_BUILDING_AREA_M2 = 400
+MAX_BUILDING_AREA_M2 = 350
 
 # Max distance (m) to snap a building centroid to a nearby OSM address node.
 ADDRESS_SNAP_RADIUS_M = 25
@@ -390,6 +390,14 @@ def _get_osm_buildings(south: float, west: float, north: float,
         tags = el.get("tags", {})
         btype = tags.get("building", "house")
         if btype in _NON_RESIDENTIAL_TYPES:
+            continue
+
+        # Skip buildings with commercial/public amenity tags even if building=yes
+        amenity = tags.get("amenity", "")
+        if amenity in _NON_RESIDENTIAL_AMENITIES:
+            continue
+        # Shop or office tags override the building type
+        if tags.get("shop") or tags.get("office"):
             continue
 
         # Flerfamiljshus often tagged as residential but carry building:flats.
@@ -981,7 +989,8 @@ def _analyze_building(
 
         "STEP 1 — Is the CENTRAL structure a single-family home?\n"
         "(villa, parhus, radhus, fritidshus — NOT garage, carport, barn, shed, "
-        "warehouse, industrial, church, school, kiosk, construction site)\n"
+        "warehouse, industrial, church, school, kiosk, construction site, "
+        "apartment block/BRF/flerfamiljshus, office building, retail/commercial)\n"
         "→ If NO: HOUSE=NO, SOLAR=NO. Stop here.\n\n"
 
         "STEP 2 — Describe the roof in one sentence:\n"
@@ -1354,13 +1363,21 @@ def _get_residential_areas(south: float, west: float, north: float, east: float)
                     (bounds.get("maxlat", lat) - bounds.get("minlat", lat)) *
                     (bounds.get("maxlon", lng) - bounds.get("minlon", lng))
                 )
+                s = bounds.get("minlat", lat - 0.005)
+                w = bounds.get("minlon", lng - 0.005)
+                n = bounds.get("maxlat", lat + 0.005)
+                e = bounds.get("maxlon", lng + 0.005)
             else:
                 area_deg2 = 0.0
-            areas.append({"lat": lat, "lng": lng, "area_deg2": area_deg2})
+                s, w, n, e = lat - 0.005, lng - 0.005, lat + 0.005, lng + 0.005
+            areas.append({"lat": lat, "lng": lng, "area_deg2": area_deg2,
+                          "south": s, "west": w, "north": n, "east": e})
         elif el.get("type") == "relation" and "center" in el:
             lat = el["center"]["lat"]
             lng = el["center"]["lon"]
-            areas.append({"lat": lat, "lng": lng, "area_deg2": 0.0})
+            areas.append({"lat": lat, "lng": lng, "area_deg2": 0.0,
+                          "south": lat - 0.005, "west": lng - 0.005,
+                          "north": lat + 0.005, "east": lng + 0.005})
     # Largest residential area first
     areas.sort(key=lambda a: a["area_deg2"], reverse=True)
     return areas
@@ -1415,6 +1432,8 @@ def scan_city(
     phase_callback: Callable[[str, int], None] | None = None,
     skip_tile_keys: frozenset[str] = frozenset(),
     user_id: str | None = None,
+    on_area_start: Callable[[dict], None] | None = None,
+    on_area_done: Callable[[dict, int], None] | None = None,
 ) -> tuple[list[Lead], ScanStats]:
     """Scan a city for buildings with solar panels.
 
@@ -1485,6 +1504,9 @@ def scan_city(
                 if remaining <= 0:
                     break
 
+            if on_area_start:
+                on_area_start(area)
+
             a_south, a_west, a_north, a_east = _center_bbox(
                 area["lat"], area["lng"], radius_km=1.0
             )
@@ -1501,6 +1523,8 @@ def scan_city(
 
             if not buildings:
                 _log.info("scan_city area lat=%s lng=%s no new buildings", area["lat"], area["lng"])
+                if on_area_done:
+                    on_area_done(area, 0)
                 continue
 
             _log.info("scan_city area lat=%s lng=%s buildings=%d", area["lat"], area["lng"], len(buildings))
@@ -1513,6 +1537,8 @@ def scan_city(
                 skip_tile_keys=skip_tile_keys,
             )
             _log.info("scan_city area_leads=%d", len(area_leads))
+            if on_area_done:
+                on_area_done(area, len(area_leads))
             all_ai_leads.extend(area_leads)
             merged_stats.yes += area_stats.yes
             merged_stats.unsure += area_stats.unsure
@@ -1636,6 +1662,8 @@ def scan_bbox(
     phase_callback: Callable[[str, int], None] | None = None,
     skip_tile_keys: frozenset[str] = frozenset(),
     user_id: str | None = None,
+    on_area_start: Callable[[dict], None] | None = None,
+    on_area_done: Callable[[dict, int], None] | None = None,
 ) -> tuple[list[Lead], ScanStats]:
     """Scan a bounding box for buildings with solar panels.
 
@@ -1677,6 +1705,9 @@ def scan_bbox(
                     if remaining <= 0:
                         break
 
+                if on_area_start:
+                    on_area_start(area)
+
                 a_south, a_west, a_north, a_east = _center_bbox(
                     area["lat"], area["lng"], radius_km=1.0
                 )
@@ -1696,6 +1727,8 @@ def scan_bbox(
                     seen_building_ids.add(b["osm_id"])
 
                 if not buildings:
+                    if on_area_done:
+                        on_area_done(area, 0)
                     continue
 
                 if phase_callback:
@@ -1706,6 +1739,8 @@ def scan_bbox(
                     max_leads=remaining, few_shot=few_shot,
                     skip_tile_keys=skip_tile_keys,
                 )
+                if on_area_done:
+                    on_area_done(area, len(area_leads))
                 all_ai_leads.extend(area_leads)
                 merged_stats.yes    += area_stats.yes
                 merged_stats.unsure += area_stats.unsure

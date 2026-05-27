@@ -1115,6 +1115,8 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
         status_text    = st.empty()
         found_leads: list[Lead] = []
         live_leads_ph  = st.empty()
+        area_map_ph    = st.empty()
+        area_states: list[dict] = []
         scan_debug: list[str] = []
         scan_errors: list[str] = []
         total_buildings_est = [0]
@@ -1190,6 +1192,71 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
             elif phase == "ai_done":
                 scan_debug.append(f"AI bekräftade solceller: {count}")
 
+        def _render_area_map():
+            if not area_states:
+                return
+            try:
+                import folium as _folium
+                from streamlit_folium import st_folium as _st_folium
+            except ImportError:
+                return
+            lats_c = [a["lat"] for a in area_states]
+            lngs_c = [a["lng"] for a in area_states]
+            center = [sum(lats_c) / len(lats_c), sum(lngs_c) / len(lngs_c)]
+            _m = _folium.Map(location=center, zoom_start=12,
+                             tiles="CartoDB positron", prefer_canvas=True)
+            _state_color = {
+                "scanning":   "#f97316",   # orange
+                "done_leads": "#22c55e",   # green
+                "done_empty": "#e5e7eb",   # light grey
+            }
+            for _a in area_states:
+                _color = _state_color.get(_a.get("state", "done_empty"), "#e5e7eb")
+                _nb = _a.get("n_buildings", 0)
+                _tip = (
+                    f"🔍 Skannar ({_nb} hus)" if _a.get("state") == "scanning"
+                    else f"☀️ {_a.get('n_leads', 0)} leads" if _a.get("state") == "done_leads"
+                    else "Inga hus"
+                )
+                _folium.Rectangle(
+                    bounds=[[_a["south"], _a["west"]], [_a["north"], _a["east"]]],
+                    color=_color,
+                    fill=True,
+                    fill_opacity=0.40,
+                    weight=2,
+                    tooltip=_tip,
+                ).add_to(_m)
+            with area_map_ph.container():
+                scanning_count = sum(1 for a in area_states if a.get("state") == "scanning")
+                done_count     = sum(1 for a in area_states if a.get("state") != "scanning")
+                leads_count    = sum(a.get("n_leads", 0) for a in area_states)
+                st.caption(
+                    f"🗺 **Bostadsområden** · "
+                    f"🟠 {scanning_count} skannas · "
+                    f"✅ {done_count} klara · "
+                    f"☀️ {leads_count} leads"
+                )
+                _st_folium(
+                    _m, width="100%", height=260,
+                    returned_objects=[],
+                    key=f"area_progress_map_{len(area_states)}",
+                )
+
+        def on_area_start(area: dict):
+            area["state"] = "scanning"
+            area["n_buildings"] = 0
+            area["n_leads"] = 0
+            area_states.append(area)
+            _render_area_map()
+
+        def on_area_done(area: dict, n_leads: int):
+            for _a in area_states:
+                if _a["lat"] == area["lat"] and _a["lng"] == area["lng"]:
+                    _a["state"] = "done_leads" if n_leads > 0 else "done_empty"
+                    _a["n_leads"] = n_leads
+                    break
+            _render_area_map()
+
         anthr_key = ANTHROPIC_API_KEY if ai_available else None
         _log.info("scan start mode=%s ai=%s max_leads=%s", "bbox" if use_bbox else "city", bool(anthr_key), max_leads)
         leads = None
@@ -1202,6 +1269,7 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                     mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads,
                     phase_callback=on_phase, skip_tile_keys=_skip_tile_keys,
                     user_id=str(user.id),
+                    on_area_start=on_area_start, on_area_done=on_area_done,
                 )
             else:
                 status_text.info("Hämtar byggnadsdata från OSM (kan ta 20–60 s)...")
@@ -1210,6 +1278,7 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                     mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads,
                     phase_callback=on_phase, skip_tile_keys=_skip_tile_keys,
                     user_id=str(user.id),
+                    on_area_start=on_area_start, on_area_done=on_area_done,
                 )
         except ValueError as e:
             _log.error("scan ValueError: %s", e)
@@ -1223,6 +1292,7 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
         progress_bar.progress(1.0, text="Klar!")
         status_text.empty()
         live_leads_ph.empty()  # Full results UI renders below — no duplicate
+        area_map_ph.empty()    # Area progress map no longer needed
 
         # On crash: fall back to the AI leads already saved progressively
         if scan_crashed:
