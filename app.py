@@ -110,6 +110,19 @@ def _sb_retry(fn, *, attempts: int = 3):
     raise last
 
 
+def _log_event(event_type: str, message: str, detail: str = "", user_email: str = "") -> None:
+    """Fire-and-forget event log to app_events. Never raises."""
+    try:
+        _anon_supabase().table("app_events").insert({
+            "event_type": event_type,
+            "user_email": user_email or "",
+            "message":    message[:500],
+            "detail":     detail[:2000],
+        }).execute()
+    except Exception:
+        pass
+
+
 def _sv_error(exc: Exception) -> str:
     """Översätt vanliga Supabase-felmeddelanden till svenska."""
     msg = str(exc).lower()
@@ -498,9 +511,14 @@ def page_auth():
         if submitted:
             try:
                 do_login(email, password)
+                _log_event("login_ok", "Login succeeded", user_email=email)
                 st.rerun()
             except Exception as e:
-                st.error(_sv_error(e))
+                friendly = _sv_error(e)
+                _log_event("login_error", friendly, detail=str(e), user_email=email)
+                st.error(friendly)
+                with st.expander("Teknisk info", expanded=False):
+                    st.code(str(e))
 
     with tab_up:
         with st.form("signup_form"):

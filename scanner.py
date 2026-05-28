@@ -1088,6 +1088,90 @@ def _analyze_building(
         return False, False, False, ""
 
 
+def _analyze_building_deep(
+    client: anthropic.Anthropic,
+    img_bytes: bytes,
+    first_pass_reasoning: str,
+) -> tuple[bool, bool, bool, str]:
+    """Extended-thinking third pass for cases still UNSURE after the street-view pass.
+
+    Spends up to 5 000 thinking tokens reasoning through low-resolution signals before
+    committing. Draws on false-positive patterns seen in practice (dark asphalt banding,
+    skylights, snow patches) to push toward a definitive YES or NO.
+    On API error returns (True, False, True, "") so the lead stays in the review queue.
+    """
+    img_bytes = _enhance_contrast(img_bytes)
+    b64 = base64.standard_b64encode(img_bytes).decode()
+    instruction = (
+        "Swedish aerial orthophoto, ~18 m across, top-down view. Effective resolution ~25 cm/px. "
+        "Two previous analysis passes were uncertain. Reason carefully — then commit to YES or NO.\n\n"
+
+        "AT THIS RESOLUTION a solar array of 10–20 panels covers roughly 4×5 m (≈16×20 px). "
+        "You will not see sharp module edges, but you WILL see:\n\n"
+
+        "SIGNALS THAT COUNT as PV evidence (need at least one strong signal):\n"
+        "A. Texture delta — a clearly smoother, more uniform sub-area on an otherwise bumpy tile roof. "
+        "   Smooth patches on already-smooth roofs (asphalt, felt, eternite) do NOT count.\n"
+        "B. Rectangular boundary — straight edge(s) geometrically independent of ridge/eave lines.\n"
+        "C. Dark blue / blue-black uniform colour on part of a lighter-coloured roof slope.\n"
+        "D. Parallel shadow line just downslope from a straight raised edge.\n\n"
+
+        "COMMON TRAPS — eliminate each explicitly before calling YES:\n"
+        "• Dark asphalt / felt / EPDM: inherent horizontal banding is the material texture — NOT solar. "
+        "  Solar on asphalt would be DARKER and have a hard rectangular boundary separate from the banding.\n"
+        "• Skylights / Velux: small isolated bright squares or rectangles, not arrays.\n"
+        "• Snow or membrane patches: bright white, no grid lines or module seams.\n"
+        "• Uniform whole-slope texture: if the entire slope looks uniform, that is the roof material, not panels.\n"
+        "• Faint or modest contrast: low-confidence signals are NOT enough — call SOLAR=NO.\n\n"
+
+        f"Previous analysis noted: {first_pass_reasoning or 'uncertain'}\n\n"
+
+        "State your verdict on the LAST TWO LINES. Use SOLAR=UNSURE only as a true last resort:\n"
+        "HOUSE=YES or HOUSE=NO\n"
+        "SOLAR=YES or SOLAR=NO or SOLAR=UNSURE"
+    )
+    try:
+        msg = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=6000,
+            thinking={"type": "enabled", "budget_tokens": 5000},
+            system=instruction,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": "image/jpeg", "data": b64},
+                    },
+                    {"type": "text", "text": "Re-analyse this roof. Work through each signal and trap, then give your verdict."},
+                ],
+            }],
+        )
+        text_block = next((b for b in msg.content if b.type == "text"), None)
+        if text_block is None:
+            return True, False, True, "deep: no text block"
+        raw = text_block.text
+        text = raw.upper()
+        is_house = "HOUSE=YES" in text
+        has_solar = is_house and "SOLAR=YES" in text and "SOLAR=UNSURE" not in text
+        is_unsure = is_house and "SOLAR=UNSURE" in text
+        reasoning = ""
+        for line in raw.splitlines():
+            if line.strip().upper().startswith(("HOUSE=", "SOLAR=")):
+                break
+            if line.strip():
+                reasoning = line.strip()
+                break
+        _log.debug(
+            "_analyze_building_deep HOUSE=%s SOLAR=%s UNSURE=%s",
+            is_house, has_solar, is_unsure,
+        )
+        return is_house, has_solar, is_unsure, reasoning
+    except Exception as exc:
+        _log.error("_analyze_building_deep error: %s", exc)
+        return True, False, True, ""  # fail open → lead stays in review queue
+
+
 def _prefilter_building(img_bytes: bytes, client: anthropic.Anthropic) -> bool:
     """Cheap Haiku pre-filter — returns False if roof is obviously solar-free.
 
@@ -1156,8 +1240,17 @@ def _process_building(
             if not is_house:
                 return None
 
+    # Third pass: extended thinking for cases still UNSURE after street-view.
     if is_unsure:
-        # AI not certain — skip samtomt check (result unused for UNSURE), save for human review
+        _log.debug("_process_building: still UNSURE → deep thinking pass lat=%s lng=%s", lat, lng)
+        is_house, has_solar, is_unsure, reasoning = _analyze_building_deep(
+            anthropic_client, img, reasoning
+        )
+        if not is_house:
+            return None
+
+    if is_unsure:
+        # Genuinely unresolvable — save for human review
         address = building["address"]
         if address and "," in address and not any(c.isalpha() for c in address):
             try:

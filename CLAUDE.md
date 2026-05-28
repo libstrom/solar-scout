@@ -18,6 +18,19 @@ python -c "import ast; ast.parse(open('app.py').read()); print('OK')"
 streamlit run app.py
 ```
 
+## App-logg (Supabase)
+
+När Linus rapporterar ett UI-problem (login, scan, Excel, etc.) — kör alltid detta **först** via Supabase MCP (project `ozmpxldmgivggbmwhtjt`) innan du frågar om detaljer:
+
+```sql
+SELECT created_at, event_type, user_email, message, detail
+FROM app_events
+ORDER BY created_at DESC
+LIMIT 20;
+```
+
+Tabellen loggar login-fel, scan-fel och krascher automatiskt. `detail`-kolumnen innehåller råa Python-stacktrace/felmeddelanden.
+
 ## Agent skills
 
 ### Issue tracker
