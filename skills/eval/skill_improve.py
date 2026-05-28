@@ -39,11 +39,37 @@ logging.basicConfig(
 )
 _log = logging.getLogger("skill_improve")
 
-ANTHROPIC_API_KEY = (
-    os.getenv("SOLAR_SCOUT_ANTHROPIC_KEY")
-    or os.getenv("ANTHROPIC_API_KEY")
-    or ""
-)
+def _read_api_key() -> str:
+    """Try every place the key could live — env var, .streamlit/secrets.toml, app.py _secret."""
+    # 1. Explicit env vars (Railway injects these in production)
+    key = os.getenv("SOLAR_SCOUT_ANTHROPIC_KEY") or os.getenv("ANTHROPIC_API_KEY")
+    if key:
+        return key
+    # 2. .streamlit/secrets.toml (local dev / Railway secrets file)
+    try:
+        import tomllib
+        secrets_path = Path(__file__).parent.parent.parent / ".streamlit" / "secrets.toml"
+        if secrets_path.exists():
+            with open(secrets_path, "rb") as f:
+                s = tomllib.load(f)
+            key = s.get("SOLAR_SCOUT_ANTHROPIC_KEY") or s.get("ANTHROPIC_API_KEY")
+            if key:
+                return key
+    except Exception:
+        pass
+    # 3. Try importing app._secret (works when running from project root)
+    try:
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+        from app import _secret  # type: ignore
+        key = _secret("SOLAR_SCOUT_ANTHROPIC_KEY") or _secret("ANTHROPIC_API_KEY")
+        if key:
+            return key
+    except Exception:
+        pass
+    return ""
+
+ANTHROPIC_API_KEY = _read_api_key()
 
 # Haiku for both skill simulation and assertion checks — fast and cheap
 EVAL_MODEL   = "claude-haiku-4-5-20251001"
