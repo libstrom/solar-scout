@@ -38,3 +38,7 @@ Single-context — `CONTEXT.md` at root + `docs/adr/`. See `docs/agents/domain.m
 - **LM WMS**: Primär bildkälla (CC-BY, lagring tillåten)
 - **Haiku pre-filter**: `_prefilter_building()` körs före Sonnet för att spara 60% kostnad
 - **Glesbygd**: `scan_city()` kör ett fallback-pass på hela viewport för hus utanför OSM residential-polygoner
+
+## Svarsstil
+
+- **Visa alltid adresser**: När leads eller byggnadsresultat diskuteras, visa alltid de faktiska adresserna i svaret — inte bara antal eller statistik.
