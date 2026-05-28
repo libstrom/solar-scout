@@ -11,3 +11,4 @@ httpx==0.28.1
 pillow==12.2.0
 pytest==9.0.3
 extra-streamlit-components==0.1.81
+msoffcrypto-tool>=3.0.0
