@@ -819,8 +819,8 @@ def main():
 
     print(f'Bygger Excel ({len(rows)} rader, 4 flikar) ...')
     wb = Workbook()
-    make_top50(wb, rows)
-    make_ringlista(wb, rows)
+    make_ringlista(wb, rows)   # uses wb.active (default sheet) — must run before any insert
+    make_top50(wb, rows)       # inserts at index 0 → becomes first tab
     make_scoring(wb)
     make_oversikt(wb, rows)
     wb.save(out_path)
