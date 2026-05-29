@@ -197,7 +197,7 @@ def pitch_text(namn, adress, ort, byggår_str, bucket_str, energy=None):
 
 def parse_tab(path):
     with open(path, encoding='utf-8', errors='replace') as f:
-        lines = (l.rstrip('\r\n') for l in f)
+        lines = [l.rstrip('\r\n') for l in f]
 
     by_fastig = {}
     cur_fastig = cur_status = cur_rec = None
