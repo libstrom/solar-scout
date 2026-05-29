@@ -69,6 +69,7 @@ Nässjö och hela Småland ligger i SE3. Malmö/Skåne är SE4.
 | eternite | Grå fibercementskiffer­plåt — vanlig på äldre svenska hus, falskpositivt |
 | few-shot | Verifierade exempel som skickas till Claude för kalibrering |
 | mote_bokat | Status som triggar automatiskt mail till Linus |
+| karpathy-loop | Självförbättrande loop: ändra prompt/few-shot → mät F1 (`tests/test_f1_baseline.py`) → behåll om bättre, annars revert. "kör karpathy" = kör den loopen, inget kommando. |
 
 ## Detektionspipeline
 
