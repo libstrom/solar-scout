@@ -299,6 +299,10 @@ ORG='FFF3E0'; ORG2='E65100'
 RED='FFEBEE'; RED2='B71C1C'
 HOT='FFF8E1'  # score ≥ 70
 
+def score_bar(score):
+    filled = round(score / 10)
+    return '█' * filled + '░' * (10 - filled)
+
 STATUS_OPTS  = '"Ej kontaktad,Bokad möte,Ej intresserad,Återkom,Fel nummer,Röstbrevlåda,Såld"'
 SALJARE_OPTS = '"Ivan,David,Linus,Annan"'
 
@@ -330,6 +334,107 @@ COLS = [
     ('Anteckningar',      35),   # 23
     ('CaseID',            12),   # 24
 ]
+
+
+TOP_COLS = [
+    ('Score',       7),
+    ('Bar',        12),
+    ('Bucket',     20),
+    ('Namn',       26),
+    ('Telefon',    16),
+    ('Adress',     28),
+    ('Ort',        16),
+    ('Energiklass', 9),
+    ('Kontakttyp', 13),
+    ('Pitch-text', 60),
+    ('Anteckningar', 35),
+]
+# indices into main rows tuple matching TOP_COLS
+TOP_IDX = [0, None, 1, 5, 6, 8, 10, 13, 14, 18, 23]
+
+
+def make_top50(wb, rows, n=50):
+    ws = wb.create_sheet('🔥 TOP 50', 0)
+    ws.sheet_view.showGridLines = False
+    top = rows[:n]
+    LC = get_column_letter(len(TOP_COLS))
+
+    # Banner
+    ws.merge_cells(f'A1:{LC}1')
+    b = ws['A1']
+    b.value = f'🔥  ENSPECTA TOP {n}  —  De hetaste leadsen just nu  •  {date.today()}'
+    b.font  = Fn(bold=True, size=13, color='FFFFFF')
+    b.fill  = F('B71C1C')
+    b.alignment = Alignment(horizontal='center', vertical='center')
+    ws.row_dimensions[1].height = 32
+
+    # Sub-banner
+    ws.merge_cells(f'A2:{LC}2')
+    g = ws['A2']
+    g.value = 'Ring uppifrån och ned  •  Status dropdowns i kolumn A (välj flik Ringlista för komplett lista)'
+    g.font  = Fn(size=10, italic=True, color='B71C1C')
+    g.fill  = F('FFEBEE')
+    g.alignment = Alignment(horizontal='left', vertical='center')
+    ws.row_dimensions[2].height = 18
+
+    # Headers
+    for ci, (h, _) in enumerate(TOP_COLS, 1):
+        c = ws.cell(3, ci, h)
+        c.fill = F('B71C1C')
+        c.font = Fn(bold=True, color='FFFFFF', size=10)
+        c.alignment = Alignment(horizontal='center', vertical='center')
+        c.border = border('C62828')
+    ws.row_dimensions[3].height = 22
+
+    _bkt_fills = {'☀️🔋 SOL + BATTERI': (F('FFF8E1'), Fn(bold=True, color='E65100', size=10)),
+                  '☀️ SOL':              (F('E8F5E9'), Fn(bold=True, color='1B5E20', size=10)),
+                  '🔋 BATTERI / VP':     (F('E3F2FD'), Fn(bold=True, color='1565C0', size=10)),
+                  '🔋 BATTERI (har sol)':(F('E3F2FD'), Fn(bold=True, color='1565C0', size=10))}
+    ek_colors = {'A':'1B5E20','B':'2E7D32','C':'388E3C','D':'F9A825','E':'E65100','F':'C62828','G':'B71C1C'}
+    _score_fonts = {c: Fn(bold=True, size=13, color=c) for c in ('B71C1C','E65100','F9A825','555555')}
+    _border_std = border()
+
+    for ri, row in enumerate(top, 4):
+        sc  = row[0]
+        hot = sc >= 70
+        row_fill = F('FFF8E1') if sc >= 70 else F('FFF3E0') if sc >= 55 else F('FAFAFA')
+
+        for ci, (col_info, src_idx) in enumerate(zip(TOP_COLS, TOP_IDX), 1):
+            val = score_bar(sc) if src_idx is None else (row[src_idx] if src_idx < len(row) else '')
+            c = ws.cell(ri, ci, val)
+            c.fill   = row_fill
+            c.border = _border_std
+            c.alignment = Alignment(vertical='center', wrap_text=False)
+
+            if ci == 1:  # Score
+                c.font = _score_fonts[score_color(sc)]
+                c.alignment = Alignment(horizontal='center', vertical='center')
+            elif ci == 2:  # Bar
+                c.font = Fn(name='Consolas', size=10, color=score_color(sc))
+                c.alignment = Alignment(horizontal='left', vertical='center')
+            elif ci == 3:  # Bucket
+                bfill, bfont = _bkt_fills.get(val, (row_fill, Fn(bold=True, size=10)))
+                c.fill = bfill; c.font = bfont
+                c.alignment = Alignment(horizontal='center', vertical='center')
+            elif ci == 8:  # Energiklass
+                c.font = Fn(bold=True, size=12, color=ek_colors.get(val or '', '555555'))
+                c.alignment = Alignment(horizontal='center', vertical='center')
+            elif ci == 10:  # Pitch-text
+                c.font = Fn(size=9, color='333333')
+                c.alignment = Alignment(vertical='center', wrap_text=True)
+            elif ci == 11:  # Anteckningar
+                c.value = ''
+
+        ws.row_dimensions[ri].height = 38 if hot else 24
+
+    tbl = Table(displayName='Top50', ref=f'A3:{LC}{len(top)+3}')
+    tbl.tableStyleInfo = TableStyleInfo(name='TableStyleLight2',
+        showFirstColumn=False, showLastColumn=False,
+        showRowStripes=True, showColumnStripes=False)
+    ws.add_table(tbl)
+    ws.freeze_panes = 'A4'
+    for ci, (_, w) in enumerate(TOP_COLS, 1):
+        ws.column_dimensions[get_column_letter(ci)].width = w
 
 
 def make_ringlista(wb, rows):
@@ -412,9 +517,10 @@ def make_ringlista(wb, rows):
             c.border    = _border_std
             c.alignment = _align_std
 
-            if ci == 1:    # Score
+            if ci == 1:    # Score — show number + bar
+                c.value = f'{sc}\n{score_bar(sc)}'
                 c.font = sc_font
-                c.alignment = _align_ctr
+                c.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
             elif ci == 2:  # Bucket
                 bfill, bfont = _bkt_fills.get(val, (F('FFFFFF'), Fn(bold=True, size=10)))
                 c.fill = bfill
@@ -570,8 +676,17 @@ def make_oversikt(wb, rows):
         elif s >= 40: score_dist['40–54 (ok)'] += 1
         else:         score_dist['< 40 (kall)'] += 1
     hdr(r, 'Score-distribution'); r += 1
+    total_r = sum(score_dist.values()) or 1
+    score_colors = {'≥ 70 (het)': 'B71C1C', '55–69 (varm)': 'E65100', '40–54 (ok)': 'F9A825', '< 40 (kall)': '888888'}
     for label in ['≥ 70 (het)', '55–69 (varm)', '40–54 (ok)', '< 40 (kall)']:
-        kv(r, label, score_dist[label]); r += 1
+        cnt = score_dist[label]
+        pct = cnt / total_r
+        bar = '█' * round(pct * 30)
+        kv(r, label, cnt, score_colors[label])
+        bc = ws.cell(r, 3, f'{bar}  {pct:.0%}')
+        bc.font = Fn(name='Consolas', size=10, color=score_colors[label])
+        r += 1
+    ws.column_dimensions['C'].width = 40
     r += 1
 
     bucket_dist = Counter(row[1] for row in rows)  # col 1 = Bucket
@@ -702,8 +817,9 @@ def main():
 
     rows.sort(key=lambda r: -r[0])   # Score fallande
 
-    print(f'Bygger Excel ({len(rows)} rader, 3 flikar) ...')
+    print(f'Bygger Excel ({len(rows)} rader, 4 flikar) ...')
     wb = Workbook()
+    make_top50(wb, rows)
     make_ringlista(wb, rows)
     make_scoring(wb)
     make_oversikt(wb, rows)
