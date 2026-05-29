@@ -37,6 +37,7 @@ Single-context — `CONTEXT.md` at root + `docs/adr/`. See `docs/agents/domain.m
 - **Mapbox 24h-regel**: Mapbox-bilder får ALDRIG lagras — bara visas i UI
 - **LM WMS**: Primär bildkälla (CC-BY, lagring tillåten)
 - **Haiku pre-filter**: `_prefilter_building()` körs före Sonnet för att spara 60% kostnad
+- **Tiered AI scanning**: Sonnet 4.6 (first pass) → Opus 4.8 + extended thinking (UNSURE second pass)
 - **Glesbygd**: `scan_city()` kör ett fallback-pass på hela viewport för hus utanför OSM residential-polygoner
 
 ## Svarsstil

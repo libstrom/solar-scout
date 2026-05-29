@@ -1097,6 +1097,100 @@ def _analyze_building(
         return False, False, False, ""
 
 
+def _analyze_building_opus(
+    client: anthropic.Anthropic,
+    img_bytes: bytes,
+    street_view_bytes: bytes | None = None,
+) -> tuple[bool, bool, bool, str]:
+    """Opus 4.8 + extended thinking for borderline UNSURE buildings.
+
+    Forces a definitive YES/NO verdict — is_unsure is always False on success.
+    On API error, returns (False, False, True, "") so the caller falls through
+    to needs_review=True rather than silently dropping the lead.
+    """
+    img_bytes = _enhance_contrast(img_bytes)
+    b64 = base64.standard_b64encode(img_bytes).decode()
+
+    sv_clause = (
+        "\n\nA street-level photo of the same property follows the aerial image. "
+        "Solar panels on south-facing slopes are often clearly visible from the street. "
+        "Weight it heavily if it confirms or refutes panels."
+        if street_view_bytes
+        else ""
+    )
+    instruction = (
+        "You are an expert solar panel detection system. "
+        "A faster model already flagged this image as uncertain — use your extended "
+        "reasoning to reach a definitive answer.\n\n"
+        "Swedish aerial orthophoto, ~50 m wide, top-down view. SE3/SE4 grid zone "
+        "(Småland, Skåne, Jönköping). Dominant roof materials: red/brown clay tiles "
+        "(Skandiategel, tegelpannor), grey fibre cement, black bitumen/EPDM, "
+        "corrugated cement, standing-seam metal (plåttak).\n\n"
+        "STEP 1 — Is the CENTRAL structure a single-family home?\n"
+        "(villa, parhus, radhus, fritidshus — NOT garage, barn, warehouse, industrial, "
+        "church, school, apartment block/BRF/flerfamiljshus, office, retail)\n"
+        "→ If NO: HOUSE=NO, SOLAR=NO\n\n"
+        "STEP 2 — Look for PV evidence:\n"
+        "  (a) SMOOTHNESS CONTRAST — a clearly smoother, more uniform area against "
+        "      the bumpy/ribbed texture of adjacent tiles\n"
+        "  (b) RECTANGULAR BOUNDARY — a discrete rectangular sub-area with a visible edge\n"
+        "  (c) MODULE GRID — parallel seam lines; uniform dark-blue/black colour\n\n"
+        "NOT solar: Skandiategel clay tiles (bumpy ridges), corrugated fibre cement "
+        "(ribbed, uniform grey), standing-seam metal (parallel ribs ridge-to-eave, "
+        "no smoother sub-area), bitumen/EPDM (whole-roof uniform dark, no patch), "
+        "copper/green-patina metal (uniform across the whole roof).\n\n"
+        "Think deeply. Commit to a verdict — do not hedge."
+        + sv_clause
+        + "\n\nEnd with exactly two lines:\nHOUSE=YES or HOUSE=NO\nSOLAR=YES or SOLAR=NO"
+    )
+
+    final_content: list[dict] = [
+        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
+    ]
+    if street_view_bytes:
+        sv_b64 = base64.standard_b64encode(street_view_bytes).decode()
+        final_content.append({"type": "text", "text": "Street-level view of the same property:"})
+        final_content.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/jpeg", "data": sv_b64},
+        })
+
+    try:
+        resp = client.messages.create(
+            model="claude-opus-4-8",
+            max_tokens=4096,
+            thinking={"type": "enabled", "budget_tokens": 1024},
+            system=instruction,
+            messages=[{"role": "user", "content": final_content}],
+        )
+        raw = ""
+        think_excerpt = ""
+        for block in resp.content:
+            if block.type == "thinking":
+                think_excerpt = (block.thinking or "")[:300]
+            elif block.type == "text":
+                raw = block.text
+
+        text = raw.upper()
+        is_house = "HOUSE=YES" in text
+        has_solar = is_house and "SOLAR=YES" in text
+        reasoning = think_excerpt
+        for line in raw.splitlines():
+            if line.strip().upper().startswith(("HOUSE=", "SOLAR=")):
+                break
+            if line.strip():
+                reasoning = line.strip()
+                break
+        _log.debug(
+            "_analyze_building_opus HOUSE=%s SOLAR=%s sv=%s",
+            is_house, has_solar, bool(street_view_bytes),
+        )
+        return is_house, has_solar, False, reasoning
+    except Exception as exc:
+        _log.error("_analyze_building_opus error: %s", exc)
+        return True, False, True, ""  # preserve as needs_review on API error
+
+
 def _process_building(
     building: dict,
     google_key: str,
@@ -1123,17 +1217,22 @@ def _process_building(
     if not is_house:
         return None
 
-    # Second pass: if AI is unsure, fetch Street View and reanalyse.
-    # Street View shows south-facing roof slopes that are often invisible from above.
-    if is_unsure and google_key:
-        sv_bytes = _fetch_street_view(google_key, lat, lng)
-        if sv_bytes:
-            _log.debug("_process_building: UNSURE → Street View second pass lat=%s lng=%s", lat, lng)
-            is_house, has_solar, is_unsure, reasoning = _analyze_building(
-                anthropic_client, img, few_shot=few_shot, street_view_bytes=sv_bytes
-            )
-            if not is_house:
-                return None
+    # Second pass: if AI is unsure, use Opus 4.8 + extended thinking.
+    # Fetches Street View first (south-facing slope evidence) then hands both
+    # images to Opus which reasons deeply and commits to a definitive verdict.
+    if is_unsure:
+        sv_bytes: bytes | None = None
+        if google_key:
+            sv_bytes = _fetch_street_view(google_key, lat, lng)
+        _log.debug(
+            "_process_building: UNSURE → Opus 4.8 extended thinking lat=%s lng=%s sv=%s",
+            lat, lng, bool(sv_bytes),
+        )
+        is_house, has_solar, is_unsure, reasoning = _analyze_building_opus(
+            anthropic_client, img, street_view_bytes=sv_bytes
+        )
+        if not is_house:
+            return None
 
     if is_unsure:
         # AI not certain — skip samtomt check (result unused for UNSURE), save for human review

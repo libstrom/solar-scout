@@ -73,8 +73,8 @@ ANTHROPIC_API_KEY = _read_api_key()
 
 # Haiku for both skill simulation and assertion checks — fast and cheap
 EVAL_MODEL   = "claude-haiku-4-5-20251001"
-# Sonnet for skill improvements — needs to reason well about what to change
-IMPROVE_MODEL = "claude-sonnet-4-6"
+# Opus 4.8 for skill improvements — deepest reasoning for targeted edits
+IMPROVE_MODEL = "claude-opus-4-8"
 
 
 # ── Data types ──────────────────────────────────────────────────────────────────
