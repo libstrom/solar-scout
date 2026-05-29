@@ -2353,8 +2353,8 @@ def page_app(user, profile, lead_count: int = 0):
 
     review_label = f"👁 Granska ({review_count})" if review_count else "👁 Granska"
     if is_admin(profile):
-        tab_scanner, tab_scout, tab_leads, tab_review, tab_account = st.tabs(
-            ["🔍 AI Scanner", "🏠 Scouta Tak", "📋 Leads", review_label, "⚙ Konto"]
+        tab_scanner, tab_scout, tab_leads, tab_dash, tab_review, tab_account = st.tabs(
+            ["🔍 AI Scanner", "🏠 Scouta Tak", "📋 Leads", "📊 Dashboard", review_label, "⚙ Konto"]
         )
         with tab_scanner:
             page_scanner(user, profile, lead_count)
@@ -2362,15 +2362,19 @@ def page_app(user, profile, lead_count: int = 0):
             page_scout(user)
         with tab_leads:
             page_leads(user)
+        with tab_dash:
+            page_dashboard(user)
         with tab_review:
             page_review(user)
         with tab_account:
             page_account(user, profile)
     else:
-        # Fältsäljare ser bara leads och granskningskön
-        tab_leads, tab_review = st.tabs(["📋 Leads", review_label])
+        # Fältsäljare ser leads, dashboard och granskningskön
+        tab_leads, tab_dash, tab_review = st.tabs(["📋 Leads", "📊 Dashboard", review_label])
         with tab_leads:
             page_leads(user)
+        with tab_dash:
+            page_dashboard(user)
         with tab_review:
             page_review(user)
 
@@ -2383,26 +2387,91 @@ def page_app(user, profile, lead_count: int = 0):
     )
 
 
+# ── Dashboard ─────────────────────────────────────────────────────────────────
+
+def page_dashboard(user) -> None:
+    """Statistik-dashboard: lead-tratt, skannings-precision, toppstäder."""
+    st.header("📊 Dashboard")
+    sb = get_supabase()
+
+    # Lead funnel
+    st.subheader("Lead-tratt")
+    try:
+        rows = sb.from_("scout_leads").select("status").eq("user_id", user.id).execute().data or []
+        counts: dict[str, int] = {}
+        for row in rows:
+            s = row.get("status") or "ny"
+            counts[s] = counts.get(s, 0) + 1
+        total = sum(counts.values())
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Totalt", total)
+        c2.metric("Kontaktade", counts.get("kontaktad", 0))
+        c3.metric("Intresserade", counts.get("intresserad", 0))
+        c4.metric("Ej intresserade", counts.get("ej_intresserad", 0))
+    except Exception as _exc:
+        st.error(f"Kunde inte hämta lead-data: {_exc}")
+
+    st.divider()
+
+    # Scan precision — requires migration 004
+    st.subheader("Skannings-precision per session")
+    try:
+        prec_rows = sb.from_("scan_precision").select("*").eq("user_id", user.id).execute().data or []
+        if prec_rows:
+            import pandas as _pd
+            _df = _pd.DataFrame(prec_rows)[
+                ["scan_started_at", "total_leads", "confirmed", "rejected", "false_positive_pct"]
+            ]
+            _df.columns = ["Startad", "Totalt", "Bekräftade", "Avvisade", "Falska pos. (%)"]
+            st.dataframe(_df, use_container_width=True)
+        else:
+            st.info("Inga sessioner med precision-data än. Starta en ny skanning för att börja samla data.")
+    except Exception as _exc:
+        _msg = str(_exc).lower()
+        if "relation" in _msg or "does not exist" in _msg or "undefined" in _msg:
+            st.warning("Kör migration 004 för att aktivera precision-statistik.")
+        else:
+            st.error(f"Precision-data ej tillgänglig: {_exc}")
+
+    st.divider()
+
+    # Top cities
+    st.subheader("Toppstäder")
+    try:
+        addr_rows = sb.from_("scout_leads").select("address").eq("user_id", user.id).execute().data or []
+        city_counts: dict[str, int] = {}
+        for row in addr_rows:
+            addr = row.get("address") or ""
+            parts = addr.split(",")
+            if len(parts) >= 2:
+                city = parts[-1].strip()
+                if city:
+                    city_counts[city] = city_counts.get(city, 0) + 1
+        if city_counts:
+            import pandas as _pd
+            _top = sorted(city_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+            _df_c = _pd.DataFrame(_top, columns=["Stad", "Antal leads"]).set_index("Stad")
+            st.bar_chart(_df_c)
+        else:
+            st.info("Inga leads med adressdata ännu.")
+    except Exception as _exc:
+        st.error(f"Kunde inte hämta städer: {_exc}")
+
+
 # ── Integritetspolicy ─────────────────────────────────────────────────────────
 
 def page_privacy():
     st.title("Integritetspolicy")
-    # TODO: Byt ut "Linus Bergström" mot det slutgiltiga företagsnamnet när
-    # bolagsregistrering är klar.
-    # TODO: Byt ut gdpr@solar-scout.example mot en riktig kontaktadress innan
-    # produktionssläpp.
     st.markdown(
         """
-Denna integritetspolicy beskriver hur Scout (”tjänsten”) behandlar
+Denna integritetspolicy beskriver hur Scout (“tjänsten”) behandlar
 personuppgifter i enlighet med EU:s dataskyddsförordning (GDPR), särskilt
 informationsplikten i Art. 13.
 
 ### Personuppgiftsansvarig
 
-Personuppgiftsansvarig för behandlingen är **Linus Bergström**
-(placeholder — slutgiltigt företagsnamn fylls i innan produktionssläpp).
-Kontakt för förfrågningar från registrerade: **gdpr@solar-scout.example**
-(placeholder — byts ut före lansering).
+Personuppgiftsansvarig för behandlingen är **Solar Scout AB**.
+Kontakt för förfrågningar från registrerade: **gdpr@solar-scout.se**.
 
 ### Ändamål med behandlingen
 

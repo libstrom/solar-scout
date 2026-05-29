@@ -1589,12 +1589,24 @@ def scan_city(
     _log.info("scan_city residential_areas=%d", len(residential_areas))
 
     if residential_areas:
-        # Scan all areas — inner loop breaks early when max_leads is reached.
-        # The old max_leads//5 cap caused 0 leads in large cities (e.g. Lund:
-        # 465 areas but only 2 were scanned, missing all villa suburbs).
-        max_areas = len(residential_areas)
-        _log.info("scan_city scanning %d/%d areas", max_areas, len(residential_areas))
-        for area in residential_areas[:max_areas]:
+        _log.info("scan_city scanning %d areas", len(residential_areas))
+
+        # Phase 1: Parallel OSM pre-fetch (3 workers) — overlaps network I/O
+        # across areas so each area's HTTP round-trip doesn't block the next.
+        # Returns results in original order via pool.map.
+        def _fetch_city_area(area_: dict) -> list[dict]:
+            s_, w_, n_, e_ = _center_bbox(area_["lat"], area_["lng"], radius_km=1.0)
+            try:
+                return _get_osm_buildings(s_, w_, n_, e_)
+            except Exception as exc:
+                _log.warning("scan_city OSM prefetch failed lat=%s: %s", area_["lat"], exc)
+                return []
+
+        with ThreadPoolExecutor(max_workers=3) as _pool:
+            _prefetched: list[list[dict]] = list(_pool.map(_fetch_city_area, residential_areas))
+
+        # Phase 2: Serial dedup + AI scan (scan_buildings_ai is parallel internally)
+        for area, raw_buildings in zip(residential_areas, _prefetched):
             # Remaining lead budget for AI scan
             remaining = None
             if max_leads is not None:
@@ -1606,14 +1618,9 @@ def scan_city(
             if on_area_start:
                 on_area_start(area)
 
-            a_south, a_west, a_north, a_east = _center_bbox(
-                area["lat"], area["lng"], radius_km=1.0
-            )
-            buildings = _get_osm_buildings(a_south, a_west, a_north, a_east)
-
             # Deduplicate across areas and against OSM leads
             buildings = [
-                b for b in buildings
+                b for b in raw_buildings
                 if b["osm_id"] not in seen_building_ids
                 and f"{b['lat']:.4f},{b['lng']:.4f}" not in osm_keys
             ]
@@ -1797,7 +1804,26 @@ def scan_bbox(
 
         if residential_areas:
             seen_building_ids: set[str] = set()
-            for area in residential_areas:
+
+            # Parallel OSM pre-fetch with bbox clamping (3 workers)
+            _bbox_south, _bbox_west, _bbox_north, _bbox_east = south, west, north, east
+
+            def _fetch_bbox_area(area_: dict) -> list[dict]:
+                s_, w_, n_, e_ = _center_bbox(area_["lat"], area_["lng"], radius_km=1.0)
+                s_ = max(s_, _bbox_south)
+                w_ = max(w_, _bbox_west)
+                n_ = min(n_, _bbox_north)
+                e_ = min(e_, _bbox_east)
+                try:
+                    return _get_osm_buildings(s_, w_, n_, e_)
+                except Exception as exc:
+                    _log.warning("scan_bbox OSM prefetch failed lat=%s: %s", area_["lat"], exc)
+                    return []
+
+            with ThreadPoolExecutor(max_workers=3) as _pool:
+                _prefetched: list[list[dict]] = list(_pool.map(_fetch_bbox_area, residential_areas))
+
+            for area, raw_buildings in zip(residential_areas, _prefetched):
                 remaining = None
                 if max_leads is not None:
                     remaining = max_leads - len(osm_leads) - len(all_ai_leads)
@@ -1807,18 +1833,8 @@ def scan_bbox(
                 if on_area_start:
                     on_area_start(area)
 
-                a_south, a_west, a_north, a_east = _center_bbox(
-                    area["lat"], area["lng"], radius_km=1.0
-                )
-                # Clamp to drawn bbox so we don't spill outside the user's selection
-                a_south = max(a_south, south)
-                a_west  = max(a_west,  west)
-                a_north = min(a_north, north)
-                a_east  = min(a_east,  east)
-
-                buildings = _get_osm_buildings(a_south, a_west, a_north, a_east)
                 buildings = [
-                    b for b in buildings
+                    b for b in raw_buildings
                     if b["osm_id"] not in seen_building_ids
                     and f"{b['lat']:.4f},{b['lng']:.4f}" not in osm_keys
                 ]
