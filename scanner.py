@@ -970,13 +970,12 @@ def _analyze_building(
     """
     img_bytes = _enhance_contrast(img_bytes)
     b64 = base64.standard_b64encode(img_bytes).decode()
-    sv_clause = (
-        "\n\nA street-level photo of the SAME property follows the aerial image. "
+    sv_notice = (
+        "A street-level photo of the SAME property follows the aerial image. "
         "Use it as a secondary reference — solar panels on south-facing roof slopes "
         "are often clearly visible from the street. If the street-level view confirms "
         "or refutes panels, weight it heavily. If the view is obstructed or unclear, "
         "rely on the aerial image."
-        if street_view_bytes else ""
     )
     instruction = (
         "Swedish aerial orthophoto, ~50m wide, top-down view. "
@@ -1026,7 +1025,6 @@ def _analyze_building(
         "HOUSE=YES or HOUSE=NO\n"
         "SOLAR=YES or SOLAR=UNSURE or SOLAR=NO\n"
         "(SOLAR=NO whenever HOUSE=NO)"
-        + sv_clause
     )
     try:
         system_blocks: list[dict] = [
@@ -1055,7 +1053,7 @@ def _analyze_building(
             ]
             if street_view_bytes:
                 sv_b64 = base64.standard_b64encode(street_view_bytes).decode()
-                final_content.append({"type": "text", "text": "Street-level view of the same property:"})
+                final_content.append({"type": "text", "text": sv_notice})
                 final_content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": sv_b64}})
             msgs.append({"role": "user", "content": final_content})
         else:
@@ -1064,7 +1062,7 @@ def _analyze_building(
             ]
             if street_view_bytes:
                 sv_b64 = base64.standard_b64encode(street_view_bytes).decode()
-                final_content.append({"type": "text", "text": "Street-level view of the same property:"})
+                final_content.append({"type": "text", "text": sv_notice})
                 final_content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": sv_b64}})
             msgs = [{"role": "user", "content": final_content}]
         msg = client.messages.create(
@@ -1085,8 +1083,15 @@ def _analyze_building(
             if line.strip():
                 reasoning = line.strip()
                 break
-        _log.debug("_analyze_building HOUSE=%s SOLAR=%s UNSURE=%s few_shot=%s sv=%s",
-                   is_house, has_solar, is_unsure, bool(few_shot), bool(street_view_bytes))
+        u = msg.usage
+        _log.debug(
+            "_analyze_building HOUSE=%s SOLAR=%s UNSURE=%s few_shot=%s sv=%s "
+            "cache_read=%s cache_write=%s input=%s",
+            is_house, has_solar, is_unsure, bool(few_shot), bool(street_view_bytes),
+            getattr(u, "cache_read_input_tokens", 0),
+            getattr(u, "cache_creation_input_tokens", 0),
+            u.input_tokens,
+        )
         return is_house, has_solar, is_unsure, reasoning
     except anthropic.RateLimitError as exc:
         raise APIQuotaExceededError("Anthropic", "429 rate limit") from exc
