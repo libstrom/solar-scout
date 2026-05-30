@@ -1,0 +1,22 @@
+{
+  "tests": [
+    {
+      "name": "t1",
+      "prompt": "Jag har fastnat i detaljer. Vad är viktigast just nu i projektet?",
+      "assertions": [
+        "Reorients toward the goal of getting more or better leads to David",
+        "Asks or considers what is currently blocking the goal",
+        "Frames priorities by value per hour rather than technical elegance",
+        "Mentions what can wait or is secondary"
+      ]
+    },
+    {
+      "name": "t2",
+      "prompt": "Bygger vi rätt saker?",
+      "assertions": [
+        "Anchors the answer to the goal: David getting leads and selling batteries",
+        "Treats lead quality or quantity as the primary measure"
+      ]
+    }
+  ]
+}

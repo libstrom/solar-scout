@@ -1,0 +1,23 @@
+{
+  "tests": [
+    {
+      "name": "t1",
+      "prompt": "Jag ska lägga till en ny funktion i scanner.py.",
+      "assertions": [
+        "Recommends writing a failing test first before writing the code",
+        "Mentions writing the minimal code to make the test pass",
+        "Mentions a refactor step after the test is green",
+        "Mentions running the full test suite",
+        "Mentions mocking external calls like Overpass, Anthropic, or Google"
+      ]
+    },
+    {
+      "name": "t2",
+      "prompt": "Varför ska testet fallera först?",
+      "assertions": [
+        "Explains that a test that never fails does not actually verify anything",
+        "Describes the red-green-refactor cycle"
+      ]
+    }
+  ]
+}

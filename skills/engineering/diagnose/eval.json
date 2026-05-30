@@ -1,0 +1,23 @@
+{
+  "tests": [
+    {
+      "name": "t1",
+      "prompt": "David säger att scanningen inte funkar i produktion.",
+      "assertions": [
+        "Mentions checking application logs for crashes or exceptions",
+        "Mentions checking the database (Supabase) connectivity or rows",
+        "References the scan-debug skill or pipeline for 0-lead issues",
+        "Proceeds in a defined diagnostic order rather than guessing"
+      ]
+    },
+    {
+      "name": "t2",
+      "prompt": "Betalningen gick igenom men användaren fick inga credits.",
+      "assertions": [
+        "Mentions checking the Stripe webhook or payment events",
+        "Mentions checking the database for the credit or row update",
+        "Suggests verifying logs for errors during the webhook handling"
+      ]
+    }
+  ]
+}

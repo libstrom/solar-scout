@@ -1,0 +1,23 @@
+{
+  "tests": [
+    {
+      "name": "t1",
+      "prompt": "Skriv en PRD för en ny dashboard-feature.",
+      "assertions": [
+        "Starts with the problem rather than the solution",
+        "Includes measurable goals",
+        "Defines non-goals to limit scope",
+        "Describes a user flow",
+        "Identifies risks or things that could go wrong"
+      ]
+    },
+    {
+      "name": "t2",
+      "prompt": "Vad är viktigast att börja med i en PRD?",
+      "assertions": [
+        "Emphasizes starting with the problem, not the solution",
+        "Mentions that goals should be measurable"
+      ]
+    }
+  ]
+}

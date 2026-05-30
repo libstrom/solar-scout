@@ -1,0 +1,23 @@
+{
+  "tests": [
+    {
+      "name": "t1",
+      "prompt": "En ny bugg kom in: kartan laddar inte. Triagea den.",
+      "assertions": [
+        "Mentions reproducing the bug before fixing it",
+        "Categorizes the report as bug, feature, or question",
+        "Assigns a priority level (P0 to P3 or similar)",
+        "Mentions adding labels",
+        "Mentions assigning it or putting it in the backlog"
+      ]
+    },
+    {
+      "name": "t2",
+      "prompt": "Produktionen är nere och David kan inte jobba. Vilken prioritet?",
+      "assertions": [
+        "Classifies this as the highest priority (P0 or critical)",
+        "Advises dropping other work to address it"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "tests": [
+    {
+      "name": "t1",
+      "prompt": "Jag vill testa en ny scan-strategi utan att riskera produktionen.",
+      "assertions": [
+        "Recommends building in a new file or module instead of editing app.py or scanner.py directly",
+        "Mentions building the smallest version that works first",
+        "Mentions testing the prototype in isolation",
+        "Mentions integrating behind a flag or in a separate page",
+        "Mentions showing the result to David or getting feedback"
+      ]
+    },
+    {
+      "name": "t2",
+      "prompt": "Jag har en idé om en ny UI-komponent.",
+      "assertions": [
+        "Recommends building it in a separate file or Streamlit page",
+        "Advises against touching production code until the prototype works",
+        "Mentions iterating based on feedback"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "tests": [
+    {
+      "name": "t1",
+      "prompt": "Jag har en stor idé: dynamisk few-shot från Davids bekräftade leads. Bryt ner i issues.",
+      "assertions": [
+        "Breaks the idea down into small, independent issues",
+        "Each issue has a clear title and description",
+        "Mentions acceptance criteria for the issues",
+        "Mentions adding labels",
+        "Mentions creating the issues via GitHub (gh CLI or MCP)"
+      ]
+    },
+    {
+      "name": "t2",
+      "prompt": "Hur stor ska en issue vara?",
+      "assertions": [
+        "Recommends one issue equals one thing or one concern",
+        "Mentions including acceptance criteria"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "tests": [
+    {
+      "name": "t1",
+      "prompt": "Kör autoresearch på leads-now-skillen.",
+      "assertions": [
+        "Mentions running skills/eval/skill_improve.py",
+        "References the --skill argument pointing at the SKILL.md",
+        "Mentions scoring the skill against assertions before improving",
+        "Mentions that improvements are kept (committed) and regressions reverted",
+        "Mentions verifying the API key is available before running"
+      ]
+    },
+    {
+      "name": "t2",
+      "prompt": "Vad gör autoresearch-loopen egentligen?",
+      "assertions": [
+        "Describes scoring, making one targeted change, and re-scoring",
+        "Mentions keeping the change if the score improves and reverting otherwise",
+        "Mentions it repeats until a perfect score or max iterations"
+      ]
+    }
+  ]
+}

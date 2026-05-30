@@ -1,0 +1,23 @@
+{
+  "tests": [
+    {
+      "name": "t1",
+      "prompt": "Jag vill lägga till requests i requirements.txt.",
+      "assertions": [
+        "Recommends pinning the version with == for direct dependencies",
+        "Mentions running the test suite after adding the dependency",
+        "Mentions testing locally with pip install before deploying",
+        "Mentions verifying the app still starts"
+      ]
+    },
+    {
+      "name": "t2",
+      "prompt": "Ett paket funkar lokalt men kraschar i produktion, varför?",
+      "assertions": [
+        "Identifies version mismatch or unpinned dependency as a likely cause",
+        "Recommends pinning the exact version with ==",
+        "Mentions verifying the deploy or production build goes green"
+      ]
+    }
+  ]
+}

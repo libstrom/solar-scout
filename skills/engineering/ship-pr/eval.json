@@ -1,0 +1,23 @@
+{
+  "tests": [
+    {
+      "name": "t1",
+      "prompt": "Min feature är klar, hur shippar jag den?",
+      "assertions": [
+        "Mentions running the test suite before shipping",
+        "Mentions syntax-checking app.py or scanner.py",
+        "Mentions not committing or merging on the main/master branch",
+        "Mentions writing a clear commit message that explains why",
+        "Mentions creating a PR and waiting for CI"
+      ]
+    },
+    {
+      "name": "t2",
+      "prompt": "Kan jag merga även om testerna är röda?",
+      "assertions": [
+        "Clearly advises against merging with red or failing tests",
+        "Recommends fixing the failing tests first"
+      ]
+    }
+  ]
+}
