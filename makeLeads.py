@@ -484,8 +484,7 @@ _SHEET_THEMES = {
 
 
 def make_dashboard(wb, int_rows, kop_rows, sal_rows, all_rows):
-    ws = wb.active
-    ws.title = '📊 DASHBOARD'
+    ws = wb.create_sheet('📊 DASHBOARD')
     ws.sheet_view.showGridLines = False
     ws.column_dimensions['A'].width = 28
     ws.column_dimensions['B'].width = 16
@@ -930,6 +929,7 @@ def main():
     n_tot = len(all_rows)
     print(f'Bygger Excel ({n_tot} aktiva leads + {len(sal_rows)} säljare, 6 flikar) ...')
     wb = Workbook()
+    wb.remove(wb.active)  # remove default blank sheet before creating named sheets
     make_dashboard(wb, int_rows, kop_rows, sal_rows, all_rows)
     make_top50(wb, all_rows)
     make_leads_sheet(wb, int_rows, '🟢 Intressenter',
