@@ -8,6 +8,7 @@ Get David actual solar leads as fast as possible. Skip everything else.
 Är scannern igång?
   Ja → Gå direkt till appen, scanna en stad, spara leads
   Nej → Starta appen lokalt: streamlit run app.py
+         Startar inte? → kolla loggarna i terminalen efter felmeddelanden
 
 Fungerar scanningen?
   Ort-läge fungerar → Använd det, rita-läge är sekundärt
