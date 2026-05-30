@@ -41,11 +41,11 @@ _log = logging.getLogger("skill_improve")
 
 def _read_api_key() -> str:
     """Try every place the key could live — env var, .streamlit/secrets.toml, app.py _secret."""
-    # 1. Explicit env vars (Railway injects these in production)
+    # 1. Explicit env vars
     key = os.getenv("SOLAR_SCOUT_ANTHROPIC_KEY") or os.getenv("ANTHROPIC_API_KEY")
     if key:
         return key
-    # 2. .streamlit/secrets.toml (local dev / Railway secrets file)
+    # 2. .streamlit/secrets.toml (local dev)
     try:
         import tomllib
         secrets_path = Path(__file__).parent.parent.parent / ".streamlit" / "secrets.toml"
@@ -67,6 +67,10 @@ def _read_api_key() -> str:
             return key
     except Exception:
         pass
+    # 4. Claude Code web / proxy environment — ANTHROPIC_BASE_URL handles auth,
+    #    the SDK only needs a non-empty api_key string as a placeholder.
+    if os.getenv("ANTHROPIC_BASE_URL"):
+        return "proxy-auth"
     return ""
 
 ANTHROPIC_API_KEY = _read_api_key()
