@@ -115,9 +115,7 @@ def score_lead(byggår_str, kontakttyp, besdat_str, telefon, email, energy=None)
     if kontakttyp == 'Köpare':
         points += 30; reasons.append('Köpare/nuv. ägare (+30)')
     elif kontakttyp == 'Intressent':
-        points += 20; reasons.append('Intressent/visning (+20)')
-    else:
-        points += 8;  reasons.append('Säljare/har flyttat (+8)')
+        points += 30; reasons.append('Intressent/ny ägare via säljarbesiktning (+30)')
 
     # ── Besiktningsdatum ─────────────────────────────────────────────────────
     bd = yr(besdat_str)
@@ -275,9 +273,6 @@ def best_contact(b):
                       'besdat':  r.get('besdat', prop.get('besdat','')),
                       'byggår':  r.get('byggår',  prop.get('byggår',''))}
             return 'Intressent', merged, []
-    for r in b['saljare']:
-        if r['telefon'] or r['email']:
-            return 'Säljare', r, b['intressenter']
     return None, None, []
 
 
@@ -482,8 +477,8 @@ def make_ringlista(wb, rows):
     ws.add_data_validation(dv_status)
     ws.add_data_validation(dv_saljare)
 
-    TYPE_FILL = {'Köpare': F(GRN), 'Intressent': F(YLW), 'Säljare': F(ORG)}
-    TYPE_FILL_HOT = {'Köpare': F('C8E6C9'), 'Intressent': F('FFF176'), 'Säljare': F('FFCC80')}
+    TYPE_FILL = {'Intressent': F(GRN), 'Köpare': F(YLW)}
+    TYPE_FILL_HOT = {'Intressent': F('C8E6C9'), 'Köpare': F('FFF176')}
 
     # Pre-create shared style objects — avoids re-allocating per cell
     _border_std  = border()
@@ -497,9 +492,8 @@ def make_ringlista(wb, rows):
     _bkt_fills   = {'☀️🔋 SOL + BATTERI': (F('FFF8E1'), Fn(bold=True, color='E65100', size=10)),
                     '☀️ SOL':              (F('E8F5E9'), Fn(bold=True, color='1B5E20', size=10)),
                     '🔋 BATTERI / VP':     (F('E3F2FD'), Fn(bold=True, color='1565C0', size=10))}
-    _typ_fonts   = {'Köpare':     Fn(bold=True, size=9, color=GRN2),
-                    'Intressent': Fn(bold=True, size=9, color=YLW2),
-                    'Säljare':    Fn(bold=True, size=9, color=ORG2)}
+    _typ_fonts   = {'Intressent': Fn(bold=True, size=9, color=GRN2),
+                    'Köpare':     Fn(bold=True, size=9, color=YLW2)}
     _score_fonts = {c: Fn(bold=True, size=12, color=c)
                     for c in ('B71C1C','E65100','F9A825','555555')}
 
@@ -603,11 +597,11 @@ def make_scoring(wb):
         row3(r, factor, pts, note); r += 1
     r += 1
 
-    hdr(r, 'Kontakttyp (max 30p)'); r += 1
+    hdr(r, 'Kontakttyp (max 35p)'); r += 1
     for f, p, n in [
+        ('Intressent', '+30', 'Ny ägare via säljarbesiktning — bor på fastigheten'),
         ('Köpare',     '+30', 'Bor på fastigheten nu — direkt beslutare'),
-        ('Intressent', '+20', 'Var på visning — troligen ny ägare'),
-        ('Säljare',    '+8',  'Har flyttat — lägre sannolikhet'),
+        ('Säljare',    'EJ',  'Har flyttat — ingår ej i ringlistan'),
     ]:
         row3(r, f, p, n); r += 1
     r += 1
@@ -663,9 +657,8 @@ def make_oversikt(wb, rows):
 
     stats = Counter(row[14] for row in rows)
     hdr(r, 'Kontakttyp'); r += 1
-    kv(r, '🟢  Köpare',      stats['Köpare'],     GRN2); r += 1
-    kv(r, '🟡  Intressent',  stats['Intressent'], YLW2); r += 1
-    kv(r, '🟠  Säljare',     stats['Säljare'],    ORG2); r += 1
+    kv(r, '🟢  Intressent',  stats['Intressent'], GRN2); r += 1
+    kv(r, '🟡  Köpare',      stats['Köpare'],     YLW2); r += 1
     kv(r, '    Totalt',       sum(stats.values()), BLU);  r += 2
 
     score_dist = Counter()
@@ -764,6 +757,7 @@ def main():
     rows = []
     stats = Counter()
     energy_matched = 0
+    n_saljare = sum(1 for b in by_fastig.values() if b['saljare'] and not b['kopare'] and not b['intressenter'])
 
     for fastig, b in by_fastig.items():
         typ, r, ints = best_contact(b)
@@ -830,9 +824,9 @@ def main():
     sb    = sum(1 for r in rows if r[1] == '☀️🔋 SOL + BATTERI')
 
     print(f'\n=== Klar ===')
+    print(f'  Intressent:       {stats["Intressent"]}  (hetast — letar villa)')
     print(f'  Köpare:           {stats["Köpare"]}')
-    print(f'  Intressent:       {stats["Intressent"]}')
-    print(f'  Säljare:          {stats["Säljare"]}')
+    print(f'  Säljare (borttagna): {n_saljare} — har flyttat, ej ringbara')
     if energy_index:
         print(f'  Med energidata:   {energy_matched} / {len(rows)} ({energy_matched*100//max(len(rows),1)}% träff)')
     print(f'  Score ≥ 70 (het): {hot}')
