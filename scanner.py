@@ -1065,6 +1065,15 @@ def _analyze_building(
             if line.strip():
                 reasoning = line.strip()
                 break
+        usage = getattr(msg, "usage", None)
+        if usage is not None:
+            _log.debug(
+                "_analyze_building usage: input=%s cache_read=%s cache_create=%s output=%s",
+                getattr(usage, "input_tokens", 0),
+                getattr(usage, "cache_read_input_tokens", 0),
+                getattr(usage, "cache_creation_input_tokens", 0),
+                getattr(usage, "output_tokens", 0),
+            )
         _log.debug("_analyze_building HOUSE=%s SOLAR=%s UNSURE=%s few_shot=%s sv=%s",
                    is_house, has_solar, is_unsure, bool(few_shot), bool(street_view_bytes))
         return is_house, has_solar, is_unsure, reasoning
