@@ -1,22 +1,26 @@
 {
+  "skill": "to-issues",
+  "description": "Tests that to-issues breaks a plan into independently-grabbable vertical-slice issues with acceptance criteria",
   "tests": [
     {
-      "name": "t1",
+      "id": "t1",
       "prompt": "Jag har en stor idé: dynamisk few-shot från Davids bekräftade leads. Bryt ner i issues.",
+      "expected_output_description": "Vertical tracer-bullet slices, each end-to-end, with acceptance criteria and dependency order",
       "assertions": [
-        "Breaks the idea down into small, independent issues",
-        "Each issue has a clear title and description",
-        "Mentions acceptance criteria for the issues",
-        "Mentions adding labels",
-        "Mentions creating the issues via GitHub (gh CLI or MCP)"
+        {"id": "t1.a1", "check": "Output breaks the idea into multiple small, independent issues"},
+        {"id": "t1.a2", "check": "Output describes each slice as a thin vertical slice cutting end-to-end through layers, not a horizontal layer"},
+        {"id": "t1.a3", "check": "Output includes acceptance criteria for the issues"},
+        {"id": "t1.a4", "check": "Output mentions dependency order or which issues block others"},
+        {"id": "t1.a5", "check": "Output mentions confirming the breakdown with the user before publishing"}
       ]
     },
     {
-      "name": "t2",
+      "id": "t2",
       "prompt": "Hur stor ska en issue vara?",
+      "expected_output_description": "Thin vertical slice, demoable on its own",
       "assertions": [
-        "Recommends one issue equals one thing or one concern",
-        "Mentions including acceptance criteria"
+        {"id": "t2.a1", "check": "Output recommends many thin slices over few thick ones"},
+        {"id": "t2.a2", "check": "Output states each slice should be independently demoable or verifiable"}
       ]
     }
   ]

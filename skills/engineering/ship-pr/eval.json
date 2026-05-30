@@ -1,22 +1,26 @@
 {
+  "skill": "ship-pr",
+  "description": "Tests that ship-pr verifies green tests, opens a draft PR, triggers CodeRabbit, and never merges on a protected branch carelessly",
   "tests": [
     {
-      "name": "t1",
+      "id": "t1",
       "prompt": "Min feature är klar, hur shippar jag den?",
+      "expected_output_description": "Verify tests + syntax, push, open draft PR, trigger CodeRabbit, then squash-merge",
       "assertions": [
-        "Mentions running the test suite before shipping",
-        "Mentions syntax-checking app.py or scanner.py",
-        "Mentions not committing or merging on the main/master branch",
-        "Mentions writing a clear commit message that explains why",
-        "Mentions creating a PR and waiting for CI"
+        {"id": "t1.a1", "check": "Output mentions running the test suite (pytest) and it must be green before shipping"},
+        {"id": "t1.a2", "check": "Output mentions opening a DRAFT pull request"},
+        {"id": "t1.a3", "check": "Output mentions triggering CodeRabbit review (e.g. @coderabbitai review) because drafts are skipped"},
+        {"id": "t1.a4", "check": "Output mentions that merging main deploys to production via Railway, so the user should confirm before merge"},
+        {"id": "t1.a5", "check": "Output mentions using GitHub MCP tools rather than a gh CLI"}
       ]
     },
     {
-      "name": "t2",
+      "id": "t2",
       "prompt": "Kan jag merga även om testerna är röda?",
+      "expected_output_description": "Clearly says no, fix tests first",
       "assertions": [
-        "Clearly advises against merging with red or failing tests",
-        "Recommends fixing the failing tests first"
+        {"id": "t2.a1", "check": "Output clearly advises against merging with red or failing tests"},
+        {"id": "t2.a2", "check": "Output recommends fixing the failing tests before shipping"}
       ]
     }
   ]

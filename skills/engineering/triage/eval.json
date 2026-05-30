@@ -1,22 +1,26 @@
 {
+  "skill": "triage",
+  "description": "Tests that triage applies one category + one state role, reproduces bugs, and uses the AI disclaimer on posts",
   "tests": [
     {
-      "name": "t1",
+      "id": "t1",
       "prompt": "En ny bugg kom in: kartan laddar inte. Triagea den.",
+      "expected_output_description": "Gather context, attempt repro, recommend category + state role, post with disclaimer",
       "assertions": [
-        "Mentions reproducing the bug before fixing it",
-        "Categorizes the report as bug, feature, or question",
-        "Assigns a priority level (P0 to P3 or similar)",
-        "Mentions adding labels",
-        "Mentions assigning it or putting it in the backlog"
+        {"id": "t1.a1", "check": "Output attempts or mentions reproducing the bug before deciding"},
+        {"id": "t1.a2", "check": "Output assigns a category role (bug or enhancement)"},
+        {"id": "t1.a3", "check": "Output assigns a state role (needs-triage, needs-info, ready-for-agent, ready-for-human, or wontfix)"},
+        {"id": "t1.a4", "check": "Output mentions that any posted comment must start with the AI-generated disclaimer"},
+        {"id": "t1.a5", "check": "Output mentions exploring the codebase to build context for the issue"}
       ]
     },
     {
-      "name": "t2",
-      "prompt": "Produktionen är nere och David kan inte jobba. Vilken prioritet?",
+      "id": "t2",
+      "prompt": "En issue är fullständigt specad och redo för en AFK-agent. Vilken label?",
+      "expected_output_description": "ready-for-agent with an agent brief",
       "assertions": [
-        "Classifies this as the highest priority (P0 or critical)",
-        "Advises dropping other work to address it"
+        {"id": "t2.a1", "check": "Output recommends the ready-for-agent state role"},
+        {"id": "t2.a2", "check": "Output mentions posting an agent brief for the issue"}
       ]
     }
   ]

@@ -1,22 +1,27 @@
 {
+  "skill": "diagnose",
+  "description": "Tests that diagnose builds a feedback loop and reproduces before hypothesising, then fixes with a regression test",
   "tests": [
     {
-      "name": "t1",
-      "prompt": "David säger att scanningen inte funkar i produktion.",
+      "id": "t1",
+      "prompt": "David säger att scanningen inte funkar i produktion. Diagnostisera.",
+      "expected_output_description": "Build a reproduction loop first, reproduce, then ranked hypotheses",
       "assertions": [
-        "Mentions checking application logs for crashes or exceptions",
-        "Mentions checking the database (Supabase) connectivity or rows",
-        "References the scan-debug skill or pipeline for 0-lead issues",
-        "Proceeds in a defined diagnostic order rather than guessing"
+        {"id": "t1.a1", "check": "Output prioritizes building a reproduction / feedback loop before attempting a fix"},
+        {"id": "t1.a2", "check": "Output mentions reproducing the actual failure the user described before hypothesising"},
+        {"id": "t1.a3", "check": "Output generates multiple (e.g. 3-5) ranked, falsifiable hypotheses rather than guessing one cause"},
+        {"id": "t1.a4", "check": "Output mentions checking logs or instrumenting the failing code path"},
+        {"id": "t1.a5", "check": "Output mentions a regression test or verifying the original repro no longer reproduces after the fix"}
       ]
     },
     {
-      "name": "t2",
+      "id": "t2",
       "prompt": "Betalningen gick igenom men användaren fick inga credits.",
+      "expected_output_description": "Reproduce the webhook path, hypothesise, instrument",
       "assertions": [
-        "Mentions checking the Stripe webhook or payment events",
-        "Mentions checking the database for the credit or row update",
-        "Suggests verifying logs for errors during the webhook handling"
+        {"id": "t2.a1", "check": "Output mentions building a way to reproduce or replay the payment/webhook event"},
+        {"id": "t2.a2", "check": "Output lists more than one falsifiable hypothesis for where the credit grant fails"},
+        {"id": "t2.a3", "check": "Output mentions instrumenting or checking logs at the boundaries (Stripe webhook, DB update)"}
       ]
     }
   ]

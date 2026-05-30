@@ -1,22 +1,26 @@
 {
+  "skill": "tdd",
+  "description": "Tests that tdd enforces vertical red-green-refactor slices testing behavior through public interfaces, not implementation",
   "tests": [
     {
-      "name": "t1",
+      "id": "t1",
       "prompt": "Jag ska lägga till en ny funktion i scanner.py.",
+      "expected_output_description": "Write one failing test, minimal code to pass, refactor, repeat — vertical slices",
       "assertions": [
-        "Recommends writing a failing test first before writing the code",
-        "Mentions writing the minimal code to make the test pass",
-        "Mentions a refactor step after the test is green",
-        "Mentions running the full test suite",
-        "Mentions mocking external calls like Overpass, Anthropic, or Google"
+        {"id": "t1.a1", "check": "Output recommends writing a failing test first before writing the implementation"},
+        {"id": "t1.a2", "check": "Output mentions writing only the minimal code needed to make the test pass"},
+        {"id": "t1.a3", "check": "Output describes a refactor step after the test is green"},
+        {"id": "t1.a4", "check": "Output advises one test at a time (vertical slices), not writing all tests up front"},
+        {"id": "t1.a5", "check": "Output mentions testing observable behavior through the public interface, not implementation details"}
       ]
     },
     {
-      "name": "t2",
+      "id": "t2",
       "prompt": "Varför ska testet fallera först?",
+      "expected_output_description": "A test that never fails verifies nothing",
       "assertions": [
-        "Explains that a test that never fails does not actually verify anything",
-        "Describes the red-green-refactor cycle"
+        {"id": "t2.a1", "check": "Output explains that a test which never fails does not actually verify anything"},
+        {"id": "t2.a2", "check": "Output references the red-green-refactor cycle"}
       ]
     }
   ]

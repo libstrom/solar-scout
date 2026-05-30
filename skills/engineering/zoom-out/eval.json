@@ -1,21 +1,25 @@
 {
+  "skill": "zoom-out",
+  "description": "Tests that zoom-out gives a higher-level map of modules and callers using the project's domain vocabulary",
   "tests": [
     {
-      "name": "t1",
-      "prompt": "Jag har fastnat i detaljer. Vad är viktigast just nu i projektet?",
+      "id": "t1",
+      "prompt": "Jag känner inte till scanner.py väl. Zooma ut.",
+      "expected_output_description": "A map of the relevant modules and their callers, one layer up",
       "assertions": [
-        "Reorients toward the goal of getting more or better leads to David",
-        "Asks or considers what is currently blocking the goal",
-        "Frames priorities by value per hour rather than technical elegance",
-        "Mentions what can wait or is secondary"
+        {"id": "t1.a1", "check": "Output gives a higher-level overview rather than a line-by-line code reading"},
+        {"id": "t1.a2", "check": "Output maps multiple modules and how they relate or call each other"},
+        {"id": "t1.a3", "check": "Output uses the project's domain vocabulary (e.g. leads, scan, residential areas, OSM, AI analysis)"},
+        {"id": "t1.a4", "check": "Output identifies callers or entry points into the area of code"}
       ]
     },
     {
-      "name": "t2",
-      "prompt": "Bygger vi rätt saker?",
+      "id": "t2",
+      "prompt": "Hur hänger scan_city, scan_bbox och scan_buildings_ai ihop?",
+      "expected_output_description": "Explains the call hierarchy at a high level",
       "assertions": [
-        "Anchors the answer to the goal: David getting leads and selling batteries",
-        "Treats lead quality or quantity as the primary measure"
+        {"id": "t2.a1", "check": "Output explains the relationship/hierarchy between the functions rather than dumping their full code"},
+        {"id": "t2.a2", "check": "Output describes the overall scan flow these functions participate in"}
       ]
     }
   ]
