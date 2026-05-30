@@ -360,6 +360,41 @@ def _send_meeting_email(address: str, note: str, lat: float | None, lng: float |
         return False
 
 
+def _send_sale_alert(address: str, note: str, lat: float | None, lng: float | None, user_email: str = "") -> bool:
+    """Skicka provisionslarm till Linus när David markerar ett lead som 'kund'."""
+    api_key = _secret("RESEND_API_KEY")
+    if not api_key:
+        _log.warning("RESEND_API_KEY saknas — provisionsmail skickas ej")
+        return False
+    maps = f"https://maps.google.com/?q={lat},{lng}" if lat and lng else ""
+    body = (
+        f"☀️ PROVISION — ett lead har blivit kund!\n\n"
+        f"Adress:    {address}\n"
+        f"Notering:  {note or '–'}\n"
+        f"Hittad av: Solar Scout (AI-scanning)\n"
+        f"David:     {user_email or 'okänd'}\n"
+        f"{('Karta: ' + maps) if maps else ''}\n\n"
+        f"Logga in på solar-scout.streamlit.app och kontrollera provisionen."
+    )
+    try:
+        resp = httpx.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "from":    "Solar Scout <onboarding@resend.dev>",
+                "to":      ["linus.bergstrom@enspectaenergi.se", "fenomenetmusic@gmail.com"],
+                "subject": f"☀️ PROVISION — kund via Solar Scout: {address}",
+                "text":    body,
+            },
+            timeout=8,
+        )
+        resp.raise_for_status()
+        _log.info("provisionsmail skickat för %s", address)
+        return True
+    except Exception as _e:
+        _log.warning("provisionsmail misslyckades: %s", _e)
+        return False
+
 def _send_quota_alert(api: str, detail: str) -> None:
     """Skicka akut mail till ägaren när ett API-konto tar slut på pengar/tokens."""
     api_key = _secret("RESEND_API_KEY")
@@ -1811,7 +1846,19 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
                             if sent:
                                 st.success("📧 Mail skickat till Linus!")
                             else:
-                                st.info("Status sparad. (Konfigurera SMTP för automatiskt mail)")
+                                st.warning("⚠️ Mötet sparat, men mail till Linus misslyckades. Ring honom direkt.")
+                        # Skicka provisionslarm om lead precis blivit kund
+                        elif new_status == "kund" and cur_status != "kund":
+                            _user_email = getattr(user, "email", "") if user else ""
+                            sent = _send_sale_alert(
+                                addr, new_note,
+                                c_row.get("lat"), c_row.get("lng"),
+                                user_email=_user_email,
+                            )
+                            if sent:
+                                st.success("✅ Kund sparad! Linus har fått ett provisionsmail.")
+                            else:
+                                st.warning("✅ Kund sparad. (Provisionsmail misslyckades — kontakta Linus manuellt.)")
                         else:
                             st.success("Sparat.")
                         st.rerun()
