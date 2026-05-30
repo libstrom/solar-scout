@@ -348,8 +348,52 @@ TOP_COLS = [
 TOP_IDX = [0, None, 1, 5, 6, 8, 10, 13, 14, 18, 23]
 
 
+def _build_row(fastig, r, typ, int0, energy_index):
+    """Build a data row list from a contact record."""
+    int0    = int0 or {}
+    bår     = r.get('byggår', '')
+    besdat  = r.get('besdat','') or r.get('besiktningsdatum','')
+    tel     = r.get('telefon','')
+    epost   = r.get('email','')
+    ort_str = tc(r.get('ort',''))
+    adr_str = r.get('adress','')
+    namn    = r.get('namn','')
+    energy  = energy_index.get(fastig)
+    sc, sc_why = score_lead(bår, typ, besdat, tel, epost, energy)
+    bkt        = bucket(sc, bår, energy)
+    pitch      = pitch_text(namn, adr_str, ort_str, bår, bkt, energy)
+    ek_str     = (energy.get('energiklass') or '') if energy else ''
+    return [
+        sc,                                                          # 0  Score
+        bkt,                                                         # 1  Bucket
+        '',                                                          # 2  Status
+        '',                                                          # 3  Säljare
+        '',                                                          # 4  Nästa kontakt
+        namn,                                                        # 5  Namn
+        tel,                                                         # 6  Telefon
+        epost,                                                       # 7  E-post
+        adr_str,                                                     # 8  Adress
+        r.get('postnr',''),                                          # 9  Postnr
+        ort_str,                                                     # 10 Ort
+        tc(r.get('kommun','')),                                      # 11 Kommun
+        bår,                                                         # 12 Byggår
+        ek_str,                                                      # 13 Energiklass
+        typ,                                                         # 14 Kontakttyp
+        r.get('namn2','') if r.get('namn2') != namn else '',         # 15 Namn 2
+        int0.get('namn',''),                                         # 16 Intressent namn
+        int0.get('telefon',''),                                      # 17 Intressent tel
+        pitch,                                                       # 18 Pitch-text
+        sc_why,                                                      # 19 Score-förklaring
+        besdat,                                                      # 20 Besiktningsdatum
+        r.get('renovat',''),                                         # 21 Renoverat
+        tc(fastig),                                                  # 22 Fastighetsbeteckning
+        '',                                                          # 23 Anteckningar
+        r.get('case_id',''),                                         # 24 CaseID
+    ], energy is not None
+
+
 def make_top50(wb, rows, n=50):
-    ws = wb.create_sheet('🔥 TOP 50', 0)
+    ws = wb.create_sheet('🔥 TOP 50')
     ws.sheet_view.showGridLines = False
     top = rows[:n]
     LC = get_column_letter(len(TOP_COLS))
@@ -432,9 +476,121 @@ def make_top50(wb, rows, n=50):
         ws.column_dimensions[get_column_letter(ci)].width = w
 
 
-def make_ringlista(wb, rows):
+_SHEET_THEMES = {
+    'Intressenter': ('1B5E20', 'E8F5E9', '33691E', 'C8E6C9', 'Intressenter'),
+    'Köpare':       ('E65100', 'FFF3E0', 'BF360C', 'FFCC80', 'Köpare'),
+    'Säljare':      ('4A148C', 'F3E5F5', '38006B', 'E1BEE7', 'Säljare'),
+}
+
+
+def make_dashboard(wb, int_rows, kop_rows, sal_rows, all_rows):
     ws = wb.active
-    ws.title = 'Ringlista'
+    ws.title = '📊 DASHBOARD'
+    ws.sheet_view.showGridLines = False
+    ws.column_dimensions['A'].width = 28
+    ws.column_dimensions['B'].width = 16
+    ws.column_dimensions['C'].width = 16
+    ws.column_dimensions['D'].width = 16
+
+    def banner(r, txt, bg, fg='FFFFFF', sz=14):
+        ws.merge_cells(f'A{r}:D{r}')
+        c = ws.cell(r, 1, txt)
+        c.font = Fn(bold=True, size=sz, color=fg)
+        c.fill = F(bg); c.alignment = Alignment(horizontal='center', vertical='center')
+        ws.row_dimensions[r].height = 36
+
+    def stat_box(r, c, label, val, bg, fg):
+        cell = ws.cell(r, c, val)
+        cell.font = Fn(bold=True, size=20, color=fg)
+        cell.fill = F(bg)
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+        ws.row_dimensions[r].height = 40
+        lbl = ws.cell(r+1, c, label)
+        lbl.font = Fn(size=9, color='555555', italic=True)
+        lbl.fill = F(bg)
+        lbl.alignment = Alignment(horizontal='center', vertical='center')
+        ws.row_dimensions[r+1].height = 18
+
+    def section(r, txt):
+        ws.merge_cells(f'A{r}:D{r}')
+        c = ws.cell(r, 1, txt)
+        c.font = Fn(bold=True, size=11, color=BLU)
+        c.fill = F(BLU3)
+        ws.row_dimensions[r].height = 22
+
+    banner(1, f'☀️  ENSPECTA SOLAR LEADS  •  {date.today()}', BLU, sz=15)
+    banner(2, 'Klar ringlista med energidata — ring Intressenter och Köpare först', '283593', sz=10)
+
+    # Big stats row
+    ws.row_dimensions[4].height = 40
+    total = len(all_rows)
+    hot   = sum(1 for r in all_rows if r[0] >= 70)
+    stat_box(4, 1, 'TOTALT LEADS',     total,         'E8EAF6', BLU)
+    stat_box(4, 2, '🟢 INTRESSENTER',  len(int_rows), 'E8F5E9', '1B5E20')
+    stat_box(4, 3, '🟡 KÖPARE',        len(kop_rows), 'FFF3E0', 'E65100')
+    stat_box(4, 4, '🔥 HETA (≥70p)',   hot,           'FFEBEE', 'B71C1C')
+    ws.row_dimensions[6].height = 6  # spacer
+
+    # Score distribution
+    section(7, '  Score-fördelning')
+    score_dist = [
+        ('🔴  ≥ 70  Heta leads',    sum(1 for r in all_rows if r[0] >= 70),  'B71C1C'),
+        ('🟠  55–69  Varma leads',   sum(1 for r in all_rows if 55 <= r[0] < 70), 'E65100'),
+        ('🟡  40–54  OK leads',      sum(1 for r in all_rows if 40 <= r[0] < 55), 'F9A825'),
+        ('⚪  < 40  Kalla leads',    sum(1 for r in all_rows if r[0] < 40),   '888888'),
+    ]
+    r = 8
+    for lbl, cnt, col in score_dist:
+        pct = cnt / max(total, 1)
+        bar = '█' * round(pct * 20)
+        ws.cell(r, 1, lbl).font = Fn(bold=True, size=10, color=col)
+        ws.cell(r, 2, cnt).font = Fn(bold=True, size=11, color=col)
+        ws.cell(r, 2).alignment = Alignment(horizontal='right')
+        ws.cell(r, 3, f'{pct:.0%}').font = Fn(size=10, color='555555')
+        ws.cell(r, 4, bar).font = Fn(name='Consolas', size=10, color=col)
+        ws.row_dimensions[r].height = 20; r += 1
+
+    r += 1
+    # Top 10 kommuner
+    section(r, '  Topp 10 kommuner  (alla leads)'); r += 1
+    ws.cell(r, 1, 'Kommun').font = Fn(bold=True, size=10)
+    ws.cell(r, 2, 'Leads').font  = Fn(bold=True, size=10)
+    ws.cell(r, 2).alignment = Alignment(horizontal='right')
+    ws.cell(r, 3, 'Intressenter').font = Fn(bold=True, size=10)
+    ws.cell(r, 3).alignment = Alignment(horizontal='right')
+    ws.cell(r, 4, 'Köpare').font = Fn(bold=True, size=10)
+    ws.cell(r, 4).alignment = Alignment(horizontal='right')
+    ws.row_dimensions[r].height = 18; r += 1
+    int_kom  = Counter(x[11] for x in int_rows if x[11])
+    kop_kom  = Counter(x[11] for x in kop_rows if x[11])
+    all_kom  = Counter(x[11] for x in all_rows if x[11])
+    for kom, cnt in all_kom.most_common(10):
+        ws.cell(r, 1, kom)
+        ws.cell(r, 2, cnt).alignment = Alignment(horizontal='right')
+        ws.cell(r, 3, int_kom.get(kom, 0)).alignment = Alignment(horizontal='right')
+        ws.cell(r, 4, kop_kom.get(kom, 0)).alignment = Alignment(horizontal='right')
+        ws.row_dimensions[r].height = 18; r += 1
+
+    r += 1
+    # Instruktioner
+    section(r, '  Hur använder du listan?'); r += 1
+    tips = [
+        '1. Börja med fliken 🔥 TOP 50 — ring dessa dag 1',
+        '2. 🟢 Intressenter = var med vid säljarbesiktning → letar fortfarande villa',
+        '3. 🟡 Köpare = köparbesiktning → bor på fastigheten nu',
+        '4. Filtrera på Kommun för daglig körning (hela Huskvarna en vecka)',
+        '5. Sätt Status = "Bokad möte" så raden färgas grön automatiskt',
+        '6. Ladda upp energy-data.json för exakt Energiklass per fastighet',
+    ]
+    for tip in tips:
+        ws.cell(r, 1, tip).font = Fn(size=10)
+        ws.merge_cells(f'A{r}:D{r}')
+        ws.row_dimensions[r].height = 18; r += 1
+
+
+def make_leads_sheet(wb, rows, title, banner_txt, hdr_hex, light_hex, table_name, use_active=False):
+    ws = wb.active if use_active else wb.create_sheet(title)
+    if use_active: ws.title = title
     ws.sheet_view.showGridLines = False
     ncols = len(COLS)
     LC = get_column_letter(ncols)
@@ -442,31 +598,28 @@ def make_ringlista(wb, rows):
     # Banner
     ws.merge_cells(f'A1:{LC}1')
     b = ws['A1']
-    b.value = ('☀️  ENSPECTA LEADS — Telefon-mötesbokning  |  '
-               'Sortera Score högt→lågt  •  Filtrera Ort för daglig körning  •  '
-               'Pitch-text i kolumn R — klistra in i mötesbok')
+    b.value = banner_txt
     b.font = Fn(bold=True, size=11, color='FFFFFF')
-    b.fill = F(BLU)
+    b.fill = F(hdr_hex)
     b.alignment = Alignment(horizontal='center', vertical='center')
     ws.row_dimensions[1].height = 28
 
     # Guide-rad
     ws.merge_cells(f'A2:{LC}2')
     g = ws['A2']
-    g.value = ('FILTER:  Score ▾ → sortera fallande  •  Status = "Ej kontaktad"  •  '
-               'Bucket = "☀️🔋 SOL + BATTERI"  •  Kommun = valfritt område')
-    g.font  = Fn(size=10, color=BLU, italic=True)
-    g.fill  = F(BLU3)
+    g.value = 'FILTER:  Score ▾ → sortera fallande  •  Status = "Ej kontaktad"  •  Bucket = "☀️🔋 SOL + BATTERI"  •  Kommun = valfritt område'
+    g.font  = Fn(size=10, color=hdr_hex, italic=True)
+    g.fill  = F(light_hex)
     g.alignment = Alignment(horizontal='left', vertical='center')
     ws.row_dimensions[2].height = 20
 
     # Headers
     for ci, (h, _) in enumerate(COLS, 1):
         c = ws.cell(3, ci, h)
-        c.fill = F(BLU2)
+        c.fill = F(hdr_hex)
         c.font = Fn(bold=True, color='FFFFFF', size=10)
         c.alignment = Alignment(horizontal='center', vertical='center')
-        c.border = border('1A237E')
+        c.border = border(hdr_hex)
     ws.row_dimensions[3].height = 24
 
     # Validations
@@ -477,8 +630,9 @@ def make_ringlista(wb, rows):
     ws.add_data_validation(dv_status)
     ws.add_data_validation(dv_saljare)
 
-    TYPE_FILL = {'Intressent': F(GRN), 'Köpare': F(YLW)}
-    TYPE_FILL_HOT = {'Intressent': F('C8E6C9'), 'Köpare': F('FFF176')}
+    HOT_FILL  = F('FFF8E1')
+    WARM_FILL = F(light_hex)
+    COLD_FILL = F('FAFAFA')
 
     # Pre-create shared style objects — avoids re-allocating per cell
     _border_std  = border()
@@ -492,18 +646,14 @@ def make_ringlista(wb, rows):
     _bkt_fills   = {'☀️🔋 SOL + BATTERI': (F('FFF8E1'), Fn(bold=True, color='E65100', size=10)),
                     '☀️ SOL':              (F('E8F5E9'), Fn(bold=True, color='1B5E20', size=10)),
                     '🔋 BATTERI / VP':     (F('E3F2FD'), Fn(bold=True, color='1565C0', size=10))}
-    _typ_fonts   = {'Intressent': Fn(bold=True, size=9, color=GRN2),
-                    'Köpare':     Fn(bold=True, size=9, color=YLW2)}
     _score_fonts = {c: Fn(bold=True, size=12, color=c)
                     for c in ('B71C1C','E65100','F9A825','555555')}
 
     for ri, row in enumerate(rows, 4):
         sc   = row[0]
-        typ  = row[14]   # Kontakttyp at index 14
         hot  = sc >= 70
-        rfill = TYPE_FILL_HOT.get(typ, F('FFFDE7')) if hot else TYPE_FILL.get(typ, F('FAFAFA'))
+        rfill = HOT_FILL if hot else (WARM_FILL if sc >= 45 else COLD_FILL)
         sc_font = _score_fonts[score_color(sc)]
-        typ_font = _typ_fonts.get(typ, Fn(bold=True, size=9))
 
         for ci, val in enumerate(row, 1):
             c = ws.cell(ri, ci, val)
@@ -530,7 +680,7 @@ def make_ringlista(wb, rows):
                 c.font = Fn(bold=True, size=11, color=ek_colors.get(val or '', '555555'))
                 c.alignment = _align_ctr
             elif ci == 15:  # Kontakttyp
-                c.font = typ_font
+                c.font = Fn(bold=True, size=9, color=hdr_hex)
             elif ci == 19:  # Pitch-text
                 c.font = _font_pitch
                 c.alignment = _align_wrap
@@ -539,8 +689,8 @@ def make_ringlista(wb, rows):
 
         ws.row_dimensions[ri].height = 32 if hot else 20
 
-    # Excel Table
-    tbl = Table(displayName='Leads', ref=f'A3:{LC}{len(rows)+3}')
+    # Excel Table — unique name per sheet
+    tbl = Table(displayName=table_name, ref=f'A3:{LC}{len(rows)+3}')
     tbl.tableStyleInfo = TableStyleInfo(
         name='TableStyleLight1',
         showFirstColumn=False, showLastColumn=False,
@@ -754,84 +904,59 @@ def main():
     print(f'  {len(by_fastig)} unika fastigheter')
 
     print('Scorar och bygger rader ...')
-    rows = []
-    stats = Counter()
+    int_rows = []; kop_rows = []; sal_rows = []
     energy_matched = 0
-    n_saljare = sum(1 for b in by_fastig.values() if b['saljare'] and not b['kopare'] and not b['intressenter'])
 
     for fastig, b in by_fastig.items():
         typ, r, ints = best_contact(b)
-        if not r: continue
-        stats[typ] += 1
-        int0 = ints[0] if ints and typ != 'Intressent' else {}
+        if r:
+            int0 = ints[0] if ints and typ != 'Intressent' else {}
+            row, matched = _build_row(fastig, r, typ, int0, energy_index)
+            if matched: energy_matched += 1
+            if typ == 'Intressent': int_rows.append(row)
+            else:                   kop_rows.append(row)
+        else:
+            # Collect säljare with any contact info for separate sheet
+            for s in b['saljare']:
+                if s.get('telefon') or s.get('email'):
+                    row, _ = _build_row(fastig, s, 'Säljare', {}, energy_index)
+                    sal_rows.append(row)
 
-        bår     = r.get('byggår', '')
-        besdat  = r.get('besdat','') or r.get('besiktningsdatum','')
-        tel     = r.get('telefon','')
-        epost   = r.get('email','')
-        ort_str = tc(r.get('ort',''))
-        adr_str = r.get('adress','')
-        namn    = r.get('namn','')
+    int_rows.sort(key=lambda r: -r[0])
+    kop_rows.sort(key=lambda r: -r[0])
+    sal_rows.sort(key=lambda r: -r[0])
+    all_rows = int_rows + kop_rows
 
-        energy  = energy_index.get(fastig)   # fastig is already normalized
-        if energy: energy_matched += 1
-
-        sc, sc_why = score_lead(bår, typ, besdat, tel, epost, energy)
-        bkt        = bucket(sc, bår, energy)
-        pitch      = pitch_text(namn, adr_str, ort_str, bår, bkt, energy)
-
-        ek_str = (energy.get('energiklass') or '') if energy else ''
-        rows.append([
-            sc,                                                          # 0  Score
-            bkt,                                                         # 1  Bucket
-            '',                                                          # 2  Status
-            '',                                                          # 3  Säljare
-            '',                                                          # 4  Nästa kontakt
-            namn,                                                        # 5  Namn
-            tel,                                                         # 6  Telefon
-            epost,                                                       # 7  E-post
-            adr_str,                                                     # 8  Adress
-            r.get('postnr',''),                                          # 9  Postnr
-            ort_str,                                                     # 10 Ort
-            tc(r.get('kommun','')),                                      # 11 Kommun
-            bår,                                                         # 12 Byggår
-            ek_str,                                                      # 13 Energiklass
-            typ,                                                         # 14 Kontakttyp
-            r.get('namn2','') if r.get('namn2')!=namn else '',           # 15 Namn 2
-            int0.get('namn',''),                                         # 16 Intressent namn
-            int0.get('telefon',''),                                      # 17 Intressent tel
-            pitch,                                                       # 18 Pitch-text
-            sc_why,                                                      # 19 Score-förklaring
-            besdat,                                                      # 20 Besiktningsdatum
-            r.get('renovat',''),                                         # 21 Renoverat
-            tc(fastig),                                                  # 22 Fastighetsbeteckning
-            '',                                                          # 23 Anteckningar
-            r.get('case_id',''),                                         # 24 CaseID
-        ])
-
-    rows.sort(key=lambda r: -r[0])   # Score fallande
-
-    print(f'Bygger Excel ({len(rows)} rader, 4 flikar) ...')
+    n_tot = len(all_rows)
+    print(f'Bygger Excel ({n_tot} aktiva leads + {len(sal_rows)} säljare, 6 flikar) ...')
     wb = Workbook()
-    make_ringlista(wb, rows)   # uses wb.active (default sheet) — must run before any insert
-    make_top50(wb, rows)       # inserts at index 0 → becomes first tab
+    make_dashboard(wb, int_rows, kop_rows, sal_rows, all_rows)
+    make_top50(wb, all_rows)
+    make_leads_sheet(wb, int_rows, '🟢 Intressenter',
+        '🟢  INTRESSENTER — Var med vid säljarbesiktning — ring med pitch om ny installation',
+        '1B5E20', 'E8F5E9', 'TblIntressenter')
+    make_leads_sheet(wb, kop_rows, '🟡 Köpare',
+        '🟡  KÖPARE — Köparbesiktning — bor på fastigheten nu — direkt beslutare',
+        'E65100', 'FFF3E0', 'TblKopare')
+    make_leads_sheet(wb, sal_rows, '🟠 Säljare',
+        '🟠  SÄLJARE — Beställde säljarbesiktning — kan ha bytt adress — ring för referens/nytt hem',
+        '4A148C', 'F3E5F5', 'TblSaljare')
     make_scoring(wb)
-    make_oversikt(wb, rows)
     wb.save(out_path)
 
-    hot   = sum(1 for r in rows if r[0] >= 70)
-    warm  = sum(1 for r in rows if 55 <= r[0] < 70)
-    sb    = sum(1 for r in rows if r[1] == '☀️🔋 SOL + BATTERI')
+    hot  = sum(1 for r in all_rows if r[0] >= 70)
+    warm = sum(1 for r in all_rows if 55 <= r[0] < 70)
+    sb   = sum(1 for r in all_rows if r[1] == '☀️🔋 SOL + BATTERI')
 
     print(f'\n=== Klar ===')
-    print(f'  Intressent:       {stats["Intressent"]}  (hetast — letar villa)')
-    print(f'  Köpare:           {stats["Köpare"]}')
-    print(f'  Säljare (borttagna): {n_saljare} — har flyttat, ej ringbara')
+    print(f'  🟢 Intressenter:     {len(int_rows)}  (hetast)')
+    print(f'  🟡 Köpare:           {len(kop_rows)}')
+    print(f'  🟠 Säljare (separat):{len(sal_rows)}  (har bytt adress)')
     if energy_index:
-        print(f'  Med energidata:   {energy_matched} / {len(rows)} ({energy_matched*100//max(len(rows),1)}% träff)')
-    print(f'  Score ≥ 70 (het): {hot}')
-    print(f'  Score 55–69:      {warm}')
-    print(f'  SOL+BATTERI:      {sb}')
+        print(f'  Med energidata:    {energy_matched} / {n_tot} ({energy_matched*100//max(n_tot,1)}% träff)')
+    print(f'  Score ≥ 70 (het):  {hot}')
+    print(f'  Score 55–69:       {warm}')
+    print(f'  SOL+BATTERI:       {sb}')
     print(f'\nSparad till: {out_path}')
     print('Tips: Sortera Score fallande → de hetaste leadsen överst.')
 
