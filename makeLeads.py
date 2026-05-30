@@ -129,7 +129,7 @@ def score_lead(byggår_str, kontakttyp, besdat_str, telefon, email, energy=None)
     if telefon: points += 8; reasons.append('Har telefon (+8)')
     if email:   points += 4; reasons.append('Har e-post (+4)')
 
-    return min(max(points, 0), 100), ' | '.join(reasons)
+    return max(points, 0), ' | '.join(reasons)
 
 
 def bucket(score, byggår_str, energy=None):
