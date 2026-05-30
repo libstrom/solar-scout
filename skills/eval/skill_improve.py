@@ -153,11 +153,15 @@ def run_skill(skill_content: str, test_prompt: str) -> str:
     response = client.messages.create(
         model=EVAL_MODEL,
         max_tokens=1500,
-        system=(
-            "You are Claude Code executing the following skill. "
-            "Follow its instructions precisely and produce the output it describes.\n\n"
-            f"<skill>\n{skill_content}\n</skill>"
-        ),
+        system=[{
+            "type": "text",
+            "text": (
+                "You are Claude Code executing the following skill. "
+                "Follow its instructions precisely and produce the output it describes.\n\n"
+                f"<skill>\n{skill_content}\n</skill>"
+            ),
+            "cache_control": {"type": "ephemeral"},
+        }],
         messages=[{"role": "user", "content": test_prompt}],
     )
     return response.content[0].text
@@ -169,11 +173,15 @@ def check_assertion(output: str, assertion: dict) -> AssertionResult:
     response = client.messages.create(
         model=EVAL_MODEL,
         max_tokens=100,
-        system=(
-            "You are a precise binary evaluator. "
-            "Given a text output and an assertion, determine if the assertion is TRUE or FALSE. "
-            "Answer with exactly one word: 'true' or 'false', followed by a brief reason."
-        ),
+        system=[{
+            "type": "text",
+            "text": (
+                "You are a precise binary evaluator. "
+                "Given a text output and an assertion, determine if the assertion is TRUE or FALSE. "
+                "Answer with exactly one word: 'true' or 'false', followed by a brief reason."
+            ),
+            "cache_control": {"type": "ephemeral"},
+        }],
         messages=[{
             "role": "user",
             "content": (
@@ -237,12 +245,16 @@ def improve_skill(skill_path: str, failures: list[AssertionResult], iteration: i
     response = client.messages.create(
         model=IMPROVE_MODEL,
         max_tokens=3000,
-        system=(
-            "You are improving a Claude Code skill file (skill.md). "
-            "Make exactly ONE targeted change to address the failing assertions. "
-            "Be surgical — add a rule, clarify an instruction, or add an example. "
-            "Do not rewrite the whole file. Return the COMPLETE updated skill.md content."
-        ),
+        system=[{
+            "type": "text",
+            "text": (
+                "You are improving a Claude Code skill file (skill.md). "
+                "Make exactly ONE targeted change to address the failing assertions. "
+                "Be surgical — add a rule, clarify an instruction, or add an example. "
+                "Do not rewrite the whole file. Return the COMPLETE updated skill.md content."
+            ),
+            "cache_control": {"type": "ephemeral"},
+        }],
         messages=[{
             "role": "user",
             "content": (

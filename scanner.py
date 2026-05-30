@@ -1156,11 +1156,14 @@ def _analyze_building_opus(
         })
 
     try:
+        system_blocks: list[dict] = [
+            {"type": "text", "text": instruction, "cache_control": {"type": "ephemeral"}}
+        ]
         resp = client.messages.create(
             model="claude-opus-4-8",
             max_tokens=4096,
             thinking={"type": "enabled", "budget_tokens": 1024},
-            system=instruction,
+            system=system_blocks,
             messages=[{"role": "user", "content": final_content}],
         )
         raw = ""
