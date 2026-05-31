@@ -3,7 +3,9 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const RESEND_API_KEY = Deno.env.get("RESEND_API_KEY") || "";
+const NOTYFILE_TOKEN = Deno.env.get("NOTYFILE_TOKEN") || "";
 const WEBHOOK_SECRET = Deno.env.get("NOTYFILE_WEBHOOK_SECRET") || "";
+const NOTYFILE_BASE = "https://api.notyfile.se/v1";
 
 const ALERT_EMAILS = [
   "linus.bergstrom@enspectaenergi.se",
@@ -17,7 +19,6 @@ Deno.serve(async (req) => {
     return new Response("Method not allowed", { status: 405 });
   }
 
-  // Optional shared secret — set NOTYFILE_WEBHOOK_SECRET in Supabase if Notyfile supports it
   if (WEBHOOK_SECRET) {
     const sig =
       req.headers.get("X-Notyfile-Secret") ||
@@ -35,12 +36,19 @@ Deno.serve(async (req) => {
     return new Response("Invalid JSON", { status: 400 });
   }
 
-  // Notyfile may wrap customer under a "customer" key or send it flat
-  const customer = (body.customer as Record<string, unknown>) ?? body;
+  const eventType = String(body.event ?? body.event_type ?? body.type ?? "okänd");
+  console.log("[notyfile-webhook] Event:", eventType, JSON.stringify(body).slice(0, 400));
+
+  // Resolve customer object — payload may nest it, or we fetch it by id
+  const customer = await resolveCustomer(body);
+  if (!customer) {
+    console.log("[notyfile-webhook] Kunde inte hitta kunddata i payload");
+    return json({ ok: true, matched: false, reason: "no_customer" });
+  }
 
   const street = String(customer.customer_adress ?? customer.address ?? "").trim();
   if (!street) {
-    console.log("[notyfile-webhook] Payload har ingen adress:", JSON.stringify(body).slice(0, 300));
+    console.log("[notyfile-webhook] Kunden har ingen adress — customer_id:", customer.id);
     return json({ ok: true, matched: false, reason: "no_address" });
   }
 
@@ -48,27 +56,62 @@ Deno.serve(async (req) => {
   const city = String(customer.customer_city ?? customer.city ?? "").trim();
   const incomingAddress = [street, zip, city].filter(Boolean).join(", ");
 
-  const matches = await findMatchingLeads(street, zip, city);
-
+  const matches = await findMatchingLeads(street);
   if (matches.length === 0) {
     console.log("[notyfile-webhook] Ingen träff för:", incomingAddress);
     return json({ ok: true, matched: false, address: incomingAddress });
   }
 
-  const customerName = String(
-    customer.customer_name ?? body.customer_name ?? "Okänd kund"
-  );
-  const customerId = String(customer.id ?? body.id ?? body.customer_id ?? "");
+  const customerName = String(customer.customer_name ?? "Okänd kund");
+  const customerId = String(customer.id ?? "");
 
   for (const lead of matches) {
-    await sendMatchEmail(customerName, customerId, incomingAddress, lead);
+    await sendMatchEmail(customerName, customerId, incomingAddress, eventType, lead);
   }
 
   console.log(`[notyfile-webhook] ${matches.length} träff(ar) för: ${incomingAddress}`);
   return json({ ok: true, matched: true, count: matches.length, address: incomingAddress });
 });
 
-// ── address helpers ─────────────────────────────────────────────────────────
+// ── resolve customer ─────────────────────────────────────────────────────────
+
+async function resolveCustomer(
+  body: Record<string, unknown>
+): Promise<Record<string, unknown> | null> {
+  // 1. Payload contains inline customer object with address
+  const inline =
+    (body.customer as Record<string, unknown>) ??
+    (body.deal?.customer as Record<string, unknown>) ??
+    (body.meeting?.customer as Record<string, unknown>) ??
+    null;
+
+  if (inline?.customer_adress || inline?.address) return inline;
+
+  // 2. Extract customer_id from various payload shapes and fetch from Notyfile
+  const customerId =
+    inline?.id ??
+    body.customer_id ??
+    (body.deal as Record<string, unknown>)?.customer_id ??
+    (body.meeting as Record<string, unknown>)?.customer_id ??
+    body.id;
+
+  if (!customerId || !NOTYFILE_TOKEN) return inline ?? null;
+
+  try {
+    const res = await fetch(`${NOTYFILE_BASE}/customers/${customerId}`, {
+      headers: { Authorization: `Bearer ${NOTYFILE_TOKEN}` },
+    });
+    if (!res.ok) return inline ?? null;
+    const data = await res.json();
+    // Notyfile wraps response: { results: { data: { ... } } }
+    return data?.results?.data ?? data ?? null;
+  } catch (err) {
+    console.error("[notyfile-webhook] Kunde inte hämta kund:", err);
+    return inline ?? null;
+  }
+}
+
+// ── address matching ─────────────────────────────────────────────────────────
 
 function normalize(s: string): string {
   return s
@@ -78,17 +121,11 @@ function normalize(s: string): string {
     .trim();
 }
 
-/** Extract "streetname housenumber" — drop zip/city so we compare street only */
 function streetKey(s: string): string {
-  // Take text before the first comma (or full string if no comma)
   return normalize(s.split(",")[0]);
 }
 
-async function findMatchingLeads(
-  street: string,
-  _zip: string,
-  _city: string
-): Promise<Record<string, unknown>[]> {
+async function findMatchingLeads(street: string): Promise<Record<string, unknown>[]> {
   const { data, error } = await supabase
     .from("scout_leads")
     .select("id, address, status, lat, lng, maps_url")
@@ -101,7 +138,7 @@ async function findMatchingLeads(
   }
 
   const inKey = streetKey(street);
-  if (inKey.length < 4) return []; // too short to match reliably
+  if (inKey.length < 4) return [];
 
   return data.filter((lead) => {
     const leadKey = streetKey(String(lead.address ?? ""));
@@ -111,35 +148,38 @@ async function findMatchingLeads(
 
 // ── email ────────────────────────────────────────────────────────────────────
 
+const EVENT_LABELS: Record<string, string> = {
+  "affär skapad": "Affär skapad",
+  "möte skapad": "Möte skapad",
+  deal_created: "Affär skapad",
+  meeting_created: "Möte skapad",
+};
+
 async function sendMatchEmail(
   customerName: string,
   customerId: string,
   address: string,
+  eventType: string,
   lead: Record<string, unknown>
 ) {
   if (!RESEND_API_KEY) {
-    console.error("[notyfile-webhook] RESEND_API_KEY saknas — mail skickas ej");
+    console.error("[notyfile-webhook] RESEND_API_KEY saknas");
     return;
   }
 
+  const eventLabel = EVENT_LABELS[eventType.toLowerCase()] ?? eventType;
   const mapsLink =
     lead.maps_url ||
-    (lead.lat && lead.lng
-      ? `https://maps.google.com/?q=${lead.lat},${lead.lng}`
-      : null);
-
-  const notyfileLink = customerId
-    ? `https://app.notyfile.se/customers/${customerId}`
-    : null;
+    (lead.lat && lead.lng ? `https://maps.google.com/?q=${lead.lat},${lead.lng}` : null);
+  const notyfileLink = customerId ? `https://app.notyfile.se/customers/${customerId}` : null;
 
   const rows = [
+    ["Händelse", eventLabel],
     ["Kund i Notyfile", customerName],
     ["Adress", address],
     ["Lead-status i Solar Scout", String(lead.status ?? "okänd")],
     mapsLink ? ["Satellitbild", `<a href="${mapsLink}">Google Maps</a>`] : null,
-    notyfileLink
-      ? ["Notyfile", `<a href="${notyfileLink}">Öppna kund</a>`]
-      : null,
+    notyfileLink ? ["Notyfile", `<a href="${notyfileLink}">Öppna kund</a>`] : null,
   ]
     .filter(Boolean)
     .map(
@@ -151,7 +191,7 @@ async function sendMatchEmail(
 
   const html = `
 <h2 style="color:#f59e0b">☀️ Provision-alert: Solar Scout-lead matchar Notyfile-kund</h2>
-<p>En kund som just registrerats/uppdaterats i Notyfile har samma adress som ett lead i Solar Scout-databasen.</p>
+<p>En kund i Notyfile har samma adress som ett lead i Solar Scout-databasen.</p>
 <table style="border-collapse:collapse;font-family:sans-serif;font-size:14px">
 ${rows}
 </table>
@@ -167,17 +207,13 @@ ${rows}
     body: JSON.stringify({
       from: "Solar Scout <onboarding@resend.dev>",
       to: ALERT_EMAILS,
-      subject: `☀️ PROVISION — Notyfile-kund matchar Solar Scout: ${address}`,
+      subject: `☀️ PROVISION — ${eventLabel}: ${customerName} · ${address}`,
       html,
     }),
   });
 
   if (!res.ok) {
-    console.error(
-      "[notyfile-webhook] Resend-fel:",
-      res.status,
-      await res.text().catch(() => "")
-    );
+    console.error("[notyfile-webhook] Resend-fel:", res.status, await res.text().catch(() => ""));
   }
 }
 
