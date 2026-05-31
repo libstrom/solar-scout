@@ -1505,16 +1505,21 @@ def scan_city(
     phase_callback: Callable[[str, int], None] | None = None,
     skip_tile_keys: frozenset[str] = frozenset(),
     user_id: str | None = None,
+    budget: "BudgetTracker | None" = None,
 ) -> tuple[list[Lead], ScanStats]:
     """Scan a city for buildings with solar panels.
 
     Args:
         max_leads: Stop scanning once this many confirmed leads are found.
                    None means no limit.
+        budget: Optional shared BudgetTracker. If None, a default 5000 kr tracker
+                is created. Callers can inspect budget.stopped_over_budget after.
 
     Returns:
         A tuple of (leads, stats) where stats aggregates yes/unsure/no counts.
     """
+    if budget is None:
+        budget = BudgetTracker(budget_sek=DEFAULT_BUDGET_SEK)
     _log.info("scan_city city=%s max_leads=%s", city_name, max_leads)
     gmaps = googlemaps.Client(key=google_key)
     results = gmaps.geocode(city_name)
@@ -1601,6 +1606,7 @@ def scan_city(
                 mapbox_key=mapbox_key, lm_key=lm_key,
                 max_leads=remaining, few_shot=few_shot,
                 skip_tile_keys=skip_tile_keys,
+                budget=budget,
             )
             _log.info("scan_city area_leads=%d", len(area_leads))
             all_ai_leads.extend(area_leads)
@@ -1608,13 +1614,15 @@ def scan_city(
             merged_stats.unsure += area_stats.unsure
             merged_stats.no += area_stats.no
 
+            if budget.stopped_over_budget:
+                break
             if max_leads is not None and len(osm_leads) + len(all_ai_leads) >= max_leads:
                 break
 
         # Glesbygd-pass: scan hela viewport utan landuse-filter.
         # Hus utanför residential-polygoner (landsbygd, ~20-30% av villor) missas
         # annars helt. Deduplicera via seen_building_ids.
-        if len(osm_leads) + len(all_ai_leads) < (max_leads or 9999):
+        if not budget.stopped_over_budget and len(osm_leads) + len(all_ai_leads) < (max_leads or 9999):
             remaining = None
             if max_leads is not None:
                 remaining = max_leads - len(osm_leads) - len(all_ai_leads)
@@ -1632,6 +1640,7 @@ def scan_city(
                         mapbox_key=mapbox_key, lm_key=lm_key,
                         max_leads=remaining, few_shot=few_shot,
                         skip_tile_keys=skip_tile_keys,
+                        budget=budget,
                     )
                     _log.info("scan_city glesbygd_leads=%d", len(glesbygd_leads))
                     all_ai_leads.extend(glesbygd_leads)
@@ -1657,6 +1666,7 @@ def scan_city(
             mapbox_key=mapbox_key, lm_key=lm_key,
             max_leads=remaining, few_shot=few_shot,
             skip_tile_keys=skip_tile_keys,
+            budget=budget,
         )
 
     merged = merge_leads(osm_leads, all_ai_leads)
@@ -1754,12 +1764,19 @@ def scan_bbox(
     phase_callback: Callable[[str, int], None] | None = None,
     skip_tile_keys: frozenset[str] = frozenset(),
     user_id: str | None = None,
+    budget: "BudgetTracker | None" = None,
 ) -> tuple[list[Lead], ScanStats]:
     """Scan a bounding box for buildings with solar panels.
+
+    Args:
+        budget: Optional shared BudgetTracker. If None, a default 5000 kr tracker
+                is created. Callers can inspect budget.stopped_over_budget after.
 
     Returns:
         A tuple of (leads, stats) where stats aggregates yes/unsure/no counts.
     """
+    if budget is None:
+        budget = BudgetTracker(budget_sek=DEFAULT_BUDGET_SEK)
     tile_count = len(_bbox_tiles(south, west, north, east))
 
     # OSM solar tags: instant, works for any bbox size
@@ -1823,12 +1840,15 @@ def scan_bbox(
                     mapbox_key=mapbox_key, lm_key=lm_key,
                     max_leads=remaining, few_shot=few_shot,
                     skip_tile_keys=skip_tile_keys,
+                    budget=budget,
                 )
                 all_ai_leads.extend(area_leads)
                 merged_stats.yes    += area_stats.yes
                 merged_stats.unsure += area_stats.unsure
                 merged_stats.no     += area_stats.no
 
+                if budget.stopped_over_budget:
+                    break
                 if max_leads is not None and len(osm_leads) + len(all_ai_leads) >= max_leads:
                     break
         else:
@@ -1844,6 +1864,7 @@ def scan_bbox(
                 mapbox_key=mapbox_key, lm_key=lm_key,
                 max_leads=remaining, few_shot=few_shot,
                 skip_tile_keys=skip_tile_keys,
+                budget=budget,
             )
     else:
         # Small bbox (≤ ~2 km²): direct scan, no chunking needed
@@ -1858,6 +1879,7 @@ def scan_bbox(
             mapbox_key=mapbox_key, lm_key=lm_key,
             max_leads=remaining, few_shot=few_shot,
             skip_tile_keys=skip_tile_keys,
+            budget=budget,
         )
 
     if phase_callback:

@@ -1155,8 +1155,7 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
 
     # ── Cost estimate + confirmation ───────────────────────────────────────
     # Shown after "Starta scanning" click, before scan actually runs.
-    COST_PER_BUILDING_SEK = 0.025   # Sonnet-4-6 with cache: ~$0.0025 × 10 SEK/$
-    SOLAR_RATE = 0.08               # ~8% of SE3 villas have solar
+    _SOLAR_RATE = 0.08   # ~8% of SE3 villas have solar
 
     if start:
         if not city_name and not use_bbox:
@@ -1171,18 +1170,31 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
 
     pending = st.session_state.get("scan_pending")
     if pending:
+        from scan_cost import estimate_scan_cost, DEFAULT_BUDGET_SEK as _BUDGET_SEK
         ml = pending["max_leads"]
         # Estimate: to find N leads at 8% solar rate, analyze N/0.08 buildings
-        est_analyzed = int((ml or 200) / SOLAR_RATE)
-        est_sek = round(est_analyzed * COST_PER_BUILDING_SEK, 1)
+        est_analyzed = int((ml or 200) / _SOLAR_RATE)
+        cost_est = estimate_scan_cost(est_analyzed)
         area_label = pending["city"] or "ritat område"
 
-        st.warning(
+        if cost_est.exceeds_budget:
+            st.error(
+                f"**Scanning avbruten — för stort område**\n\n"
+                f"Uppskattad kostnad ({cost_est.high_sek:.0f} kr) överstiger "
+                f"budgettaket på {_BUDGET_SEK:.0f} kr.\n\n"
+                f"Minska max leads eller välj ett mindre område."
+            )
+            st.session_state.pop("scan_pending", None)
+            return
+
+        _warn_fn = st.warning if cost_est.requires_confirm else st.info
+        _warn_fn(
             f"**Scanningsuppskattning — {area_label}**\n\n"
             f"- Max leads: {ml or 'obegränsat'}\n"
             f"- Beräknat antal hus att analysera: ~{est_analyzed}\n"
-            f"- Beräknad kostnad: **~{est_sek} kr** (Claude Vision)\n\n"
-            f"_Faktisk kostnad kan variera beroende på hur tät bebyggelsen är._"
+            f"- Beräknad kostnad: **{cost_est.low_sek:.0f}–{cost_est.high_sek:.0f} kr** "
+            f"(förväntat ~{cost_est.expected_sek:.0f} kr)\n\n"
+            f"_Budgettak: {_BUDGET_SEK:.0f} kr — scanningen stoppas automatiskt om taket nås._"
         )
         col_yes, col_no = st.columns(2)
         confirmed = col_yes.button("✅ Ja, kör scanning", type="primary", use_container_width=True)
@@ -1303,8 +1315,10 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
             elif phase == "ai_done":
                 scan_debug.append(f"AI bekräftade solceller: {count}")
 
+        from scan_cost import BudgetTracker as _BudgetTracker, DEFAULT_BUDGET_SEK as _BUDGET_SEK
         anthr_key = ANTHROPIC_API_KEY if ai_available else None
         _log.info("scan start mode=%s ai=%s max_leads=%s", "bbox" if use_bbox else "city", bool(anthr_key), max_leads)
+        _scan_budget = _BudgetTracker(budget_sek=_BUDGET_SEK)
         leads = None
         scan_crashed = False
         try:
@@ -1314,7 +1328,7 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                     city_name, GOOGLE_API_KEY or "", anthr_key, on_progress,
                     mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads,
                     phase_callback=on_phase, skip_tile_keys=_skip_tile_keys,
-                    user_id=str(user.id),
+                    user_id=str(user.id), budget=_scan_budget,
                 )
             else:
                 status_text.info("Hämtar byggnadsdata från OSM (kan ta 20–60 s)...")
@@ -1322,7 +1336,7 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                     south, west, north, east, GOOGLE_API_KEY or "", anthr_key, on_progress,
                     mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads,
                     phase_callback=on_phase, skip_tile_keys=_skip_tile_keys,
-                    user_id=str(user.id),
+                    user_id=str(user.id), budget=_scan_budget,
                 )
         except ValueError as e:
             _log.error("scan ValueError: %s", e)
@@ -1346,6 +1360,14 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
         progress_bar.progress(1.0, text="Klar!")
         status_text.empty()
         live_leads_ph.empty()  # Full results UI renders below — no duplicate
+
+        if _scan_budget.stopped_over_budget:
+            st.warning(
+                f"⚠️ **Budgettaket på {_BUDGET_SEK:.0f} kr nåddes** — scanning stoppades automatiskt. "
+                f"Faktisk kostnad: ~{_scan_budget.spent_sek:.0f} kr · "
+                f"{_scan_budget.buildings_done} byggnader analyserade. "
+                f"Leads som hittades innan stoppet visas nedan."
+            )
 
         # On crash: fall back to the AI leads already saved progressively
         if scan_crashed:

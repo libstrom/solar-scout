@@ -142,3 +142,44 @@ def test_tracker_threadsafe_accumulation():
     # 8 trådar × 100 × 1000 = 800_000 input-tokens på Sonnet = $2.4
     expected_sek = 800_000 / 1_000_000 * SONNET_4_6.input * 10.5
     assert t.spent_sek == pytest.approx(expected_sek, rel=1e-6)
+
+
+# ── Ny funktionalitet: budget shared across multiple scan_buildings_ai calls ──
+
+def test_shared_budget_accumulates_across_calls():
+    """BudgetTracker som delas mellan flera scan_buildings_ai-anrop ska
+    ackumulera korrekt — INTE återställa till 0 kr per anrop."""
+    t = BudgetTracker(budget_sek=1000.0)
+    # Simulera tre on-by-one anrop
+    t.add_usage(input_tokens=10_000)
+    t.add_usage(input_tokens=10_000)
+    t.add_usage(input_tokens=10_000)
+    total_expected = 30_000 / 1_000_000 * SONNET_4_6.input * 10.5
+    assert t.spent_sek == pytest.approx(total_expected, rel=1e-6)
+
+
+def test_budget_stopped_over_budget_flag():
+    """stopped_over_budget startar False och kan sättas till True."""
+    t = BudgetTracker(budget_sek=100.0)
+    assert not t.stopped_over_budget
+    # Överskrid taket manuellt (som scan_buildings_ai gör i except-blocket)
+    t.add_usage(input_tokens=10_000_000)  # >>> 100 SEK
+    with pytest.raises(ScanBudgetExceededError) as exc_info:
+        t.check()
+    assert exc_info.value.spent_sek >= 100.0
+    t.stopped_over_budget = True
+    assert t.stopped_over_budget
+
+
+def test_estimate_exceeds_budget_blocks_scan():
+    """estimate_scan_cost(N) ska flagga exceeds_budget när N är för stort."""
+    # 200 000 byggnader borde spränka 5000 kr-taket
+    est = estimate_scan_cost(200_000)
+    assert est.exceeds_budget
+
+
+def test_estimate_small_scan_does_not_exceed_budget():
+    """En liten scan (600 byggnader) ska INTE överstiga 5000 kr-taket."""
+    est = estimate_scan_cost(600)
+    assert not est.exceeds_budget
+    assert est.high_sek < DEFAULT_BUDGET_SEK
