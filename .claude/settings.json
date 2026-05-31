@@ -5,7 +5,7 @@
   "enabledPlugins": {
     "superpowers@claude-plugins-official": true
   },
-  "model": "claude-opus-4-7",
+  "model": "claude-opus-4-8",
   "alwaysThinkingEnabled": true,
   "cleanupPeriodDays": 90,
   "permissions": {

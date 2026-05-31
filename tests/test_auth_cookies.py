@@ -97,10 +97,16 @@ def test_init_auth_returns_none_without_session_or_cookies():
 
     st_mock = sys.modules["streamlit"]
     st_mock.session_state = {}
-    # st.context.cookies ska också vara tom
-    st_mock.context.cookies.get.return_value = None
 
-    with patch("app._get_cookie_manager", return_value=cm):
+    # Patchä st.context.cookies.get så att den returnerar None (undviker AttributeError
+    # på riktiga Streamlit-modulen och falska positiver på MagicMock)
+    ctx_cookies = MagicMock()
+    ctx_cookies.get.return_value = None
+    ctx = MagicMock()
+    ctx.cookies = ctx_cookies
+
+    with patch("app.st.context", ctx, create=True), \
+         patch("app._get_cookie_manager", return_value=cm):
         result = app.init_auth()
 
     assert result is None
