@@ -1,0 +1,218 @@
+"""scan_cost.py — kostnadsestimat och budgetspärr för Solar Scout-scanningar.
+
+Två syften:
+  1. Visa användaren *innan* en scan vad den kan kosta (estimate_scan_cost).
+  2. Avbryta en pågående scan om den ackumulerade kostnaden når ett tak
+     (BudgetTracker + ScanBudgetExceededError).
+
+Designmål (från Linus/Ibrahim):
+  - Tydligt vad en scan kan kosta INNAN man startar.
+  - Hård spärr vid DEFAULT_BUDGET_SEK (5000 kr) — skenande kostnad ska vara omöjlig.
+  - Scans över APPROVAL_THRESHOLD_SEK kräver Ibrahims godkännande (gaten byggs i app.py).
+
+VIKTIGT: prissättningen nedan är hårdkodad och måste stämmas av mot
+Anthropic Console → Billing när modeller/priser ändras. Siffrorna är i USD per
+1 000 000 tokens (MTok), enligt Claude 4.5-familjens prislista.
+"""
+
+from __future__ import annotations
+
+import threading
+from dataclasses import dataclass, field
+
+
+# ── Prissättning ─────────────────────────────────────────────────────────────
+# USD per 1 000 000 tokens. VERIFIERA mot https://console.anthropic.com/settings/billing
+@dataclass(frozen=True)
+class ModelPricing:
+    input: float          # vanlig input
+    output: float         # output
+    cache_write: float    # skriva till prompt-cache (dyrare än input)
+    cache_read: float     # läsa från prompt-cache (mycket billigt)
+
+
+# Claude Sonnet 4.6 (4.5-familjens priser)
+SONNET_4_6 = ModelPricing(input=3.00, output=15.00, cache_write=3.75, cache_read=0.30)
+# Claude Haiku 4.5 — används om/ när prefiltret återinförs
+HAIKU_4_5 = ModelPricing(input=1.00, output=5.00, cache_write=1.25, cache_read=0.10)
+
+# Växelkurs. Justera vid behov — medvetet konservativ (hellre överskatta kostnad).
+USD_TO_SEK = 10.50
+
+# Budget-trösklar (SEK)
+DEFAULT_BUDGET_SEK = 5000.0       # hård spärr — scan avbryts här
+CONFIRM_THRESHOLD_SEK = 200.0     # över detta måste scannaren bocka i "jag förstår kostnaden"
+APPROVAL_THRESHOLD_SEK = CONFIRM_THRESHOLD_SEK  # bakåtkompat-alias
+
+
+# ── Token-antaganden per byggnad ─────────────────────────────────────────────
+# Grundade på _analyze_building: en satellitbild + cachad systemprompt/few-shot,
+# output max 220 tokens. UNSURE-fall triggar ett extra Street View-anrop.
+CACHED_CONTEXT_TOKENS = 11_000    # systemprompt + upp till 8 few-shot-bilder (cachas en gång)
+SATELLITE_IMG_TOKENS = 1_500      # en färsk satellitbild per byggnad (ej cachad)
+STREETVIEW_IMG_TOKENS = 1_500     # extra bild när modellen är osäker
+OUTPUT_TOKENS = 220               # max_tokens i _analyze_building
+
+# Andel byggnader som blir UNSURE och drar ett extra Street View-anrop.
+# Lågt/förväntat/högt — ger ett spann i estimatet.
+UNSURE_FRACTION_LOW = 0.05
+UNSURE_FRACTION_EXPECTED = 0.15
+UNSURE_FRACTION_HIGH = 0.35
+
+
+def _cost_usd(tokens: int, rate_per_mtok: float) -> float:
+    return tokens / 1_000_000 * rate_per_mtok
+
+
+def _per_building_usd(unsure_fraction: float, pricing: ModelPricing = SONNET_4_6) -> float:
+    """Förväntad kostnad (USD) för en byggnad i steady state (cachen redan varm)."""
+    cache_read = _cost_usd(CACHED_CONTEXT_TOKENS, pricing.cache_read)
+    fresh_input = _cost_usd(SATELLITE_IMG_TOKENS, pricing.input)
+    output = _cost_usd(OUTPUT_TOKENS, pricing.output)
+    base = cache_read + fresh_input + output
+    # extra Street View-anrop för en andel av byggnaderna (ny input-bild + output)
+    sv_extra = unsure_fraction * (
+        _cost_usd(STREETVIEW_IMG_TOKENS, pricing.input)
+        + _cost_usd(CACHED_CONTEXT_TOKENS, pricing.cache_read)
+        + _cost_usd(OUTPUT_TOKENS, pricing.output)
+    )
+    return base + sv_extra
+
+
+@dataclass
+class CostEstimate:
+    n_buildings: int
+    low_sek: float
+    expected_sek: float
+    high_sek: float
+    per_building_sek: float
+    requires_approval: bool
+    exceeds_budget: bool
+
+    @property
+    def requires_confirm(self) -> bool:
+        """Alias — scannaren måste bocka i "jag förstår kostnaden" först."""
+        return self.requires_approval
+
+    def summary(self) -> str:
+        return (
+            f"~{self.n_buildings} byggnader · est. "
+            f"{self.expected_sek:.0f} kr "
+            f"(spann {self.low_sek:.0f}–{self.high_sek:.0f} kr)"
+        )
+
+
+def estimate_scan_cost(
+    n_buildings: int,
+    budget_sek: float = DEFAULT_BUDGET_SEK,
+    approval_threshold_sek: float = APPROVAL_THRESHOLD_SEK,
+) -> CostEstimate:
+    """Uppskatta vad en scan av n_buildings kommer att kosta, i SEK.
+
+    Returnerar ett spann (lågt/förväntat/högt) plus flaggor för om scanen
+    kräver godkännande eller överskrider budgettaket.
+    """
+    n = max(0, int(n_buildings))
+    # Engångskostnad för att värma cachen (skrivs en gång per scan).
+    cache_write_usd = _cost_usd(CACHED_CONTEXT_TOKENS, SONNET_4_6.cache_write)
+
+    low = cache_write_usd + n * _per_building_usd(UNSURE_FRACTION_LOW)
+    expected = cache_write_usd + n * _per_building_usd(UNSURE_FRACTION_EXPECTED)
+    high = cache_write_usd + n * _per_building_usd(UNSURE_FRACTION_HIGH)
+
+    low_sek = low * USD_TO_SEK
+    expected_sek = expected * USD_TO_SEK
+    high_sek = high * USD_TO_SEK
+    per_building_sek = (
+        _per_building_usd(UNSURE_FRACTION_EXPECTED) * USD_TO_SEK
+    )
+
+    return CostEstimate(
+        n_buildings=n,
+        low_sek=low_sek,
+        expected_sek=expected_sek,
+        high_sek=high_sek,
+        per_building_sek=per_building_sek,
+        # Använd det HÖGA spannet för gaten — hellre be om godkännande i onödan.
+        requires_approval=high_sek >= approval_threshold_sek,
+        exceeds_budget=high_sek >= budget_sek,
+    )
+
+
+# ── Runtime-budgetspärr ──────────────────────────────────────────────────────
+
+class ScanBudgetExceededError(RuntimeError):
+    """Kastas när en pågående scan når kostnadstaket. Redan hittade leads sparas."""
+
+    def __init__(self, spent_sek: float, budget_sek: float, buildings_done: int):
+        self.spent_sek = spent_sek
+        self.budget_sek = budget_sek
+        self.buildings_done = buildings_done
+        super().__init__(
+            f"Scan-budget nådd: {spent_sek:.0f} kr av taket {budget_sek:.0f} kr "
+            f"efter {buildings_done} byggnader — scanen stoppades."
+        )
+
+
+@dataclass
+class BudgetTracker:
+    """Trådsäker ackumulator för faktisk scan-kostnad.
+
+    Mata in verklig token-användning per anrop via add_usage(). Anropa check()
+    efter varje byggnad — den kastar ScanBudgetExceededError när taket nås.
+
+    Trådsäker eftersom scan_buildings_ai kör en ThreadPoolExecutor.
+    """
+
+    budget_sek: float = DEFAULT_BUDGET_SEK
+    pricing: ModelPricing = field(default=SONNET_4_6)
+    stopped_over_budget: bool = False
+    _cost_usd: float = 0.0
+    _buildings: int = 0
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def add_usage(
+        self,
+        *,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+    ) -> None:
+        cost = (
+            _cost_usd(input_tokens, self.pricing.input)
+            + _cost_usd(output_tokens, self.pricing.output)
+            + _cost_usd(cache_read_tokens, self.pricing.cache_read)
+            + _cost_usd(cache_write_tokens, self.pricing.cache_write)
+        )
+        with self._lock:
+            self._cost_usd += cost
+
+    def add_anthropic_usage(self, usage) -> None:
+        """Bekvämlighet: mata in ett anthropic usage-objekt direkt."""
+        self.add_usage(
+            input_tokens=getattr(usage, "input_tokens", 0) or 0,
+            output_tokens=getattr(usage, "output_tokens", 0) or 0,
+            cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
+            cache_write_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
+        )
+
+    def mark_building(self) -> None:
+        with self._lock:
+            self._buildings += 1
+
+    @property
+    def spent_sek(self) -> float:
+        with self._lock:
+            return self._cost_usd * USD_TO_SEK
+
+    @property
+    def buildings_done(self) -> int:
+        with self._lock:
+            return self._buildings
+
+    def check(self) -> None:
+        """Kasta om budgeten är överskriden. Anropas efter varje byggnad."""
+        spent = self.spent_sek
+        if spent >= self.budget_sek:
+            raise ScanBudgetExceededError(spent, self.budget_sek, self.buildings_done)

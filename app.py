@@ -94,22 +94,53 @@ def get_supabase() -> Client:
     return st.session_state.get("_sb_user_client") or _anon_supabase()
 
 
-def _sb_retry(fn, *, attempts: int = 3):
-    """Run a Supabase call, retrying transient HTTP/2 connection drops.
+# Är grundkonfigurationen ens satt? Saknas SUPABASE_URL/ANON_KEY kan ingenting
+# nå Supabase — login ser då "död" ut. Vi flaggar det tydligt i UI istället.
+CONFIG_OK = bool(SUPABASE_URL) and bool(SUPABASE_ANON_KEY)
 
-    The postgrest httpx client keeps HTTP/2 connections that the server closes
-    after idle. The next request on a stale connection raises RemoteProtocolError,
-    which surfaced as repeated app-load crashes (the first call after an idle
-    period — get_profile). httpx drops the dead connection, so a retry on the
-    same client opens a fresh one and succeeds.
+
+def _log_event(event_type: str, message: str = "", detail: str = "", user_email: str = "") -> None:
+    """Skriv en rad till app_events — persistent, querybar debug-logg.
+
+    Best-effort: får ALDRIG krascha appen. Skrivs via anon-klienten (det finns
+    en 'anon insert'-policy på tabellen). Läs via SQL för felsökning:
+        select * from app_events order by created_at desc limit 50;
     """
+    _log.info("[event] %s | %s | %s", event_type, message, detail[:200])
+    try:
+        # returning="minimal" — anon saknar SELECT-rättighet på app_events, så
+        # en representation-retur skulle annars ge RLS-fel (42501).
+        _anon_supabase().table("app_events").insert({
+            "event_type": event_type,
+            "message": message[:500],
+            "detail": detail[:2000],
+            "user_email": user_email or None,
+        }, returning="minimal").execute()
+    except Exception as _e:  # noqa: BLE001 — loggning får aldrig stoppa appen
+        _log.warning("_log_event misslyckades (%s): %s", event_type, _e)
+
+
+def _sb_retry(fn, *, attempts: int = 3):
+    """Run a Supabase call, retrying transient connection/timeout errors.
+
+    Handles HTTP/2 stale connections (RemoteProtocolError) and transient
+    timeouts (TimeoutException) which occur after idle periods on Supabase's
+    shared infrastructure.
+    """
+    _TRANSIENT = (
+        httpx.RemoteProtocolError,
+        httpx.ConnectError,
+        httpx.ReadError,
+        httpx.TimeoutException,
+    )
     last: Exception | None = None
     for i in range(attempts):
         try:
             return fn()
-        except (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadError) as e:
+        except _TRANSIENT as e:
             last = e
-            time.sleep(0.3 * (i + 1))
+            if i < attempts - 1:
+                time.sleep(0.3 * (i + 1))
     raise last
 
 
@@ -318,9 +349,13 @@ def add_credits(user_id: str, amount: int):
     """Add credits to user balance."""
     sb = get_supabase()
     try:
-        resp = sb.table("profiles").select("credits_balance").eq("user_id", user_id).maybe_single().execute()
+        resp = _sb_retry(
+            lambda: sb.table("profiles").select("credits_balance").eq("user_id", user_id).maybe_single().execute()
+        )
         current = (resp.data or {}).get("credits_balance", 0) or 0
-        sb.table("profiles").update({"credits_balance": current + amount}).eq("user_id", user_id).execute()
+        _sb_retry(
+            lambda: sb.table("profiles").update({"credits_balance": current + amount}).eq("user_id", user_id).execute()
+        )
     except Exception as exc:
         _log.error("add_credits failed user=%s: %s", user_id, exc)
 
@@ -329,10 +364,14 @@ def decrement_credits(user_id: str) -> int:
     """Decrement credits by 1. Returns new balance, or -1 on error."""
     sb = get_supabase()
     try:
-        resp = sb.table("profiles").select("credits_balance").eq("user_id", user_id).maybe_single().execute()
+        resp = _sb_retry(
+            lambda: sb.table("profiles").select("credits_balance").eq("user_id", user_id).maybe_single().execute()
+        )
         current = (resp.data or {}).get("credits_balance", 0) or 0
         new_bal = max(0, current - 1)
-        sb.table("profiles").update({"credits_balance": new_bal}).eq("user_id", user_id).execute()
+        _sb_retry(
+            lambda: sb.table("profiles").update({"credits_balance": new_bal}).eq("user_id", user_id).execute()
+        )
         return new_bal
     except Exception as exc:
         _log.error("decrement_credits failed user=%s: %s", user_id, exc)
@@ -410,6 +449,74 @@ def _send_meeting_email(address: str, note: str, lat: float | None, lng: float |
         return False
 
 
+def _send_sale_alert(address: str, note: str, lat: float | None, lng: float | None, user_email: str = "") -> bool:
+    """Skicka provisionslarm till Linus när David markerar ett lead som 'kund'."""
+    api_key = _secret("RESEND_API_KEY")
+    if not api_key:
+        _log.warning("RESEND_API_KEY saknas — provisionsmail skickas ej")
+        return False
+    maps = f"https://maps.google.com/?q={lat},{lng}" if lat and lng else ""
+    body = (
+        f"☀️ PROVISION — ett lead har blivit kund!\n\n"
+        f"Adress:    {address}\n"
+        f"Notering:  {note or '–'}\n"
+        f"Hittad av: Solar Scout (AI-scanning)\n"
+        f"David:     {user_email or 'okänd'}\n"
+        f"{('Karta: ' + maps) if maps else ''}\n\n"
+        f"Logga in på solar-scout.streamlit.app och kontrollera provisionen."
+    )
+    try:
+        resp = httpx.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "from":    "Solar Scout <onboarding@resend.dev>",
+                "to":      ["linus.bergstrom@enspectaenergi.se"],
+                "subject": f"☀️ PROVISION — kund via Solar Scout: {address}",
+                "text":    body,
+            },
+            timeout=8,
+        )
+        resp.raise_for_status()
+        _log.info("provisionsmail skickat för %s", address)
+        return True
+    except Exception as _e:
+        _log.warning("provisionsmail misslyckades: %s", _e)
+        return False
+
+def _send_quota_alert(api: str, detail: str) -> None:
+    """Skicka akut mail till ägaren när ett API-konto tar slut på pengar/tokens."""
+    api_key = _secret("RESEND_API_KEY")
+    if not api_key:
+        _log.error("QUOTA ALERT (mail ej skickat — RESEND_API_KEY saknas): %s %s", api, detail)
+        return
+    body = (
+        f"AKUT: {api} har nått sin kvot/fakturagräns!\n\n"
+        f"Detalj: {detail}\n\n"
+        f"Åtgärd krävs:\n"
+        f"  • Anthropic: https://console.anthropic.com/settings/billing\n"
+        f"  • Google: https://console.cloud.google.com/billing\n\n"
+        f"Scanning är stoppad tills kontot laddas på.\n"
+        f"Användarna ser ett felmeddelande i appen."
+    )
+    try:
+        resp = httpx.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "from":    "Solar Scout <onboarding@resend.dev>",
+                "to":      ["linus.bergstrom@enspectaenergi.se"],
+                "subject": f"AKUT ☀️ Solar Scout — {api} kvot slut",
+                "text":    body,
+            },
+            timeout=8,
+        )
+        resp.raise_for_status()
+        _log.error("Quota alert mail skickat: %s", api)
+    except Exception as _e:
+        _log.error("Quota alert mail misslyckades: %s", _e)
+
+
 _LEAD_STATUSES = {
     "ej_kontaktad": "📋 Ej kontaktad",
     "kontaktad":    "📞 Kontaktad",
@@ -437,33 +544,49 @@ def save_lead(user_id: str, data: dict, profile: dict | None = None):
 
 def load_leads(user_id: str, include_false_positives: bool = False) -> pd.DataFrame:
     sb = get_supabase()
-    q = sb.table("scout_leads").select("*").eq("user_id", user_id)
-    if not include_false_positives:
-        q = q.eq("false_positive", False)
-    resp = _sb_retry(lambda: q.order("created_at", desc=True).execute())
-    return pd.DataFrame(resp.data) if resp.data else pd.DataFrame()
+    try:
+        q = sb.table("scout_leads").select("*").eq("user_id", user_id)
+        if not include_false_positives:
+            q = q.eq("false_positive", False)
+        resp = _sb_retry(lambda: q.order("created_at", desc=True).execute())
+        return pd.DataFrame(resp.data) if resp.data else pd.DataFrame()
+    except Exception as exc:
+        _log.error("load_leads failed user=%s: %s", user_id, exc)
+        return pd.DataFrame()
 
 
 def delete_lead(lead_id: int):
     sb = get_supabase()
-    sb.table("scout_leads").delete().eq("id", lead_id).execute()
+    try:
+        _sb_retry(lambda: sb.table("scout_leads").delete().eq("id", lead_id).execute())
+    except Exception as exc:
+        _log.error("delete_lead failed id=%s: %s", lead_id, exc)
 
 
 def confirm_lead(lead_id: int, confirmed: bool):
     sb = get_supabase()
-    sb.table("scout_leads").update({"user_confirmed": confirmed}).eq("id", lead_id).execute()
+    try:
+        _sb_retry(
+            lambda: sb.table("scout_leads").update({"user_confirmed": confirmed}).eq("id", lead_id).execute()
+        )
+    except Exception as exc:
+        _log.error("confirm_lead failed id=%s: %s", lead_id, exc)
 
 
 def get_accuracy_stats(user_id: str) -> dict:
     sb = get_supabase()
-    resp = (
-        sb.table("scout_leads")
-        .select("user_confirmed")
-        .eq("user_id", user_id)
-        .eq("scan_source", "ai")
-        .execute()
-    )
-    rows = resp.data or []
+    try:
+        resp = _sb_retry(
+            lambda: sb.table("scout_leads")
+            .select("user_confirmed")
+            .eq("user_id", user_id)
+            .eq("scan_source", "ai")
+            .execute()
+        )
+        rows = resp.data or []
+    except Exception as exc:
+        _log.warning("get_accuracy_stats failed: %s", exc)
+        rows = []
     reviewed = [r for r in rows if r["user_confirmed"] is not None]
     confirmed = [r for r in reviewed if r["user_confirmed"] is True]
     return {
@@ -502,6 +625,15 @@ def page_auth():
     st.caption("Takidentifiering & Leadsgenerering · Linus Bergström")
     st.divider()
 
+    # Tydligt fel om grundkonfigurationen saknas — annars ser login "död" ut.
+    if not CONFIG_OK:
+        st.error(
+            "⚠️ Appen är felkonfigurerad: SUPABASE_URL och/eller SUPABASE_ANON_KEY "
+            "saknas i secrets. Inloggning kan inte fungera förrän de är satta "
+            "(Streamlit Cloud → Settings → Secrets)."
+        )
+        _log_event("config_error", "SUPABASE_URL/ANON_KEY saknas vid login-render")
+
     tab_in, tab_up, tab_pw = st.tabs(["Logga in", "Skapa konto", "Glömt lösenord"])
 
     with tab_in:
@@ -536,9 +668,19 @@ def page_auth():
         if submitted:
             try:
                 do_login(email, password)
+                _log_event("login_ok", "inloggning lyckades", user_email=email)
                 st.rerun()
             except Exception as e:
                 st.error(_sv_error(e))
+                # Visa det råa felet + logga det, så "inget händer" aldrig mer är tyst.
+                with st.expander("Teknisk feldetalj (visa för support)"):
+                    st.code(f"{type(e).__name__}: {e}")
+                _log_event(
+                    "login_error",
+                    _sv_error(e),
+                    detail=f"{type(e).__name__}: {e}",
+                    user_email=email,
+                )
 
         # Microsoft OAuth button — requires Azure provider enabled in Supabase dashboard
         st.divider()
@@ -1114,8 +1256,7 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
 
     # ── Cost estimate + confirmation ───────────────────────────────────────
     # Shown after "Starta scanning" click, before scan actually runs.
-    COST_PER_BUILDING_SEK = 0.025   # Sonnet-4-6 with cache: ~$0.0025 × 10 SEK/$
-    SOLAR_RATE = 0.08               # ~8% of SE3 villas have solar
+    _SOLAR_RATE = 0.08   # ~8% of SE3 villas have solar
 
     if start:
         if not city_name and not use_bbox:
@@ -1130,18 +1271,31 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
 
     pending = st.session_state.get("scan_pending")
     if pending:
+        from scan_cost import estimate_scan_cost, DEFAULT_BUDGET_SEK as _BUDGET_SEK
         ml = pending["max_leads"]
         # Estimate: to find N leads at 8% solar rate, analyze N/0.08 buildings
-        est_analyzed = int((ml or 200) / SOLAR_RATE)
-        est_sek = round(est_analyzed * COST_PER_BUILDING_SEK, 1)
+        est_analyzed = int((ml or 200) / _SOLAR_RATE)
+        cost_est = estimate_scan_cost(est_analyzed)
         area_label = pending["city"] or "ritat område"
 
-        st.warning(
+        if cost_est.exceeds_budget:
+            st.error(
+                f"**Scanning avbruten — för stort område**\n\n"
+                f"Uppskattad kostnad ({cost_est.high_sek:.0f} kr) överstiger "
+                f"budgettaket på {_BUDGET_SEK:.0f} kr.\n\n"
+                f"Minska max leads eller välj ett mindre område."
+            )
+            st.session_state.pop("scan_pending", None)
+            return
+
+        _warn_fn = st.warning if cost_est.requires_confirm else st.info
+        _warn_fn(
             f"**Scanningsuppskattning — {area_label}**\n\n"
             f"- Max leads: {ml or 'obegränsat'}\n"
             f"- Beräknat antal hus att analysera: ~{est_analyzed}\n"
-            f"- Beräknad kostnad: **~{est_sek} kr** (Claude Vision)\n\n"
-            f"_Faktisk kostnad kan variera beroende på hur tät bebyggelsen är._"
+            f"- Beräknad kostnad: **{cost_est.low_sek:.0f}–{cost_est.high_sek:.0f} kr** "
+            f"(förväntat ~{cost_est.expected_sek:.0f} kr)\n\n"
+            f"_Budgettak: {_BUDGET_SEK:.0f} kr — scanningen stoppas automatiskt om taket nås._"
         )
         col_yes, col_no = st.columns(2)
         confirmed = col_yes.button("✅ Ja, kör scanning", type="primary", use_container_width=True)
@@ -1264,6 +1418,8 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
             elif phase == "ai_done":
                 scan_debug.append(f"AI bekräftade solceller: {count}")
 
+        from scan_cost import BudgetTracker as _BudgetTracker, DEFAULT_BUDGET_SEK as _BUDGET_SEK
+
         def _render_area_map():
             if not area_states:
                 return
@@ -1329,8 +1485,10 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                     break
             _render_area_map()
 
+
         anthr_key = ANTHROPIC_API_KEY if ai_available else None
         _log.info("scan start mode=%s ai=%s max_leads=%s", "bbox" if use_bbox else "city", bool(anthr_key), max_leads)
+        _scan_budget = _BudgetTracker(budget_sek=_BUDGET_SEK)
         leads = None
         scan_crashed = False
         try:
@@ -1340,7 +1498,7 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                     city_name, GOOGLE_API_KEY or "", anthr_key, on_progress,
                     mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads,
                     phase_callback=on_phase, skip_tile_keys=_skip_tile_keys,
-                    user_id=str(user.id),
+                    user_id=str(user.id), budget=_scan_budget,
                     on_area_start=on_area_start, on_area_done=on_area_done,
                 )
             else:
@@ -1349,7 +1507,7 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                     south, west, north, east, GOOGLE_API_KEY or "", anthr_key, on_progress,
                     mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads,
                     phase_callback=on_phase, skip_tile_keys=_skip_tile_keys,
-                    user_id=str(user.id),
+                    user_id=str(user.id), budget=_scan_budget,
                     on_area_start=on_area_start, on_area_done=on_area_done,
                 )
         except ValueError as e:
@@ -1357,6 +1515,16 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
             st.error(str(e))
             return
         except Exception as e:
+            from scanner import APIQuotaExceededError as _QuotaErr  # noqa: PLC0415
+            if isinstance(e, _QuotaErr):
+                _log.error("API quota exceeded: %s", e)
+                _send_quota_alert(e.api, e.detail)
+                st.error(
+                    f"**{e.api} har nått sin kvot eller saknar pengar på kontot.**\n\n"
+                    f"Scanning är stoppad. Ägaren har fått ett akut mail. "
+                    f"Försök igen om en stund eller kontakta Linus."
+                )
+                return
             _log.error("scan Exception: %s", e, exc_info=True)
             scan_crashed = True
             scan_errors.append(f"Scanning avbröts oväntat: {e}")
@@ -1365,6 +1533,14 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
         status_text.empty()
         live_leads_ph.empty()  # Full results UI renders below — no duplicate
         area_map_ph.empty()    # Area progress map no longer needed
+
+        if _scan_budget.stopped_over_budget:
+            st.warning(
+                f"⚠️ **Budgettaket på {_BUDGET_SEK:.0f} kr nåddes** — scanning stoppades automatiskt. "
+                f"Faktisk kostnad: ~{_scan_budget.spent_sek:.0f} kr · "
+                f"{_scan_budget.buildings_done} byggnader analyserade. "
+                f"Leads som hittades innan stoppet visas nedan."
+            )
 
         # On crash: fall back to the AI leads already saved progressively
         if scan_crashed:
@@ -2106,7 +2282,19 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
                             if sent:
                                 st.success("📧 Mail skickat till Linus!")
                             else:
-                                st.info("Status sparad. (Konfigurera SMTP för automatiskt mail)")
+                                st.warning("⚠️ Mötet sparat, men mail till Linus misslyckades. Ring honom direkt.")
+                        # Skicka provisionslarm om lead precis blivit kund
+                        elif new_status == "kund" and cur_status != "kund":
+                            _user_email = getattr(user, "email", "") if user else ""
+                            sent = _send_sale_alert(
+                                addr, new_note,
+                                c_row.get("lat"), c_row.get("lng"),
+                                user_email=_user_email,
+                            )
+                            if sent:
+                                st.success("✅ Kund sparad! Linus har fått ett provisionsmail.")
+                            else:
+                                st.warning("✅ Kund sparad. (Provisionsmail misslyckades — kontakta Linus manuellt.)")
                         else:
                             st.success("Sparat.")
                         st.rerun()
