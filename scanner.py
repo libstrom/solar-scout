@@ -920,31 +920,8 @@ def _load_few_shot_images(user_id: str | None = None) -> list[tuple[str, str]]:
     return examples
 
 
-def _fetch_satellite(
-    google_key: str,
-    lat: float,
-    lng: float,
-    zoom: int = ZOOM_BUILDING,
-    mapbox_key: str | None = None,
-    lm_key: str | None = None,
-    lm_layer: str = _LM_LAYERS[0],
-) -> bytes | None:
-    # Priority: official LM Ortofoto Visning WMS → free minkarta WMS → Mapbox → Google
-    # (WMS GetMap returnerar en färdig bild — ingen PIL/_ENHANCE_AVAILABLE krävs)
-    if lm_key:
-        img = _fetch_lantmateriet(lm_key, lat, lng, layer=lm_layer)
-        if img:
-            _log.debug("_fetch_satellite source=lm_official lat=%s lng=%s", lat, lng)
-            return img
-    img = _fetch_lm_wms(lat, lng)
-    if img:
-        _log.debug("_fetch_satellite source=lm_wms lat=%s lng=%s", lat, lng)
-        return img
-    if mapbox_key:
-        img = _fetch_mapbox(mapbox_key, lat, lng, zoom)
-        if img:
-            _log.debug("_fetch_satellite source=mapbox lat=%s lng=%s", lat, lng)
-            return img
+def _fetch_google_static(google_key: str, lat: float, lng: float, zoom: int = ZOOM_BUILDING) -> bytes | None:
+    """Google Maps Static API — primary satellite source (~2 USD/1000 requests)."""
     url = (
         f"https://maps.googleapis.com/maps/api/staticmap"
         f"?center={lat},{lng}&zoom={zoom}&size=640x640"
@@ -957,13 +934,43 @@ def _fetch_satellite(
         if resp.status_code == 403:
             raise APIQuotaExceededError("Google Static Maps", "403 billing/API-nyckel")
         resp.raise_for_status()
-        _log.debug("_fetch_satellite source=google lat=%s lng=%s", lat, lng)
         return resp.content
     except APIQuotaExceededError:
         raise
     except Exception as exc:
-        _log.warning("_fetch_satellite failed lat=%s lng=%s: %s", lat, lng, exc)
+        _log.warning("_fetch_google_static failed lat=%s lng=%s: %s", lat, lng, exc)
         return None
+
+
+def _fetch_satellite(
+    google_key: str,
+    lat: float,
+    lng: float,
+    zoom: int = ZOOM_BUILDING,
+    mapbox_key: str | None = None,
+    lm_key: str | None = None,
+    lm_layer: str = _LM_LAYERS[0],
+) -> bytes | None:
+    # Priority: official LM WMS (if key) → Google Maps Static → minkarta WMS → Mapbox
+    if lm_key:
+        img = _fetch_lantmateriet(lm_key, lat, lng, layer=lm_layer)
+        if img:
+            _log.debug("_fetch_satellite source=lm_official lat=%s lng=%s", lat, lng)
+            return img
+    img = _fetch_google_static(google_key, lat, lng, zoom)
+    if img:
+        _log.debug("_fetch_satellite source=google lat=%s lng=%s", lat, lng)
+        return img
+    img = _fetch_lm_wms(lat, lng)
+    if img:
+        _log.debug("_fetch_satellite source=lm_wms lat=%s lng=%s", lat, lng)
+        return img
+    if mapbox_key:
+        img = _fetch_mapbox(mapbox_key, lat, lng, zoom)
+        if img:
+            _log.debug("_fetch_satellite source=mapbox lat=%s lng=%s", lat, lng)
+            return img
+    return None
 
 
 def _enhance_contrast(img_bytes: bytes) -> bytes:

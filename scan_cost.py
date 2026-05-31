@@ -53,6 +53,10 @@ SATELLITE_IMG_TOKENS = 1_500      # en färsk satellitbild per byggnad (ej cacha
 STREETVIEW_IMG_TOKENS = 1_500     # extra bild när modellen är osäker
 OUTPUT_TOKENS = 220               # max_tokens i _analyze_building
 
+# Google Maps Static API — primär satellitbildskälla (Standard tier).
+# Verifiera mot Google Maps Platform Console vid prisändringar.
+GOOGLE_STATIC_MAPS_USD_PER_REQUEST = 0.002  # 2 USD / 1 000 requests
+
 # Andel byggnader som blir UNSURE och drar ett extra Street View-anrop.
 # Lågt/förväntat/högt — ger ett spann i estimatet.
 UNSURE_FRACTION_LOW = 0.05
@@ -115,10 +119,14 @@ def estimate_scan_cost(
     n = max(0, int(n_buildings))
     # Engångskostnad för att värma cachen (skrivs en gång per scan).
     cache_write_usd = _cost_usd(CACHED_CONTEXT_TOKENS, SONNET_4_6.cache_write)
+    # Google Maps Static API: en bild per byggnad + en per UNSURE-fall (street view).
+    maps_low = n * (1 + UNSURE_FRACTION_LOW) * GOOGLE_STATIC_MAPS_USD_PER_REQUEST
+    maps_expected = n * (1 + UNSURE_FRACTION_EXPECTED) * GOOGLE_STATIC_MAPS_USD_PER_REQUEST
+    maps_high = n * (1 + UNSURE_FRACTION_HIGH) * GOOGLE_STATIC_MAPS_USD_PER_REQUEST
 
-    low = cache_write_usd + n * _per_building_usd(UNSURE_FRACTION_LOW)
-    expected = cache_write_usd + n * _per_building_usd(UNSURE_FRACTION_EXPECTED)
-    high = cache_write_usd + n * _per_building_usd(UNSURE_FRACTION_HIGH)
+    low = cache_write_usd + n * _per_building_usd(UNSURE_FRACTION_LOW) + maps_low
+    expected = cache_write_usd + n * _per_building_usd(UNSURE_FRACTION_EXPECTED) + maps_expected
+    high = cache_write_usd + n * _per_building_usd(UNSURE_FRACTION_HIGH) + maps_high
 
     low_sek = low * USD_TO_SEK
     expected_sek = expected * USD_TO_SEK
