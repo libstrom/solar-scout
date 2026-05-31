@@ -541,10 +541,15 @@ def _has_extra_solar_nearby(lat: float, lng: float, radius_m: int = 30,
 
 # ── Lantmäteriet ortofoto ──────────────────────────────────────────────────────
 
-# Layer candidates in priority order — the debug script probes which one works.
-_LM_SERVICE  = "ortofoto-ccby"
-_LM_LAYERS   = ["Ortofoto_0.25", "orto", "ortofoto"]
-_LM_ZOOM     = 19   # max zoom for LM open ortofoto (3x3 tiles → ~95m × 95m view)
+# Officiell Lantmäteriet "Ortofoto Visning"-WMS (CC-BY via Geotorget).
+# Teknisk beskrivning: GEODOK/64. Kräver HTTP Basic auth med Geotorget-
+# credentials — LANTMATERIET_KEY ska ha formatet "consumer_key:consumer_secret".
+# OBS: detta är INTE samma som /open/-WMTS:en (som bara har topowebb + historiska
+# foton). Modern ortofoto är en Visning-produkt på maps.lantmateriet.se.
+_LM_WMS_ENDPOINT = "https://maps.lantmateriet.se/ortofoto/wms/v1.3"
+# Riktiga RGB-lagernamn enligt teknisk beskrivning. 0.16 m/px först = bästa
+# upplösningen för att se solpaneler. _LM_LAYERS[0] är default-lagret.
+_LM_LAYERS = ["Ortofoto_0.16,Ortofoto_0.25", "Ortofoto_0.25", "Ortofoto_0.16", "Ortofoto_0.4"]
 
 # Few-shot ground-truth buildings (verified by user).
 # Malmö (SE4) + Nässjö/Småland (SE3) for geographic diversity.
@@ -599,48 +604,73 @@ _FEW_SHOT_VERDICTS = {
 }
 
 
-def _lm_tile_url(token: str, layer: str, z: int, x: int, y: int) -> str:
-    # WMTS order: TileMatrix / TileRow / TileCol  →  z / y / x
+def _lm_basic_auth(lm_key: str) -> tuple[str, str] | None:
+    """Tolka LANTMATERIET_KEY som 'consumer_key:consumer_secret' för Basic auth."""
+    if not lm_key or ":" not in lm_key:
+        return None
+    user, _, pw = lm_key.partition(":")
+    return (user, pw)
+
+
+def _lm_wms_url(layer: str, lat: float, lng: float, size_m: float = 18) -> str:
+    """Bygg en WMS GetMap-URL mot officiella Ortofoto Visning runt en punkt.
+
+    Samma beprövade GetMap-mönster som _fetch_lm_wms (minkarta) men mot det
+    officiella maps.lantmateriet.se-endpointen. EPSG:4326-bbox stöds enligt
+    teknisk beskrivning (25+ CRS, inkl. 3006 och 3857).
+    """
+    d_lat = (size_m / 2) / 111_000
+    d_lng = d_lat / math.cos(math.radians(lat))
+    bbox = f"{lng - d_lng},{lat - d_lat},{lng + d_lng},{lat + d_lat}"
     return (
-        f"https://api.lantmateriet.se/open/{_LM_SERVICE}/v1/wmts"
-        f"/token/{token}/1.0.0/{layer}/default/3857/{z}/{y}/{x}.png"
+        f"{_LM_WMS_ENDPOINT}"
+        "?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap"
+        f"&LAYERS={layer}"
+        "&FORMAT=image/jpeg&WIDTH=640&HEIGHT=640"
+        f"&SRS=EPSG:4326&BBOX={bbox}"
     )
 
 
 def _fetch_lantmateriet(lm_key: str, lat: float, lng: float, layer: str = _LM_LAYERS[0]) -> bytes | None:
-    """Fetch 3×3 tile grid from Lantmäteriet ortofoto and return a 640×640 PNG."""
-    if not _ENHANCE_AVAILABLE:
+    """Hämta ortofoto från Lantmäteriets officiella WMS (Ortofoto Visning, CC-BY).
+
+    lm_key ska vara "consumer_key:consumer_secret" (Geotorget Basic auth).
+    Returnerar en 640×640 JPEG, eller None vid fel/auth-miss — anroparen
+    faller då tillbaka på nästa bildkälla (minkarta-WMS → Mapbox → Google).
+    """
+    auth = _lm_basic_auth(lm_key)
+    if auth is None:
+        _log.warning("LANTMATERIET_KEY saknar 'consumer_key:consumer_secret'-format")
         return None
-    cx, cy = _lat_lng_to_tile(lat, lng, _LM_ZOOM)
-    canvas = _PILImage.new("RGB", (768, 768), (80, 80, 80))
-    got_any = False
-    for dx in range(-1, 2):
-        for dy in range(-1, 2):
-            url = _lm_tile_url(lm_key, layer, _LM_ZOOM, cx + dx, cy + dy)
-            try:
-                resp = httpx.get(url, timeout=20)
-                if resp.status_code == 200:
-                    tile = _PILImage.open(io.BytesIO(resp.content)).convert("RGB")
-                    canvas.paste(tile, ((dx + 1) * 256, (dy + 1) * 256))
-                    got_any = True
-            except Exception:
-                pass
-    if not got_any:
-        return None
-    # Crop centre 640×640
-    cropped = canvas.crop((64, 64, 704, 704))
-    buf = io.BytesIO()
-    cropped.save(buf, format="PNG")
-    return buf.getvalue()
+    url = _lm_wms_url(layer, lat, lng)
+    try:
+        resp = httpx.get(url, timeout=20, auth=auth)
+        if resp.status_code == 200 and "image" in resp.headers.get("content-type", ""):
+            return resp.content
+        if resp.status_code in (401, 403):
+            _log.warning(
+                "Lantmäteriet WMS auth misslyckades (%s) — kontrollera LANTMATERIET_KEY",
+                resp.status_code,
+            )
+        else:
+            _log.debug("Lantmäteriet WMS gav status %s", resp.status_code)
+    except Exception as exc:
+        _log.warning("Lantmäteriet WMS-anrop misslyckades: %s", exc)
+    return None
 
 
 def _probe_lm_layer(lm_key: str, lat: float = 59.33, lng: float = 18.07) -> str | None:
-    """Return the first working layer name, or None if all fail."""
-    cx, cy = _lat_lng_to_tile(lat, lng, _LM_ZOOM)
+    """Returnera första fungerande lagret via ett test-GetMap, annars None.
+
+    Körs en gång före en scan för att validera credentials + lagernamn. Om
+    None returneras stänger anroparen av LM och faller tillbaka på minkarta.
+    """
+    auth = _lm_basic_auth(lm_key)
+    if auth is None:
+        return None
     for layer in _LM_LAYERS:
-        url = _lm_tile_url(lm_key, layer, _LM_ZOOM, cx, cy)
         try:
-            r = httpx.get(url, timeout=15)
+            r = httpx.get(_lm_wms_url(layer, lat, lng), timeout=15, auth=auth)
             if r.status_code == 200 and r.headers.get("content-type", "").startswith("image"):
                 return layer
         except Exception:
@@ -892,11 +922,12 @@ def _fetch_satellite(
     lm_key: str | None = None,
     lm_layer: str = _LM_LAYERS[0],
 ) -> bytes | None:
-    # Priority: official LM API → free minkarta WMS → Mapbox → Google
-    if lm_key and _ENHANCE_AVAILABLE:
+    # Priority: official LM Ortofoto Visning WMS → free minkarta WMS → Mapbox → Google
+    # (WMS GetMap returnerar en färdig bild — ingen PIL/_ENHANCE_AVAILABLE krävs)
+    if lm_key:
         img = _fetch_lantmateriet(lm_key, lat, lng, layer=lm_layer)
         if img:
-            _log.debug("_fetch_satellite source=lm_tile lat=%s lng=%s", lat, lng)
+            _log.debug("_fetch_satellite source=lm_official lat=%s lng=%s", lat, lng)
             return img
     img = _fetch_lm_wms(lat, lng)
     if img:
@@ -1305,13 +1336,14 @@ def scan_buildings_ai(
     leads: list[Lead] = []
     total = len(buildings)
 
-    # Probe which LM layer works once up front to avoid per-tile probing
+    # Probe which LM layer works once up front to validate credentials + endpoint
     lm_layer = _LM_LAYERS[0]
-    if lm_key and _ENHANCE_AVAILABLE:
+    if lm_key:
         probed = _probe_lm_layer(lm_key)
         if probed:
             lm_layer = probed
         else:
+            _log.warning("Lantmäteriet WMS svarade inte — faller tillbaka på minkarta-WMS")
             lm_key = None
 
     # Load few-shot examples if not provided by caller.
