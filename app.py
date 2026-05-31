@@ -118,21 +118,26 @@ def _log_event(event_type: str, message: str = "", detail: str = "", user_email:
 
 
 def _sb_retry(fn, *, attempts: int = 3):
-    """Run a Supabase call, retrying transient HTTP/2 connection drops.
+    """Run a Supabase call, retrying transient connection/timeout errors.
 
-    The postgrest httpx client keeps HTTP/2 connections that the server closes
-    after idle. The next request on a stale connection raises RemoteProtocolError,
-    which surfaced as repeated app-load crashes (the first call after an idle
-    period — get_profile). httpx drops the dead connection, so a retry on the
-    same client opens a fresh one and succeeds.
+    Handles HTTP/2 stale connections (RemoteProtocolError) and transient
+    timeouts (TimeoutException) which occur after idle periods on Supabase's
+    shared infrastructure.
     """
+    _TRANSIENT = (
+        httpx.RemoteProtocolError,
+        httpx.ConnectError,
+        httpx.ReadError,
+        httpx.TimeoutException,
+    )
     last: Exception | None = None
     for i in range(attempts):
         try:
             return fn()
-        except (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadError) as e:
+        except _TRANSIENT as e:
             last = e
-            time.sleep(0.3 * (i + 1))
+            if i < attempts - 1:
+                time.sleep(0.3 * (i + 1))
     raise last
 
 
@@ -306,9 +311,13 @@ def add_credits(user_id: str, amount: int):
     """Add credits to user balance."""
     sb = get_supabase()
     try:
-        resp = sb.table("profiles").select("credits_balance").eq("user_id", user_id).maybe_single().execute()
+        resp = _sb_retry(
+            lambda: sb.table("profiles").select("credits_balance").eq("user_id", user_id).maybe_single().execute()
+        )
         current = (resp.data or {}).get("credits_balance", 0) or 0
-        sb.table("profiles").update({"credits_balance": current + amount}).eq("user_id", user_id).execute()
+        _sb_retry(
+            lambda: sb.table("profiles").update({"credits_balance": current + amount}).eq("user_id", user_id).execute()
+        )
     except Exception as exc:
         _log.error("add_credits failed user=%s: %s", user_id, exc)
 
@@ -317,10 +326,14 @@ def decrement_credits(user_id: str) -> int:
     """Decrement credits by 1. Returns new balance, or -1 on error."""
     sb = get_supabase()
     try:
-        resp = sb.table("profiles").select("credits_balance").eq("user_id", user_id).maybe_single().execute()
+        resp = _sb_retry(
+            lambda: sb.table("profiles").select("credits_balance").eq("user_id", user_id).maybe_single().execute()
+        )
         current = (resp.data or {}).get("credits_balance", 0) or 0
         new_bal = max(0, current - 1)
-        sb.table("profiles").update({"credits_balance": new_bal}).eq("user_id", user_id).execute()
+        _sb_retry(
+            lambda: sb.table("profiles").update({"credits_balance": new_bal}).eq("user_id", user_id).execute()
+        )
         return new_bal
     except Exception as exc:
         _log.error("decrement_credits failed user=%s: %s", user_id, exc)
@@ -493,33 +506,49 @@ def save_lead(user_id: str, data: dict, profile: dict | None = None):
 
 def load_leads(user_id: str, include_false_positives: bool = False) -> pd.DataFrame:
     sb = get_supabase()
-    q = sb.table("scout_leads").select("*").eq("user_id", user_id)
-    if not include_false_positives:
-        q = q.eq("false_positive", False)
-    resp = _sb_retry(lambda: q.order("created_at", desc=True).execute())
-    return pd.DataFrame(resp.data) if resp.data else pd.DataFrame()
+    try:
+        q = sb.table("scout_leads").select("*").eq("user_id", user_id)
+        if not include_false_positives:
+            q = q.eq("false_positive", False)
+        resp = _sb_retry(lambda: q.order("created_at", desc=True).execute())
+        return pd.DataFrame(resp.data) if resp.data else pd.DataFrame()
+    except Exception as exc:
+        _log.error("load_leads failed user=%s: %s", user_id, exc)
+        return pd.DataFrame()
 
 
 def delete_lead(lead_id: int):
     sb = get_supabase()
-    sb.table("scout_leads").delete().eq("id", lead_id).execute()
+    try:
+        _sb_retry(lambda: sb.table("scout_leads").delete().eq("id", lead_id).execute())
+    except Exception as exc:
+        _log.error("delete_lead failed id=%s: %s", lead_id, exc)
 
 
 def confirm_lead(lead_id: int, confirmed: bool):
     sb = get_supabase()
-    sb.table("scout_leads").update({"user_confirmed": confirmed}).eq("id", lead_id).execute()
+    try:
+        _sb_retry(
+            lambda: sb.table("scout_leads").update({"user_confirmed": confirmed}).eq("id", lead_id).execute()
+        )
+    except Exception as exc:
+        _log.error("confirm_lead failed id=%s: %s", lead_id, exc)
 
 
 def get_accuracy_stats(user_id: str) -> dict:
     sb = get_supabase()
-    resp = (
-        sb.table("scout_leads")
-        .select("user_confirmed")
-        .eq("user_id", user_id)
-        .eq("scan_source", "ai")
-        .execute()
-    )
-    rows = resp.data or []
+    try:
+        resp = _sb_retry(
+            lambda: sb.table("scout_leads")
+            .select("user_confirmed")
+            .eq("user_id", user_id)
+            .eq("scan_source", "ai")
+            .execute()
+        )
+        rows = resp.data or []
+    except Exception as exc:
+        _log.warning("get_accuracy_stats failed: %s", exc)
+        rows = []
     reviewed = [r for r in rows if r["user_confirmed"] is not None]
     confirmed = [r for r in reviewed if r["user_confirmed"] is True]
     return {
