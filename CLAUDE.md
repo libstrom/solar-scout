@@ -2,7 +2,7 @@
 
 ## Modell & konfiguration
 
-Kör på **claude-opus-4-7** med adaptive thinking (konfigurerat i `.claude/settings.json`).
+Kör på **claude-opus-4-8** med adaptive thinking (konfigurerat i `.claude/settings.json`).
 Dessa inställningar följer med repot — fungerar i lokala terminalen, cloud-sessioner och nya git-kloner.
 
 ## Kommandon

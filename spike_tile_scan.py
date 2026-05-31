@@ -177,7 +177,7 @@ def ask_claude(img_bytes: bytes, n_buildings: int) -> str:
 
     print(f"  Asking Claude about {n_buildings} buildings …")
     msg = client.messages.create(
-        model="claude-opus-4-7",
+        model="claude-opus-4-8",
         max_tokens=64,
         messages=[{
             "role": "user",
