@@ -192,22 +192,13 @@ def init_auth():
             pass
 
     if not access or not refresh:
-        # Fallback: stx.CookieManager (behöver JS round-trip, men sessioner
-        # satta med gamla versionen av appen läses fortfarande upp)
+        # Fallback: stx.CookieManager (sessioner satta med äldre appversion)
         cm = _get_cookie_manager()
         if cm is not None:
             access = cm.get("access_token") or access
             refresh = cm.get("refresh_token") or refresh
-            if not access or not refresh:
-                attempts = st.session_state.get("_cookie_load_attempted", 0)
-                if attempts < 2:
-                    st.session_state["_cookie_load_attempted"] = attempts + 1
-                    st.rerun()
         if not access or not refresh:
-            st.session_state.pop("_cookie_load_attempted", None)
             return None
-
-    st.session_state.pop("_cookie_load_attempted", None)
 
     # Validera mot Supabase (körs bara vid första rendern eller efter token-refresh).
     user_sb = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
