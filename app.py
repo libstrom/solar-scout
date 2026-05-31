@@ -603,30 +603,6 @@ def page_auth():
             email    = st.text_input("E-postadress",  key="login_email")
             password = st.text_input("Lösenord", type="password", key="login_password")
             submitted = st.form_submit_button("Logga in", type="primary", use_container_width=True)
-        # Patch autocomplete attributes so browsers offer to save/fill credentials.
-        # components.html runs in an iframe and can reach window.parent.document.
-        # Defensive: st.components.v1.html is deprecated for removal after 2026-06-01.
-        # This autocomplete hack is cosmetic, so if a future Streamlit drops the API,
-        # skip it rather than crashing the entire login page.
-        try:
-            import streamlit.components.v1 as _stc
-            _stc.html("""
-            <script>
-            (function() {
-                function patch() {
-                    var p = window.parent.document;
-                    var em = p.querySelector('input[type="text"]');
-                    var pw = p.querySelector('input[type="password"]');
-                    if (em) { em.setAttribute('autocomplete', 'email'); em.setAttribute('name', 'email'); }
-                    if (pw) { pw.setAttribute('autocomplete', 'current-password'); pw.setAttribute('name', 'password'); }
-                }
-                patch();
-                setTimeout(patch, 300);
-            })();
-            </script>
-            """, height=0)
-        except (ImportError, AttributeError):
-            pass  # components.v1.html removed/renamed → skip cosmetic autocomplete hint
         if submitted:
             try:
                 do_login(email, password)
@@ -1809,40 +1785,35 @@ def page_review(user):
     )
 
     # ── Tangentbordsgenvägar (←/A = Avvisa, →/D = Ja, S/↓ = Hoppa över) ────
-    try:
-        import streamlit.components.v1 as _components
-        _components.html("""
+    _kb_js = """
 <script>
 (function() {
-  function click(id) {
-    var btn = window.parent.document.querySelector('[data-testid="' + id + '"]');
-    if (!btn) {
-      // fallback: find by key pattern inside shadow DOM
-      var btns = window.parent.document.querySelectorAll('button');
-      for (var i = 0; i < btns.length; i++) {
-        if (btns[i].innerText && btns[i].innerText.includes(id)) { btns[i].click(); return; }
-      }
-    } else { btn.click(); }
-  }
   document.addEventListener('keydown', function(e) {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    var p = window.parent.document;
     if (e.key === 'ArrowLeft'  || e.key === 'a') {
-      window.parent.document.querySelectorAll('button').forEach(function(b){
+      p.querySelectorAll('button').forEach(function(b){
         if (b.innerText && b.innerText.includes('Avvisa')) b.click();
       });
     } else if (e.key === 'ArrowRight' || e.key === 'd') {
-      window.parent.document.querySelectorAll('button').forEach(function(b){
+      p.querySelectorAll('button').forEach(function(b){
         if (b.innerText && b.innerText.includes('Ja, solceller')) b.click();
       });
     } else if (e.key === 'ArrowDown'  || e.key === 's') {
-      window.parent.document.querySelectorAll('button').forEach(function(b){
+      p.querySelectorAll('button').forEach(function(b){
         if (b.innerText && b.innerText.includes('Hoppa')) b.click();
       });
     }
   });
 })();
 </script>
-""", height=0)
+"""
+    try:
+        import urllib.parse as _up
+        st.iframe(
+            src="data:text/html;charset=utf-8," + _up.quote(_kb_js),
+            height=0,
+        )
     except Exception:
         pass
 
