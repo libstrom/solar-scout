@@ -61,6 +61,18 @@ class APIQuotaExceededError(RuntimeError):
 # the overpass-api.de rate limiter. Cap at 2 simultaneous requests.
 _OVERPASS_SEM = threading.Semaphore(2)
 
+# Circuit breaker: när Google Static Maps nått kvot/billing-väggen är det
+# meningslöst (och rate-limit-förvärrande) att fortsätta hamra den för varje
+# byggnad. Första kvotfelet sätter flaggan → resten av scanen hoppar Google
+# och går direkt på den gratis, lagringsbara LM WMS-fallbacken. Nollställs
+# när en ny scan startar (reset_image_source_breakers).
+_google_exhausted = threading.Event()
+
+
+def reset_image_source_breakers() -> None:
+    """Nollställ circuit breakers inför en ny scan."""
+    _google_exhausted.clear()
+
 
 @dataclass
 class Lead:
@@ -957,10 +969,23 @@ def _fetch_satellite(
         if img:
             _log.debug("_fetch_satellite source=lm_official lat=%s lng=%s", lat, lng)
             return img
-    img = _fetch_google_static(google_key, lat, lng, zoom)
-    if img:
-        _log.debug("_fetch_satellite source=google lat=%s lng=%s", lat, lng)
-        return img
+    # Hoppa Google helt om kvoten redan sprängts under denna scan — annars
+    # faller vi tillbaka på den gratis LM WMS i stället för att döda scanen.
+    if not _google_exhausted.is_set():
+        try:
+            img = _fetch_google_static(google_key, lat, lng, zoom)
+            if img:
+                _log.debug("_fetch_satellite source=google lat=%s lng=%s", lat, lng)
+                return img
+        except APIQuotaExceededError as exc:
+            # Google slut — bryt kretsen och degradera till gratis LM WMS för
+            # resten av scanen i stället för att avbryta. Ägaren larmas separat.
+            if not _google_exhausted.is_set():
+                _log.warning(
+                    "Google Static Maps slut (%s) — degraderar till LM WMS för resten av scanen",
+                    exc.detail,
+                )
+            _google_exhausted.set()
     img = _fetch_lm_wms(lat, lng)
     if img:
         _log.debug("_fetch_satellite source=lm_wms lat=%s lng=%s", lat, lng)
@@ -1163,6 +1188,11 @@ def _analyze_building(
     except anthropic.APIStatusError as exc:
         if exc.status_code in (402, 403):
             raise APIQuotaExceededError("Anthropic", f"HTTP {exc.status_code} billing/auth") from exc
+        # Slut på credits ger HTTP 400 ("credit balance is too low") — INTE 402/403.
+        # Måste fångas här, annars sväljs felet tyst och scanen visar "0 solcellstak"
+        # i stället för att larma om tomt konto (rotorsaken till veckolånga 0-leads-buggen).
+        if exc.status_code == 400 and "credit balance" in str(exc).lower():
+            raise APIQuotaExceededError("Anthropic", "credit balance too low — fyll på saldo") from exc
         _log.error("_analyze_building API error: %s", exc)
         return False, False, False, ""
     except anthropic.AuthenticationError as exc:
@@ -1231,8 +1261,14 @@ def _process_building(
 
     # Second pass: if AI is unsure, fetch Street View and reanalyse.
     # Street View shows south-facing roof slopes that are often invisible from above.
-    if is_unsure and google_key:
-        sv_bytes = _fetch_street_view(google_key, lat, lng)
+    # Hoppa Street View om Google redan slut — annars reser samma billing-fel
+    # och dödar scanen (Street View är bara en bonus för osäkra fall).
+    if is_unsure and google_key and not _google_exhausted.is_set():
+        try:
+            sv_bytes = _fetch_street_view(google_key, lat, lng)
+        except APIQuotaExceededError:
+            _google_exhausted.set()
+            sv_bytes = None
         if sv_bytes:
             _log.debug("_process_building: UNSURE → Street View second pass lat=%s lng=%s", lat, lng)
             is_house, has_solar, is_unsure, reasoning = _analyze_building(
@@ -1566,6 +1602,7 @@ def scan_city(
     """
     if budget is None:
         budget = BudgetTracker(budget_sek=DEFAULT_BUDGET_SEK)
+    reset_image_source_breakers()
     _log.info("scan_city city=%s max_leads=%s", city_name, max_leads)
     gmaps = googlemaps.Client(key=google_key)
     results = gmaps.geocode(city_name)
@@ -1823,6 +1860,7 @@ def scan_bbox(
     """
     if budget is None:
         budget = BudgetTracker(budget_sek=DEFAULT_BUDGET_SEK)
+    reset_image_source_breakers()
     tile_count = len(_bbox_tiles(south, west, north, east))
 
     # OSM solar tags: instant, works for any bbox size
