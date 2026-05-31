@@ -433,7 +433,7 @@ def _send_sale_alert(address: str, note: str, lat: float | None, lng: float | No
             headers={"Authorization": f"Bearer {api_key}"},
             json={
                 "from":    "Solar Scout <onboarding@resend.dev>",
-                "to":      ["linus.bergstrom@enspectaenergi.se", "fenomenetmusic@gmail.com"],
+                "to":      ["linus.bergstrom@enspectaenergi.se"],
                 "subject": f"☀️ PROVISION — kund via Solar Scout: {address}",
                 "text":    body,
             },
@@ -467,7 +467,7 @@ def _send_quota_alert(api: str, detail: str) -> None:
             headers={"Authorization": f"Bearer {api_key}"},
             json={
                 "from":    "Solar Scout <onboarding@resend.dev>",
-                "to":      ["linus.bergstrom@enspectaenergi.se", "fenomenetmusic@gmail.com"],
+                "to":      ["linus.bergstrom@enspectaenergi.se"],
                 "subject": f"AKUT ☀️ Solar Scout — {api} kvot slut",
                 "text":    body,
             },

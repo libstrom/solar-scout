@@ -9,7 +9,6 @@ const NOTYFILE_BASE = "https://api.notyfile.se/v1";
 
 const ALERT_EMAILS = [
   "linus.bergstrom@enspectaenergi.se",
-  "fenomenetmusic@gmail.com",
 ];
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
