@@ -32,6 +32,11 @@ def test_basic_auth_rejects_empty():
     assert scanner._lm_basic_auth("") is None
 
 
+def test_basic_auth_rejects_empty_user():
+    # ":secret" → tomt användarnamn = tyst felkonfig, ska avvisas
+    assert scanner._lm_basic_auth(":secret") is None
+
+
 # ── WMS GetMap-URL ───────────────────────────────────────────────────────────
 
 def test_wms_url_targets_official_endpoint():
@@ -48,6 +53,14 @@ def test_wms_url_contains_required_params():
     assert "SRS=EPSG:4326" in url
     assert "BBOX=" in url
     assert "FORMAT=image/jpeg" in url
+
+
+def test_wms_url_includes_styles_param():
+    # WMS 1.1.1 kräver STYLES. Ett lager → tom STYLES, två lager → "STYLES=,"
+    one = scanner._lm_wms_url("Ortofoto_0.16", 57.65, 14.70)
+    assert "STYLES=&" in one  # tom mellan STYLES= och nästa param
+    two = scanner._lm_wms_url("Ortofoto_0.16,Ortofoto_0.25", 57.65, 14.70)
+    assert "STYLES=,&" in two
 
 
 def test_wms_url_bbox_centered_on_point():
@@ -124,3 +137,12 @@ def test_probe_returns_none_when_all_layers_fail():
     with patch("scanner.httpx.get", return_value=resp):
         layer = scanner._probe_lm_layer("key:secret")
     assert layer is None
+
+
+def test_probe_falls_back_to_second_layer():
+    # Första lagret nekas (403), andra lyckas → ska returnera _LM_LAYERS[1]
+    fail = MagicMock(status_code=403, headers={"content-type": "text/plain"})
+    ok = MagicMock(status_code=200, headers={"content-type": "image/jpeg"}, content=b"jpeg")
+    with patch("scanner.httpx.get", side_effect=[fail, ok]):
+        layer = scanner._probe_lm_layer("key:secret")
+    assert layer == scanner._LM_LAYERS[1]

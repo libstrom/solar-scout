@@ -609,6 +609,8 @@ def _lm_basic_auth(lm_key: str) -> tuple[str, str] | None:
     if not lm_key or ":" not in lm_key:
         return None
     user, _, pw = lm_key.partition(":")
+    if not user:  # ":secret" är en tyst felkonfig — kräv ett användarnamn
+        return None
     return (user, pw)
 
 
@@ -622,10 +624,15 @@ def _lm_wms_url(layer: str, lat: float, lng: float, size_m: float = 18) -> str:
     d_lat = (size_m / 2) / 111_000
     d_lng = d_lat / math.cos(math.radians(lat))
     bbox = f"{lng - d_lng},{lat - d_lat},{lng + d_lng},{lat + d_lat}"
+    # WMS 1.1.1 kräver STYLES (får vara tom), ett värde per lager. Ett komma
+    # mindre än antalet lager: 1 lager → "", 2 lager → ",". Strikta servrar
+    # (officiella LM) ger annars ServiceException istället för en bild.
+    styles = "," * layer.count(",")
     return (
         f"{_LM_WMS_ENDPOINT}"
         "?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap"
         f"&LAYERS={layer}"
+        f"&STYLES={styles}"
         "&FORMAT=image/jpeg&WIDTH=640&HEIGHT=640"
         f"&SRS=EPSG:4326&BBOX={bbox}"
     )
@@ -645,7 +652,7 @@ def _fetch_lantmateriet(lm_key: str, lat: float, lng: float, layer: str = _LM_LA
     url = _lm_wms_url(layer, lat, lng)
     try:
         resp = httpx.get(url, timeout=20, auth=auth)
-        if resp.status_code == 200 and "image" in resp.headers.get("content-type", ""):
+        if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("image"):
             return resp.content
         if resp.status_code in (401, 403):
             _log.warning(
