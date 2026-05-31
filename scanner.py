@@ -33,6 +33,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Callable
 
+from scan_cost import BudgetTracker, ScanBudgetExceededError, DEFAULT_BUDGET_SEK
+
 try:
     import numpy as np
     from PIL import Image as _PILImage
@@ -958,6 +960,7 @@ def _analyze_building(
     img_bytes: bytes,
     few_shot: list[tuple[str, str]] | None = None,
     street_view_bytes: bytes | None = None,
+    budget: "BudgetTracker | None" = None,
 ) -> tuple[bool, bool, bool, str]:
     """
     Returns (is_residential_house, has_solar_panels, is_unsure, reasoning).
@@ -1084,6 +1087,8 @@ def _analyze_building(
                 reasoning = line.strip()
                 break
         u = msg.usage
+        if budget is not None:
+            budget.add_anthropic_usage(u)
         _log.debug(
             "_analyze_building HOUSE=%s SOLAR=%s UNSURE=%s few_shot=%s sv=%s "
             "cache_read=%s cache_write=%s input=%s",
@@ -1116,6 +1121,7 @@ def _process_building(
     lm_layer: str = _LM_LAYERS[0],
     few_shot: list[tuple[str, str]] | None = None,
     skip_tile_keys: frozenset[str] = frozenset(),
+    budget: "BudgetTracker | None" = None,
 ) -> Lead | None:
     lat, lng = building["lat"], building["lng"]
     zoom = building.get("zoom", ZOOM_BUILDING)
@@ -1129,7 +1135,7 @@ def _process_building(
     img = _fetch_satellite(google_key, lat, lng, zoom=zoom, mapbox_key=mapbox_key, lm_key=lm_key, lm_layer=lm_layer)
     if img is None:
         return None
-    is_house, has_solar, is_unsure, reasoning = _analyze_building(anthropic_client, img, few_shot=few_shot)
+    is_house, has_solar, is_unsure, reasoning = _analyze_building(anthropic_client, img, few_shot=few_shot, budget=budget)
     if not is_house:
         return None
 
@@ -1140,7 +1146,7 @@ def _process_building(
         if sv_bytes:
             _log.debug("_process_building: UNSURE → Street View second pass lat=%s lng=%s", lat, lng)
             is_house, has_solar, is_unsure, reasoning = _analyze_building(
-                anthropic_client, img, few_shot=few_shot, street_view_bytes=sv_bytes
+                anthropic_client, img, few_shot=few_shot, street_view_bytes=sv_bytes, budget=budget
             )
             if not is_house:
                 return None
@@ -1226,12 +1232,16 @@ def scan_buildings_ai(
     max_leads: int | None = None,
     few_shot: list[tuple[str, str]] | None = None,
     skip_tile_keys: frozenset[str] = frozenset(),
+    budget: "BudgetTracker | None" = None,
 ) -> list[Lead]:
     """Run Claude Vision on each OSM building centroid.
 
     Args:
         max_leads: Stop processing once this many confirmed leads are found.
                    None means no limit.
+        budget: BudgetTracker som ackumulerar faktisk API-kostnad. Scanen
+                avbryts mjukt (redan hittade leads behålls) när taket nås.
+                None → en tracker med DEFAULT_BUDGET_SEK skapas internt.
         few_shot: Pre-loaded few-shot examples as (b64_jpeg, verdict_text) pairs.
                   If None, examples are loaded from LM WMS on first call.
                   Pass a pre-loaded list to avoid redundant downloads when
@@ -1260,9 +1270,13 @@ def scan_buildings_ai(
     if few_shot is None:
         few_shot = _load_few_shot_images()
 
+    # Budgetspärr: ackumulera faktisk kostnad och avbryt mjukt vid taket.
+    if budget is None:
+        budget = BudgetTracker(budget_sek=DEFAULT_BUDGET_SEK)
+
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
-            pool.submit(_process_building, b, google_key, client, mapbox_key, lm_key, lm_layer, few_shot, skip_tile_keys): b
+            pool.submit(_process_building, b, google_key, client, mapbox_key, lm_key, lm_layer, few_shot, skip_tile_keys, budget): b
             for b in buildings
         }
         done = 0
@@ -1279,11 +1293,21 @@ def scan_buildings_ai(
                 result = None
             if result:
                 leads.append(result)
+            budget.mark_building()
             if on_progress:
                 try:
                     on_progress(done, total, result)
                 except Exception as _cb_err:
                     _log.warning("on_progress callback error: %s", _cb_err)
+            # Hård kostnadsspärr: stoppa scanen men behåll redan hittade leads.
+            try:
+                budget.check()
+            except ScanBudgetExceededError as _be:
+                budget.stopped_over_budget = True
+                _log.warning("%s", _be)
+                for f in futures:
+                    f.cancel()
+                break
             # Short-circuit if we've hit the lead cap
             if max_leads is not None and len(leads) >= max_leads:
                 # Cancel remaining futures that haven't started yet

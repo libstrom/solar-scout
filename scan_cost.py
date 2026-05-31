@@ -41,7 +41,8 @@ USD_TO_SEK = 10.50
 
 # Budget-trösklar (SEK)
 DEFAULT_BUDGET_SEK = 5000.0       # hård spärr — scan avbryts här
-APPROVAL_THRESHOLD_SEK = 500.0    # över detta krävs Ibrahims godkännande i UI
+CONFIRM_THRESHOLD_SEK = 200.0     # över detta måste scannaren bocka i "jag förstår kostnaden"
+APPROVAL_THRESHOLD_SEK = CONFIRM_THRESHOLD_SEK  # bakåtkompat-alias
 
 
 # ── Token-antaganden per byggnad ─────────────────────────────────────────────
@@ -87,6 +88,11 @@ class CostEstimate:
     per_building_sek: float
     requires_approval: bool
     exceeds_budget: bool
+
+    @property
+    def requires_confirm(self) -> bool:
+        """Alias — scannaren måste bocka i "jag förstår kostnaden" först."""
+        return self.requires_approval
 
     def summary(self) -> str:
         return (
@@ -160,6 +166,7 @@ class BudgetTracker:
 
     budget_sek: float = DEFAULT_BUDGET_SEK
     pricing: ModelPricing = field(default=SONNET_4_6)
+    stopped_over_budget: bool = False
     _cost_usd: float = 0.0
     _buildings: int = 0
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
