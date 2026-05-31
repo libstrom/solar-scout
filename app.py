@@ -221,8 +221,8 @@ def init_auth():
             cm = _get_cookie_manager()
             if cm is not None:
                 _exp = datetime.now() + timedelta(days=30)
-                cm.set("access_token", resp.session.access_token, expires_at=_exp)
-                cm.set("refresh_token", resp.session.refresh_token, expires_at=_exp)
+                cm.set("access_token", resp.session.access_token, expires_at=_exp, key="set_access_refresh")
+                cm.set("refresh_token", resp.session.refresh_token, expires_at=_exp, key="set_refresh_refresh")
             return resp.user
     except Exception:
         pass
@@ -231,15 +231,14 @@ def init_auth():
         st.session_state.pop(k, None)
     cm = _get_cookie_manager()
     if cm is not None:
-        cm.delete("access_token")
-        cm.delete("refresh_token")
+        cm.delete("access_token", key="del_access_fail")
+        cm.delete("refresh_token", key="del_refresh_fail")
     return None
 
 
 def do_login(email: str, password: str):
     user_sb = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
     resp = user_sb.auth.sign_in_with_password({"email": email, "password": password})
-    user_sb.auth.set_session(resp.session.access_token, resp.session.refresh_token)
     st.session_state["access_token"]    = resp.session.access_token
     st.session_state["refresh_token"]   = resp.session.refresh_token
     st.session_state["_auth_user"]      = resp.user
@@ -247,8 +246,8 @@ def do_login(email: str, password: str):
     cm = _get_cookie_manager()
     if cm is not None:
         _exp = datetime.now() + timedelta(days=30)
-        cm.set("access_token", resp.session.access_token, expires_at=_exp)
-        cm.set("refresh_token", resp.session.refresh_token, expires_at=_exp)
+        cm.set("access_token", resp.session.access_token, expires_at=_exp, key="set_access")
+        cm.set("refresh_token", resp.session.refresh_token, expires_at=_exp, key="set_refresh")
     return resp.user
 
 
@@ -273,8 +272,8 @@ def do_logout():
         st.session_state.pop(k, None)
     cm = _get_cookie_manager()
     if cm is not None:
-        cm.delete("access_token")
-        cm.delete("refresh_token")
+        cm.delete("access_token", key="del_access_logout")
+        cm.delete("refresh_token", key="del_refresh_logout")
 
 # ── Profil & subscription ─────────────────────────────────────────────────────
 

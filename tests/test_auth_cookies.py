@@ -22,10 +22,10 @@ def _make_cookie_mock(data: dict | None = None):
     """Returnera en mock CookieManager med förinläst cookie-data."""
     cm = MagicMock()
     cookie_store = dict(data or {})
-    cm.get.side_effect = lambda key: cookie_store.get(key)
-    cm.set.side_effect = lambda key, value, **_kw: cookie_store.update({key: value})
-    cm.remove.side_effect = lambda key: cookie_store.pop(key, None)
-    cm.delete.side_effect = lambda key: cookie_store.pop(key, None)
+    cm.get.side_effect = lambda cookie: cookie_store.get(cookie)
+    cm.set.side_effect = lambda cookie, value, **_kw: cookie_store.update({cookie: value})
+    cm.remove.side_effect = lambda cookie, **_kw: cookie_store.pop(cookie, None)
+    cm.delete.side_effect = lambda cookie, **_kw: cookie_store.pop(cookie, None)
     cm._store = cookie_store
     return cm
 
