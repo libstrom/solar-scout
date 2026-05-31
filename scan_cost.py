@@ -71,7 +71,7 @@ def _cost_usd(tokens: int, rate_per_mtok: float) -> float:
     return tokens / 1_000_000 * rate_per_mtok
 
 
-def _per_building_usd(unsure_fraction: float, pricing: ModelPricing = OPUS_4_8) -> float:
+def _per_building_usd(unsure_fraction: float, pricing: ModelPricing = SONNET_4_6) -> float:
     """Förväntad kostnad (USD) för en byggnad i steady state (cachen redan varm)."""
     cache_read = _cost_usd(CACHED_CONTEXT_TOKENS, pricing.cache_read)
     fresh_input = _cost_usd(SATELLITE_IMG_TOKENS, pricing.input)
@@ -121,7 +121,7 @@ def estimate_scan_cost(
     """
     n = max(0, int(n_buildings))
     # Engångskostnad för att värma cachen (skrivs en gång per scan).
-    cache_write_usd = _cost_usd(CACHED_CONTEXT_TOKENS, OPUS_4_8.cache_write)
+    cache_write_usd = _cost_usd(CACHED_CONTEXT_TOKENS, SONNET_4_6.cache_write)
     # Google Maps Static API: en bild per byggnad + en per UNSURE-fall (street view).
     maps_low = n * (1 + UNSURE_FRACTION_LOW) * GOOGLE_STATIC_MAPS_USD_PER_REQUEST
     maps_expected = n * (1 + UNSURE_FRACTION_EXPECTED) * GOOGLE_STATIC_MAPS_USD_PER_REQUEST
@@ -176,7 +176,7 @@ class BudgetTracker:
     """
 
     budget_sek: float = DEFAULT_BUDGET_SEK
-    pricing: ModelPricing = field(default=OPUS_4_8)
+    pricing: ModelPricing = field(default=SONNET_4_6)
     stopped_over_budget: bool = False
     _cost_usd: float = 0.0
     _buildings: int = 0

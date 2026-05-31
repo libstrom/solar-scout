@@ -1129,7 +1129,7 @@ def _analyze_building(
                 final_content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": sv_b64}})
             msgs = [{"role": "user", "content": final_content}]
         msg = client.messages.create(
-            model="claude-opus-4-8",
+            model="claude-sonnet-4-6",
             max_tokens=220,
             system=system_blocks,
             messages=msgs,

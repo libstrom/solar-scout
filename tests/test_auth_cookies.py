@@ -25,6 +25,7 @@ def _make_cookie_mock(data: dict | None = None):
     cm.get.side_effect = lambda key: cookie_store.get(key)
     cm.set.side_effect = lambda key, value, **_kw: cookie_store.update({key: value})
     cm.remove.side_effect = lambda key: cookie_store.pop(key, None)
+    cm.delete.side_effect = lambda key: cookie_store.pop(key, None)
     cm._store = cookie_store
     return cm
 
