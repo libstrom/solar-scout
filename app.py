@@ -240,8 +240,8 @@ def init_auth():
         st.session_state.pop(k, None)
     cm = _get_cookie_manager()
     if cm is not None:
-        cm.remove("access_token")
-        cm.remove("refresh_token")
+        cm.delete("access_token")
+        cm.delete("refresh_token")
     return None
 
 
@@ -282,8 +282,8 @@ def do_logout():
         st.session_state.pop(k, None)
     cm = _get_cookie_manager()
     if cm is not None:
-        cm.remove("access_token")
-        cm.remove("refresh_token")
+        cm.delete("access_token")
+        cm.delete("refresh_token")
 
 # ── Profil & subscription ─────────────────────────────────────────────────────
 
