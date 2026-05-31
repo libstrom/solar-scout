@@ -32,7 +32,8 @@ class ModelPricing:
 
 
 # Claude Opus 4.8 — primär analysmodell i scanner.py
-OPUS_4_8 = ModelPricing(input=15.00, output=75.00, cache_write=18.75, cache_read=1.50)
+# $5/$25 in/out, cache-write 5m = 1.25x input, cache-read = 0.1x input.
+OPUS_4_8 = ModelPricing(input=5.00, output=25.00, cache_write=6.25, cache_read=0.50)
 # Claude Sonnet 4.6 (behålls för referens och eval-skript)
 SONNET_4_6 = ModelPricing(input=3.00, output=15.00, cache_write=3.75, cache_read=0.30)
 # Claude Haiku 4.5 — prefilter i scanner.py
