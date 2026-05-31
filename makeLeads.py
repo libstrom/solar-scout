@@ -8,11 +8,14 @@ Flikar:
   • Översikt    — statistik per kontakttyp, kommun, byggår
 
 Usage:
-    python makeLeads.py enspecta.tab [leads.xlsx] [--energy energy-data.json]
+    python makeLeads.py enspecta.tab [leads.xlsx] [--energy energy-data.json] [--energy-only]
 
-Med --energy används verklig energiklass + elförbrukning från XLSM-filerna
-(genereras av: node batchXlsm.mjs <mapp-med-xlsm> energy-data.json).
-Utan --energy används estimat baserat på byggår.
+  --energy <fil>   Verklig energiklass + kWh/m² från energideklarationer.
+                   Genereras av: python extractEnergyPdf.py <mapp> energy-data.json
+                             eller: node batchXlsm.mjs <mapp-med-xlsm> energy-data.json
+  --energy-only    Inkludera bara fastigheter som finns i energy-data.json.
+                   Ger en kompakt lista (~2 300 leads) med 100% riktig energiklass.
+                   Utan flaggan: hela enspecta.tab (16 000+) med estimat för resten.
 """
 import sys, re, functools, json
 from collections import Counter
@@ -873,17 +876,20 @@ def make_oversikt(wb, rows):
 def main():
     args = sys.argv[1:]
     # Parse flags
-    energy_path = None
-    positional  = []
+    energy_path  = None
+    energy_only  = False
+    positional   = []
     i = 0
     while i < len(args):
         if args[i] == '--energy' and i + 1 < len(args):
             energy_path = args[i + 1]; i += 2
+        elif args[i] == '--energy-only':
+            energy_only = True; i += 1
         else:
             positional.append(args[i]); i += 1
 
     if not positional:
-        print('Usage: python makeLeads.py enspecta.tab [leads.xlsx] [--energy energy-data.json]')
+        print('Usage: python makeLeads.py enspecta.tab [leads.xlsx] [--energy energy-data.json] [--energy-only]')
         sys.exit(1)
 
     tab_path = positional[0]
@@ -900,13 +906,24 @@ def main():
 
     print(f'Läser {tab_path} ...')
     by_fastig = parse_tab(tab_path)
-    print(f'  {len(by_fastig)} unika fastigheter')
+    print(f'  {len(by_fastig)} unika fastigheter i enspecta.tab')
+
+    if energy_only and not energy_index:
+        print('Fel: --energy-only kräver --energy <fil>'); sys.exit(1)
+
+    # Which fastigheter to iterate — energy-only filters to those with energy data
+    candidates = (
+        [(f, by_fastig[f]) for f in energy_index if f in by_fastig]
+        if energy_only else list(by_fastig.items())
+    )
+    if energy_only:
+        print(f'  --energy-only: {len(energy_index)} energidekl. → {len(candidates)} träffar i enspecta.tab')
 
     print('Scorar och bygger rader ...')
     int_rows = []; kop_rows = []; sal_rows = []
     energy_matched = 0
 
-    for fastig, b in by_fastig.items():
+    for fastig, b in candidates:
         typ, r, ints = best_contact(b)
         if r:
             int0 = ints[0] if ints and typ != 'Intressent' else {}
