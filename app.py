@@ -91,6 +91,32 @@ def get_supabase() -> Client:
     return st.session_state.get("_sb_user_client") or _anon_supabase()
 
 
+# Är grundkonfigurationen ens satt? Saknas SUPABASE_URL/ANON_KEY kan ingenting
+# nå Supabase — login ser då "död" ut. Vi flaggar det tydligt i UI istället.
+CONFIG_OK = bool(SUPABASE_URL) and bool(SUPABASE_ANON_KEY)
+
+
+def _log_event(event_type: str, message: str = "", detail: str = "", user_email: str = "") -> None:
+    """Skriv en rad till app_events — persistent, querybar debug-logg.
+
+    Best-effort: får ALDRIG krascha appen. Skrivs via anon-klienten (det finns
+    en 'anon insert'-policy på tabellen). Läs via SQL för felsökning:
+        select * from app_events order by created_at desc limit 50;
+    """
+    _log.info("[event] %s | %s | %s", event_type, message, detail[:200])
+    try:
+        # returning="minimal" — anon saknar SELECT-rättighet på app_events, så
+        # en representation-retur skulle annars ge RLS-fel (42501).
+        _anon_supabase().table("app_events").insert({
+            "event_type": event_type,
+            "message": message[:500],
+            "detail": detail[:2000],
+            "user_email": user_email or None,
+        }, returning="minimal").execute()
+    except Exception as _e:  # noqa: BLE001 — loggning får aldrig stoppa appen
+        _log.warning("_log_event misslyckades (%s): %s", event_type, _e)
+
+
 def _sb_retry(fn, *, attempts: int = 3):
     """Run a Supabase call, retrying transient HTTP/2 connection drops.
 
@@ -532,6 +558,15 @@ def page_auth():
     st.caption("Takidentifiering & Leadsgenerering · Linus Bergström")
     st.divider()
 
+    # Tydligt fel om grundkonfigurationen saknas — annars ser login "död" ut.
+    if not CONFIG_OK:
+        st.error(
+            "⚠️ Appen är felkonfigurerad: SUPABASE_URL och/eller SUPABASE_ANON_KEY "
+            "saknas i secrets. Inloggning kan inte fungera förrän de är satta "
+            "(Streamlit Cloud → Settings → Secrets)."
+        )
+        _log_event("config_error", "SUPABASE_URL/ANON_KEY saknas vid login-render")
+
     tab_in, tab_up, tab_pw = st.tabs(["Logga in", "Skapa konto", "Glömt lösenord"])
 
     with tab_in:
@@ -566,9 +601,19 @@ def page_auth():
         if submitted:
             try:
                 do_login(email, password)
+                _log_event("login_ok", "inloggning lyckades", user_email=email)
                 st.rerun()
             except Exception as e:
                 st.error(_sv_error(e))
+                # Visa det råa felet + logga det, så "inget händer" aldrig mer är tyst.
+                with st.expander("Teknisk feldetalj (visa för support)"):
+                    st.code(f"{type(e).__name__}: {e}")
+                _log_event(
+                    "login_error",
+                    _sv_error(e),
+                    detail=f"{type(e).__name__}: {e}",
+                    user_email=email,
+                )
 
     with tab_up:
         with st.form("signup_form"):
