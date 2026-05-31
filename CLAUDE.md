@@ -8,8 +8,11 @@ Dessa inställningar följer med repot — fungerar i lokala terminalen, cloud-s
 ## Kommandon
 
 ```bash
-# Kör tester
+# Kör hela testsviten
 python -m pytest tests/ -q
+
+# Kör enbart acceptance-tester (appen är hel när dessa är gröna)
+python -m pytest -m acceptance -v
 
 # Syntaxkoll app.py / scanner.py
 python -c "import ast; ast.parse(open('app.py').read()); print('OK')"
@@ -17,6 +20,19 @@ python -c "import ast; ast.parse(open('app.py').read()); print('OK')"
 # Kör appen lokalt
 streamlit run app.py
 ```
+
+## Definition of done
+
+**Appen är hel när `pytest -m acceptance` är grön.**
+
+Acceptance-testerna i `tests/test_acceptance.py` täcker fem kritiska vägar:
+1. **Login-väg** — inloggning lyckas / svenska felmeddelanden vid fel
+2. **Scan-väg** — `scan_city` → `Lead` → `_lead_to_sb_row` → `load_leads`
+3. **Budget-väg** — scan stoppas vid budgettak, partial leads bevaras
+4. **DB-fel-väg** — Supabase-timeout → appen kraschar inte
+5. **Cost-estimat-väg** — `estimate_scan_cost` blockerar oversized scans
+
+En orkestrerare (se issue #56) kör `pytest -m acceptance` som grind innan den öppnar en PR.
 
 ## Agent skills
 
