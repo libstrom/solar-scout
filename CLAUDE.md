@@ -32,6 +32,24 @@ Default label strings (needs-triage, needs-info, ready-for-agent, ready-for-huma
 
 Single-context — `CONTEXT.md` at root + `docs/adr/`. See `docs/agents/domain.md`.
 
+## claude-lens — veckouppdateringar
+
+Håller dig uppdaterad om nya Claude/Anthropic-features, releases och skill-gaps.
+
+```bash
+# Kör digest (senaste 7 dagarna) → ~/claude-updates/YYYY-WW.md
+python3 ~/.claude/scripts/claude-lens.py
+
+# Printa till stdout
+python3 ~/.claude/scripts/claude-lens.py --print
+
+# Senaste 30 dagarna, snabbläge
+python3 ~/.claude/scripts/claude-lens.py --since 30 --no-youtube
+```
+
+Eller använd slash-kommandot `/claude-lens` i valfri Claude Code-session.
+Script: `~/.claude/scripts/claude-lens.py` · Skill: `~/.claude/skills/claude-lens/`
+
 ## Nyckelregler
 
 - **Mapbox 24h-regel**: Mapbox-bilder får ALDRIG lagras — bara visas i UI

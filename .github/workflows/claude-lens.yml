@@ -1,0 +1,50 @@
+name: claude-lens weekly digest
+
+on:
+  schedule:
+    # Måndag 06:00 UTC (08:00 svensk sommartid)
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      since_days:
+        description: 'Dagar att titta tillbaka'
+        default: '7'
+        required: false
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installera dependencies
+        run: pip install youtube-transcript-api yt-dlp requests -q
+
+      - name: Kör claude-lens
+        run: |
+          python3 .github/scripts/claude-lens-ci.py \
+            --since ${{ github.event.inputs.since_days || '7' }} \
+            --print > digest.md
+
+      - name: Skapa GitHub Issue med digest
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const digest = fs.readFileSync('digest.md', 'utf8');
+            const week = new Date().toISOString().slice(0, 10);
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `claude-lens: veckouppdatering ${week}`,
+              body: digest,
+              labels: ['claude-lens', 'needs-triage']
+            });

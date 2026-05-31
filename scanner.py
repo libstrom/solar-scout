@@ -33,6 +33,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Callable
 
+from scan_cost import BudgetTracker, ScanBudgetExceededError, DEFAULT_BUDGET_SEK
+
 try:
     import numpy as np
     from PIL import Image as _PILImage
@@ -46,6 +48,14 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 _log = logging.getLogger("solar_scout")
+
+
+class APIQuotaExceededError(RuntimeError):
+    """Raised when an external API (Anthropic or Google) hits a quota/billing wall."""
+    def __init__(self, api: str, detail: str = ""):
+        self.api = api
+        self.detail = detail
+        super().__init__(f"{api} quota/billing limit nådd — {detail}")
 
 # Limit concurrent Overpass calls — 4 parallel workers × 2 calls each can hit
 # the overpass-api.de rate limiter. Cap at 2 simultaneous requests.
@@ -755,8 +765,14 @@ def _fetch_street_view(google_key: str, lat: float, lng: float) -> bytes | None:
     )
     try:
         resp = httpx.get(url, timeout=10)
+        if resp.status_code == 429:
+            raise APIQuotaExceededError("Google Street View", "429 rate limit")
+        if resp.status_code == 403:
+            raise APIQuotaExceededError("Google Street View", "403 billing/API-nyckel")
         if resp.status_code == 200 and "image" in resp.headers.get("content-type", ""):
             return resp.content
+    except APIQuotaExceededError:
+        raise
     except Exception:
         pass
     return None
@@ -898,9 +914,15 @@ def _fetch_satellite(
     )
     try:
         resp = httpx.get(url, timeout=20)
+        if resp.status_code == 429:
+            raise APIQuotaExceededError("Google Static Maps", "429 rate limit")
+        if resp.status_code == 403:
+            raise APIQuotaExceededError("Google Static Maps", "403 billing/API-nyckel")
         resp.raise_for_status()
         _log.debug("_fetch_satellite source=google lat=%s lng=%s", lat, lng)
         return resp.content
+    except APIQuotaExceededError:
+        raise
     except Exception as exc:
         _log.warning("_fetch_satellite failed lat=%s lng=%s: %s", lat, lng, exc)
         return None
@@ -953,6 +975,7 @@ def _analyze_building(
     img_bytes: bytes,
     few_shot: list[tuple[str, str]] | None = None,
     street_view_bytes: bytes | None = None,
+    budget: "BudgetTracker | None" = None,
 ) -> tuple[bool, bool, bool, str]:
     """
     Returns (is_residential_house, has_solar_panels, is_unsure, reasoning).
@@ -965,13 +988,12 @@ def _analyze_building(
     """
     img_bytes = _enhance_contrast(img_bytes)
     b64 = base64.standard_b64encode(img_bytes).decode()
-    sv_clause = (
-        "\n\nA street-level photo of the SAME property follows the aerial image. "
+    sv_notice = (
+        "A street-level photo of the SAME property follows the aerial image. "
         "Use it as a secondary reference — solar panels on south-facing roof slopes "
         "are often clearly visible from the street. If the street-level view confirms "
         "or refutes panels, weight it heavily. If the view is obstructed or unclear, "
         "rely on the aerial image."
-        if street_view_bytes else ""
     )
     instruction = (
         "Swedish aerial orthophoto, ~50m wide, top-down view. "
@@ -1021,7 +1043,6 @@ def _analyze_building(
         "HOUSE=YES or HOUSE=NO\n"
         "SOLAR=YES or SOLAR=UNSURE or SOLAR=NO\n"
         "(SOLAR=NO whenever HOUSE=NO)"
-        + sv_clause
     )
     try:
         system_blocks: list[dict] = [
@@ -1050,7 +1071,7 @@ def _analyze_building(
             ]
             if street_view_bytes:
                 sv_b64 = base64.standard_b64encode(street_view_bytes).decode()
-                final_content.append({"type": "text", "text": "Street-level view of the same property:"})
+                final_content.append({"type": "text", "text": sv_notice})
                 final_content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": sv_b64}})
             msgs.append({"role": "user", "content": final_content})
         else:
@@ -1059,7 +1080,7 @@ def _analyze_building(
             ]
             if street_view_bytes:
                 sv_b64 = base64.standard_b64encode(street_view_bytes).decode()
-                final_content.append({"type": "text", "text": "Street-level view of the same property:"})
+                final_content.append({"type": "text", "text": sv_notice})
                 final_content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": sv_b64}})
             msgs = [{"role": "user", "content": final_content}]
         msg = client.messages.create(
@@ -1080,9 +1101,27 @@ def _analyze_building(
             if line.strip():
                 reasoning = line.strip()
                 break
-        _log.debug("_analyze_building HOUSE=%s SOLAR=%s UNSURE=%s few_shot=%s sv=%s",
-                   is_house, has_solar, is_unsure, bool(few_shot), bool(street_view_bytes))
+        u = msg.usage
+        if budget is not None:
+            budget.add_anthropic_usage(u)
+        _log.debug(
+            "_analyze_building HOUSE=%s SOLAR=%s UNSURE=%s few_shot=%s sv=%s "
+            "cache_read=%s cache_write=%s input=%s",
+            is_house, has_solar, is_unsure, bool(few_shot), bool(street_view_bytes),
+            getattr(u, "cache_read_input_tokens", 0),
+            getattr(u, "cache_creation_input_tokens", 0),
+            u.input_tokens,
+        )
         return is_house, has_solar, is_unsure, reasoning
+    except anthropic.RateLimitError as exc:
+        raise APIQuotaExceededError("Anthropic", "429 rate limit") from exc
+    except anthropic.APIStatusError as exc:
+        if exc.status_code in (402, 403):
+            raise APIQuotaExceededError("Anthropic", f"HTTP {exc.status_code} billing/auth") from exc
+        _log.error("_analyze_building API error: %s", exc)
+        return False, False, False, ""
+    except anthropic.AuthenticationError as exc:
+        raise APIQuotaExceededError("Anthropic", "API-nyckel ogiltig") from exc
     except Exception as exc:
         _log.error("_analyze_building API error: %s", exc)
         return False, False, False, ""
@@ -1124,6 +1163,7 @@ def _process_building(
     lm_layer: str = _LM_LAYERS[0],
     few_shot: list[tuple[str, str]] | None = None,
     skip_tile_keys: frozenset[str] = frozenset(),
+    budget: "BudgetTracker | None" = None,
 ) -> Lead | None:
     lat, lng = building["lat"], building["lng"]
     zoom = building.get("zoom", ZOOM_BUILDING)
@@ -1140,7 +1180,7 @@ def _process_building(
     if not _prefilter_building(img, anthropic_client):
         _log.debug("_process_building haiku_prefilter=NO osm_id=%s", building.get("osm_id"))
         return None
-    is_house, has_solar, is_unsure, reasoning = _analyze_building(anthropic_client, img, few_shot=few_shot)
+    is_house, has_solar, is_unsure, reasoning = _analyze_building(anthropic_client, img, few_shot=few_shot, budget=budget)
     if not is_house:
         return None
 
@@ -1151,7 +1191,7 @@ def _process_building(
         if sv_bytes:
             _log.debug("_process_building: UNSURE → Street View second pass lat=%s lng=%s", lat, lng)
             is_house, has_solar, is_unsure, reasoning = _analyze_building(
-                anthropic_client, img, few_shot=few_shot, street_view_bytes=sv_bytes
+                anthropic_client, img, few_shot=few_shot, street_view_bytes=sv_bytes, budget=budget
             )
             if not is_house:
                 return None
@@ -1237,12 +1277,16 @@ def scan_buildings_ai(
     max_leads: int | None = None,
     few_shot: list[tuple[str, str]] | None = None,
     skip_tile_keys: frozenset[str] = frozenset(),
+    budget: "BudgetTracker | None" = None,
 ) -> tuple[list[Lead], ScanStats]:
     """Run Claude Vision on each OSM building centroid.
 
     Args:
         max_leads: Stop processing once this many confirmed leads are found.
                    None means no limit.
+        budget: BudgetTracker som ackumulerar faktisk API-kostnad. Scanen
+                avbryts mjukt (redan hittade leads behålls) när taket nås.
+                None → en tracker med DEFAULT_BUDGET_SEK skapas internt.
         few_shot: Pre-loaded few-shot examples as (b64_jpeg, verdict_text) pairs.
                   If None, examples are loaded from LM WMS on first call.
                   Pass a pre-loaded list to avoid redundant downloads when
@@ -1276,9 +1320,13 @@ def scan_buildings_ai(
     if few_shot is None:
         few_shot = _load_few_shot_images()
 
+    # Budgetspärr: ackumulera faktisk kostnad och avbryt mjukt vid taket.
+    if budget is None:
+        budget = BudgetTracker(budget_sek=DEFAULT_BUDGET_SEK)
+
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
-            pool.submit(_process_building, b, google_key, client, mapbox_key, lm_key, lm_layer, few_shot, skip_tile_keys): b
+            pool.submit(_process_building, b, google_key, client, mapbox_key, lm_key, lm_layer, few_shot, skip_tile_keys, budget): b
             for b in buildings
         }
         done = 0
@@ -1289,6 +1337,8 @@ def scan_buildings_ai(
             except concurrent.futures.TimeoutError:
                 _log.warning("_process_building timed out after 60s, skipping")
                 result = None
+            except APIQuotaExceededError:
+                raise
             except Exception:
                 result = None
             if result is not None:
@@ -1299,11 +1349,21 @@ def scan_buildings_ai(
                     stats.yes += 1
             else:
                 stats.no += 1
+            budget.mark_building()
             if on_progress:
                 try:
                     on_progress(done, total, result)
                 except Exception as _cb_err:
                     _log.warning("on_progress callback error: %s", _cb_err)
+            # Hård kostnadsspärr: stoppa scanen men behåll redan hittade leads.
+            try:
+                budget.check()
+            except ScanBudgetExceededError as _be:
+                budget.stopped_over_budget = True
+                _log.warning("%s", _be)
+                for f in futures:
+                    f.cancel()
+                break
             # Short-circuit if we've hit the lead cap
             if max_leads is not None and len(leads) >= max_leads:
                 # Cancel remaining futures that haven't started yet
@@ -1445,16 +1505,21 @@ def scan_city(
     phase_callback: Callable[[str, int], None] | None = None,
     skip_tile_keys: frozenset[str] = frozenset(),
     user_id: str | None = None,
+    budget: "BudgetTracker | None" = None,
 ) -> tuple[list[Lead], ScanStats]:
     """Scan a city for buildings with solar panels.
 
     Args:
         max_leads: Stop scanning once this many confirmed leads are found.
                    None means no limit.
+        budget: Optional shared BudgetTracker. If None, a default 5000 kr tracker
+                is created. Callers can inspect budget.stopped_over_budget after.
 
     Returns:
         A tuple of (leads, stats) where stats aggregates yes/unsure/no counts.
     """
+    if budget is None:
+        budget = BudgetTracker(budget_sek=DEFAULT_BUDGET_SEK)
     _log.info("scan_city city=%s max_leads=%s", city_name, max_leads)
     gmaps = googlemaps.Client(key=google_key)
     results = gmaps.geocode(city_name)
@@ -1541,6 +1606,7 @@ def scan_city(
                 mapbox_key=mapbox_key, lm_key=lm_key,
                 max_leads=remaining, few_shot=few_shot,
                 skip_tile_keys=skip_tile_keys,
+                budget=budget,
             )
             _log.info("scan_city area_leads=%d", len(area_leads))
             all_ai_leads.extend(area_leads)
@@ -1548,13 +1614,15 @@ def scan_city(
             merged_stats.unsure += area_stats.unsure
             merged_stats.no += area_stats.no
 
+            if budget.stopped_over_budget:
+                break
             if max_leads is not None and len(osm_leads) + len(all_ai_leads) >= max_leads:
                 break
 
         # Glesbygd-pass: scan hela viewport utan landuse-filter.
         # Hus utanför residential-polygoner (landsbygd, ~20-30% av villor) missas
         # annars helt. Deduplicera via seen_building_ids.
-        if len(osm_leads) + len(all_ai_leads) < (max_leads or 9999):
+        if not budget.stopped_over_budget and len(osm_leads) + len(all_ai_leads) < (max_leads or 9999):
             remaining = None
             if max_leads is not None:
                 remaining = max_leads - len(osm_leads) - len(all_ai_leads)
@@ -1567,14 +1635,18 @@ def scan_city(
                 ]
                 _log.info("scan_city glesbygd fallback buildings=%d", len(fallback_buildings))
                 if fallback_buildings:
-                    glesbygd_leads = scan_buildings_ai(
+                    glesbygd_leads, glesbygd_stats = scan_buildings_ai(
                         fallback_buildings, google_key, anthropic_key, on_progress,
                         mapbox_key=mapbox_key, lm_key=lm_key,
                         max_leads=remaining, few_shot=few_shot,
                         skip_tile_keys=skip_tile_keys,
+                        budget=budget,
                     )
                     _log.info("scan_city glesbygd_leads=%d", len(glesbygd_leads))
                     all_ai_leads.extend(glesbygd_leads)
+                    merged_stats.yes += glesbygd_stats.yes
+                    merged_stats.unsure += glesbygd_stats.unsure
+                    merged_stats.no += glesbygd_stats.no
     else:
         # Fallback: 1 km radius around city centre
         _log.info("scan_city no residential areas — fallback to 1km radius")
@@ -1594,6 +1666,7 @@ def scan_city(
             mapbox_key=mapbox_key, lm_key=lm_key,
             max_leads=remaining, few_shot=few_shot,
             skip_tile_keys=skip_tile_keys,
+            budget=budget,
         )
 
     merged = merge_leads(osm_leads, all_ai_leads)
@@ -1691,12 +1764,19 @@ def scan_bbox(
     phase_callback: Callable[[str, int], None] | None = None,
     skip_tile_keys: frozenset[str] = frozenset(),
     user_id: str | None = None,
+    budget: "BudgetTracker | None" = None,
 ) -> tuple[list[Lead], ScanStats]:
     """Scan a bounding box for buildings with solar panels.
+
+    Args:
+        budget: Optional shared BudgetTracker. If None, a default 5000 kr tracker
+                is created. Callers can inspect budget.stopped_over_budget after.
 
     Returns:
         A tuple of (leads, stats) where stats aggregates yes/unsure/no counts.
     """
+    if budget is None:
+        budget = BudgetTracker(budget_sek=DEFAULT_BUDGET_SEK)
     tile_count = len(_bbox_tiles(south, west, north, east))
 
     # OSM solar tags: instant, works for any bbox size
@@ -1760,12 +1840,15 @@ def scan_bbox(
                     mapbox_key=mapbox_key, lm_key=lm_key,
                     max_leads=remaining, few_shot=few_shot,
                     skip_tile_keys=skip_tile_keys,
+                    budget=budget,
                 )
                 all_ai_leads.extend(area_leads)
                 merged_stats.yes    += area_stats.yes
                 merged_stats.unsure += area_stats.unsure
                 merged_stats.no     += area_stats.no
 
+                if budget.stopped_over_budget:
+                    break
                 if max_leads is not None and len(osm_leads) + len(all_ai_leads) >= max_leads:
                     break
         else:
@@ -1781,6 +1864,7 @@ def scan_bbox(
                 mapbox_key=mapbox_key, lm_key=lm_key,
                 max_leads=remaining, few_shot=few_shot,
                 skip_tile_keys=skip_tile_keys,
+                budget=budget,
             )
     else:
         # Small bbox (≤ ~2 km²): direct scan, no chunking needed
@@ -1795,6 +1879,7 @@ def scan_bbox(
             mapbox_key=mapbox_key, lm_key=lm_key,
             max_leads=remaining, few_shot=few_shot,
             skip_tile_keys=skip_tile_keys,
+            budget=budget,
         )
 
     if phase_callback:

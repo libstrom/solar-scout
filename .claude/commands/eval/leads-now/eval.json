@@ -1,0 +1,63 @@
+{
+  "skill": "leads-now",
+  "skill_path": ".claude/commands/leads-now.md",
+  "passing_threshold": 0.92,
+  "description": "Testar att leads-now ger David konkret och snabb vägledning för att få leads direkt.",
+  "test_cases": [
+    {
+      "id": "tc1",
+      "prompt": "Vi behöver leads så snabbt som möjligt, vart börjar vi?",
+      "assertions": [
+        "Svaret nämner minst en specifik stad (Nässjö, Huskvarna eller Vetlanda)",
+        "Svaret nämner att kontrollera om appen är uppe (Railway/Streamlit)",
+        "Svaret har ett tydligt första steg att ta",
+        "Svaret är kortfattat och action-orienterat, inte en lång utredning",
+        "Svaret nämner scanning eller scan-knappen"
+      ]
+    },
+    {
+      "id": "tc2",
+      "prompt": "Scanning gav 0 leads i Nässjö, vad gör vi nu?",
+      "assertions": [
+        "Svaret föreslår att köra /scan-debug eller diagnostik",
+        "Svaret föreslår att prova en annan stad som alternativ",
+        "Svaret ger minst två konkreta nästa steg",
+        "Svaret ger inte upp utan ger ett positivt handlingsalternativ",
+        "Svaret nämner Huskvarna eller Vetlanda som alternativ"
+      ]
+    },
+    {
+      "id": "tc3",
+      "prompt": "Hur exporterar jag leads till Excel eller CSV?",
+      "assertions": [
+        "Svaret nämner Leads-tabben specifikt",
+        "Svaret nämner export-knapp eller download-funktion",
+        "Svaret ger ett konkret steg-för-steg flöde",
+        "Svaret är specifikt för Solar Scout-appen (inte generiska råd)",
+        "Svaret nämner Excel eller CSV som exportformat"
+      ]
+    },
+    {
+      "id": "tc4",
+      "prompt": "Vilken stad ger flest bra leads just nu?",
+      "assertions": [
+        "Svaret nämner Nässjö, Huskvarna och Vetlanda som primäralternativ",
+        "Svaret ger en rekommendation om vilken stad att börja med",
+        "Svaret förklarar varför (villa-täthet eller liknande)",
+        "Svaret är direkt och undviker att svara 'det beror på'",
+        "Svaret ger ett tydligt svar istället för att fråga mer"
+      ]
+    },
+    {
+      "id": "tc5",
+      "prompt": "Appen verkar nere, Railway-appen startar inte",
+      "assertions": [
+        "Svaret ger ett konkret felsökningssteg för Railway-appen",
+        "Svaret nämner att kolla Railway-loggar eller status",
+        "Svaret ger ett alternativt sätt att köra appen lokalt om Railway är nere",
+        "Svaret ger minst ett handlingsbart nästa steg",
+        "Svaret panikerar inte utan ger ett lugnt och strukturerat svar"
+      ]
+    }
+  ]
+}

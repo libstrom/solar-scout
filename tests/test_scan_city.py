@@ -578,7 +578,7 @@ class TestGlesbygdFallback:
 
         def fake_scan_buildings_ai(buildings, *args, max_leads=None, **kwargs):
             scan_ai_calls.append(list(buildings))
-            return [_make_lead(b["lat"], b["lng"]) for b in buildings]
+            return [_make_lead(b["lat"], b["lng"]) for b in buildings], scanner.ScanStats()
 
         with patch("googlemaps.Client", return_value=fake_gmaps), \
              patch.object(scanner, "scan_area_osm", return_value=[]), \
@@ -628,7 +628,7 @@ class TestGlesbygdFallback:
 
         def fake_scan_buildings_ai(buildings, *args, max_leads=None, **kwargs):
             scan_ai_calls.append(list(buildings))
-            return [_make_lead(b["lat"], b["lng"]) for b in buildings]
+            return [_make_lead(b["lat"], b["lng"]) for b in buildings], scanner.ScanStats()
 
         fake_area = {"lat": 59.35, "lng": 18.05, "area_deg2": 0.01}
 
@@ -671,7 +671,7 @@ class TestGlesbygdFallback:
 
         def fake_scan_buildings_ai(buildings, *args, max_leads=None, **kwargs):
             # First call fills up max_leads=1
-            return [_make_lead(59.35, 18.05)]
+            return [_make_lead(59.35, 18.05)], scanner.ScanStats()
 
         with patch("googlemaps.Client", return_value=fake_gmaps), \
              patch.object(scanner, "scan_area_osm", return_value=[]), \
@@ -681,7 +681,7 @@ class TestGlesbygdFallback:
              patch.object(scanner, "scan_buildings_ai",
                           side_effect=fake_scan_buildings_ai):
 
-            result = scan_city(
+            result, _stats = scan_city(
                 city_name="Teststad",
                 google_key="fake",
                 anthropic_key="fake",
