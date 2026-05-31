@@ -1007,6 +1007,11 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
         st.info("Gå till fliken **Konto** för att köpa credits.")
         return
 
+    # Visa ev. felmeddelande från föregående scan-försök (överlever reruns)
+    _prev_err = st.session_state.pop("_scanner_last_error", None)
+    if _prev_err:
+        st.error(_prev_err)
+
     south = west = north = east = None
     city_name = ""
 
@@ -1258,7 +1263,7 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
         def _render_live_leads():
             with live_leads_ph.container():
                 st.caption(f"☀️ **{len(found_leads)} solcellstak hittade hittills** — ✅/❌ granskning möjlig efter scan")
-                for _live_lead in found_leads:
+                for _i, _live_lead in enumerate(found_leads):
                     with st.container(border=True):
                         _col_link, _col_info = st.columns([1, 2])
                         with _col_link:
@@ -1268,7 +1273,8 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                                 if _live_lead.lat and _live_lead.lng else None
                             )
                             if _url:
-                                st.link_button("🛰 Visa tak", _url, use_container_width=True)
+                                st.link_button("🛰 Visa tak", _url, use_container_width=True,
+                                               key=f"_live_tak_{_i}")
                             else:
                                 st.caption("(ingen bild)")
                         with _col_info:
@@ -1348,18 +1354,22 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                 )
         except ValueError as e:
             _log.error("scan ValueError: %s", e)
-            st.error(str(e))
+            _emsg = str(e)
+            st.session_state["_scanner_last_error"] = _emsg
+            st.error(_emsg)
             return
         except Exception as e:
             from scanner import APIQuotaExceededError as _QuotaErr  # noqa: PLC0415
             if isinstance(e, _QuotaErr):
                 _log.error("API quota exceeded: %s", e)
                 _send_quota_alert(e.api, e.detail)
-                st.error(
+                _emsg = (
                     f"**{e.api} har nått sin kvot eller saknar pengar på kontot.**\n\n"
                     f"Scanning är stoppad. Ägaren har fått ett akut mail. "
                     f"Försök igen om en stund eller kontakta Linus."
                 )
+                st.session_state["_scanner_last_error"] = _emsg
+                st.error(_emsg)
                 return
             _log.error("scan Exception: %s", e, exc_info=True)
             scan_crashed = True
