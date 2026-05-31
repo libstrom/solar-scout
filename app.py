@@ -659,7 +659,7 @@ def page_auth():
     with tab_pw:
         st.caption("Vi skickar en länk till din e-post så att du kan sätta ett nytt lösenord.")
         with st.form("reset_form"):
-            email = st.text_input("E-postadress")
+            email = st.text_input("E-postadress", key="reset_email")
             submitted = st.form_submit_button("Skicka återställningslänk", type="primary", use_container_width=True)
         if submitted:
             try:
@@ -776,7 +776,7 @@ def page_paywall(user, lead_count: int = 0):
                     st.button(plan["cta"], disabled=True, use_container_width=True)
 
     st.divider()
-    if st.button("Logga ut", use_container_width=True):
+    if st.button("Logga ut", use_container_width=True, key="logout_account"):
         do_logout()
         st.rerun()
 
@@ -1681,7 +1681,7 @@ def page_review(user):
     try:
         resp = (
             sb.table("scout_leads")
-            .select("id,address,lat,lng,ai_reasoning,building_type,maps_url,confidence")
+            .select("id,address,lat,lng,ai_reasoning,building_type,maps_url")
             .eq("user_id", str(user.id))
             .eq("needs_review", True)
             .is_("user_confirmed", "null")
@@ -2341,7 +2341,7 @@ def page_account(user, profile):
 
     col_cancel, col_delete = st.columns(2)
     with col_cancel:
-        if st.button("Avbryt", use_container_width=True):
+        if st.button("Avbryt", use_container_width=True, key="btn_delete_cancel"):
             st.session_state.pop("delete_account_confirm_open", None)
             st.session_state.pop("delete_account_confirm_input", None)
             st.rerun()
@@ -2377,7 +2377,7 @@ def page_app(user, profile, lead_count: int = 0):
             except Exception:
                 pass
 
-        if st.button("Logga ut", use_container_width=True):
+        if st.button("Logga ut", use_container_width=True, key="logout_sidebar"):
             do_logout()
             st.rerun()
 
