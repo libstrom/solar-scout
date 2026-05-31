@@ -1102,16 +1102,29 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                 edit_options={"edit": True, "remove": True},
             ).add_to(m)
 
-            # Existing lead markers
+            # Existing lead markers — hover visar en liten takbild (LM ortofoto,
+            # lagringsbar/gratis) + adress. Bilden laddas av webbläsaren först när
+            # tooltipen öppnas (mouseover), så alla 200 hämtas inte på en gång.
+            import html as _html
+            from scanner import lm_wms_url as _lm_wms_url  # noqa: PLC0415
             for _row in _map_rows[:200]:
                 if _row.get("lat") and _row.get("lng"):
+                    _addr = _html.escape(_row.get("address", "") or "")
+                    _thumb = _lm_wms_url(_row["lat"], _row["lng"], size_m=80, width=240, height=180)
+                    _tip_html = (
+                        f'<div style="text-align:center;width:220px">'
+                        f'<img src="{_html.escape(_thumb)}" width="210" '
+                        f'style="border-radius:6px;display:block;margin:0 auto 4px" '
+                        f"loading=\"lazy\" onerror=\"this.style.display='none'\">"
+                        f'<span style="font-size:12px">{_addr}</span></div>'
+                    )
                     folium.CircleMarker(
                         location=[_row["lat"], _row["lng"]],
                         radius=5,
                         color="#f59e0b",
                         fill=True,
                         fill_opacity=0.75,
-                        tooltip=_row.get("address", ""),
+                        tooltip=folium.Tooltip(_tip_html, sticky=True),
                     ).add_to(m)
 
             output = st_folium(
