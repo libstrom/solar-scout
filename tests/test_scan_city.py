@@ -101,20 +101,20 @@ class TestMaxLeadsCap:
             leads = [_make_lead(b["lat"], b["lng"]) for b in buildings]
             if max_leads is not None:
                 leads = leads[:max_leads]
-            return leads
+            return leads, scanner.ScanStats()
 
         with patch.object(scanner, "_overpass", return_value=[]), \
              patch.object(scanner, "_get_osm_buildings", return_value=ten_buildings), \
              patch.object(scanner, "scan_buildings_ai",
                           side_effect=fake_scan_buildings_ai):
 
-            result = scan_bbox(
+            leads, stats = scan_bbox(
                 south=59.34, west=18.04, north=59.345, east=18.055,
                 google_key="fake", anthropic_key="fake",
                 max_leads=5,
             )
 
-        assert len(result) <= 5
+        assert len(leads) <= 5
 
     def test_scan_bbox_max_leads_with_osm_overflow(self):
         """OSM returnerar redan 10 leads och max_leads=5 → exakt 5."""
@@ -124,13 +124,13 @@ class TestMaxLeadsCap:
         with patch.object(scanner, "_overpass", return_value=ten_osm_elements), \
              patch.object(scanner, "_get_osm_buildings", return_value=[]):
 
-            result = scan_bbox(
+            leads, stats = scan_bbox(
                 south=59.34, west=18.04, north=59.345, east=18.055,
                 google_key="fake", anthropic_key="fake",
                 max_leads=5,
             )
 
-        assert len(result) == 5
+        assert len(leads) == 5
 
     def test_scan_city_max_leads_caps_ai_results(self):
         """scan_city med max_leads=5 och 10 AI-leads → max 5 totalt.
@@ -145,7 +145,7 @@ class TestMaxLeadsCap:
             leads = [_make_lead(b["lat"], b["lng"]) for b in buildings]
             if max_leads is not None:
                 leads = leads[:max_leads]
-            return leads
+            return leads, scanner.ScanStats()
 
         fake_gmaps = MagicMock()
         fake_gmaps.geocode.return_value = _make_geocode_result()
@@ -160,14 +160,14 @@ class TestMaxLeadsCap:
              patch.object(scanner, "scan_buildings_ai",
                           side_effect=fake_scan_buildings_ai):
 
-            result = scan_city(
+            leads, stats = scan_city(
                 city_name="Teststad",
                 google_key="fake",
                 anthropic_key="fake",
                 max_leads=5,
             )
 
-        assert len(result) <= 5
+        assert len(leads) <= 5
 
     def test_scan_city_no_anthropic_key_caps_osm(self):
         """Utan anthropic_key returneras bara OSM-leads, cappade till max_leads."""
@@ -179,14 +179,14 @@ class TestMaxLeadsCap:
         with patch("googlemaps.Client", return_value=fake_gmaps), \
              patch.object(scanner, "scan_area_osm", return_value=five_osm):
 
-            result = scan_city(
+            leads, stats = scan_city(
                 city_name="Teststad",
                 google_key="fake",
                 anthropic_key=None,
                 max_leads=3,
             )
 
-        assert len(result) == 3
+        assert len(leads) == 3
 
 
 # ── 2. dedup ───────────────────────────────────────────────────────────────────
@@ -204,16 +204,17 @@ class TestDedup:
 
         with patch.object(scanner, "_overpass", return_value=[osm_element]), \
              patch.object(scanner, "_get_osm_buildings", return_value=[ai_building]), \
-             patch.object(scanner, "scan_buildings_ai", return_value=[ai_lead]):
+             patch.object(scanner, "scan_buildings_ai",
+                          return_value=([ai_lead], scanner.ScanStats())):
 
-            result = scan_bbox(
+            leads, stats = scan_bbox(
                 south=59.340, west=18.045, north=59.345, east=18.055,
                 google_key="fake", anthropic_key="fake",
             )
 
         # The coordinate dedup in scan_bbox filters out buildings near OSM leads,
         # then merge_leads further deduplicates — at most 1 result expected.
-        lats = [r.lat for r in result]
+        lats = [r.lat for r in leads]
         assert lats.count(lat) <= 1, "Duplicate lat found in result"
 
     def test_merge_leads_removes_duplicates_by_proximity(self):
@@ -248,7 +249,7 @@ class TestDedup:
 
         def fake_scan_buildings_ai(buildings, *args, **kwargs):
             calls_to_scan_buildings_ai.append(list(buildings))
-            return [_make_lead(b["lat"], b["lng"]) for b in buildings]
+            return [_make_lead(b["lat"], b["lng"]) for b in buildings], scanner.ScanStats()
 
         with patch("googlemaps.Client", return_value=fake_gmaps), \
              patch.object(scanner, "scan_area_osm", return_value=[]), \
@@ -279,14 +280,15 @@ class TestEmptyCity:
         """scan_bbox med tom Overpass-respons → []."""
         with patch.object(scanner, "_overpass", return_value=[]), \
              patch.object(scanner, "_get_osm_buildings", return_value=[]), \
-             patch.object(scanner, "scan_buildings_ai", return_value=[]):
+             patch.object(scanner, "scan_buildings_ai",
+                          return_value=([], scanner.ScanStats())):
 
-            result = scan_bbox(
+            leads, stats = scan_bbox(
                 south=59.340, west=18.045, north=59.345, east=18.055,
                 google_key="fake", anthropic_key="fake",
             )
 
-        assert result == []
+        assert leads == []
 
     def test_scan_city_no_buildings_returns_empty_list(self):
         """scan_city med inga byggnader → []."""
@@ -297,15 +299,16 @@ class TestEmptyCity:
              patch.object(scanner, "scan_area_osm", return_value=[]), \
              patch.object(scanner, "_get_residential_areas", return_value=[]), \
              patch.object(scanner, "_get_osm_buildings", return_value=[]), \
-             patch.object(scanner, "scan_buildings_ai", return_value=[]):
+             patch.object(scanner, "scan_buildings_ai",
+                          return_value=([], scanner.ScanStats())):
 
-            result = scan_city(
+            leads, stats = scan_city(
                 city_name="Tomstad",
                 google_key="fake",
                 anthropic_key="fake",
             )
 
-        assert result == []
+        assert leads == []
 
     def test_scan_city_no_results_from_geocode_raises(self):
         """Om geocode returnerar [] ska ValueError kastas."""
@@ -333,13 +336,13 @@ class TestEmptyCity:
                           return_value=[area_without_buildings]), \
              patch.object(scanner, "_get_osm_buildings", return_value=[]):
 
-            result = scan_city(
+            leads, stats = scan_city(
                 city_name="Tomstad",
                 google_key="fake",
                 anthropic_key="fake",
             )
 
-        assert result == []
+        assert leads == []
 
 
 # ── 4. area_cap ────────────────────────────────────────────────────────────────
@@ -468,8 +471,8 @@ class TestAllAreas:
             area_scan_count[0] += 1
             # Only area 5 (call #5) produces a lead
             if area_scan_count[0] == 5:
-                return [_make_lead(59.35, 18.05)]
-            return []
+                return [_make_lead(59.35, 18.05)], scanner.ScanStats()
+            return [], scanner.ScanStats()
 
         with patch("googlemaps.Client", return_value=fake_gmaps), \
              patch.object(scanner, "scan_area_osm", return_value=[]), \
@@ -479,14 +482,14 @@ class TestAllAreas:
              patch.object(scanner, "scan_buildings_ai",
                           side_effect=fake_scan_buildings_ai):
 
-            result = scan_city(
+            leads, stats = scan_city(
                 city_name="Teststad",
                 google_key="fake",
                 anthropic_key="fake",
                 max_leads=10,
             )
 
-        assert len(result) >= 1, "Ska hitta lead i area 5"
+        assert len(leads) >= 1, "Ska hitta lead i area 5"
         assert area_scan_count[0] >= 5, (
             f"Bara {area_scan_count[0]} areas scannades — gamla buggen begränsade till 2"
         )
@@ -510,7 +513,7 @@ class TestAllAreas:
             leads = [_make_lead(59.35 + area_scan_count[0] * 0.0001, 18.05)]
             if max_leads is not None:
                 leads = leads[:max_leads]
-            return leads
+            return leads, scanner.ScanStats()
 
         with patch("googlemaps.Client", return_value=fake_gmaps), \
              patch.object(scanner, "scan_area_osm", return_value=[]), \
@@ -519,13 +522,173 @@ class TestAllAreas:
              patch.object(scanner, "scan_buildings_ai",
                           side_effect=fake_scan_buildings_ai):
 
-            result = scan_city(
+            leads, stats = scan_city(
                 city_name="Teststad",
                 google_key="fake",
                 anthropic_key="fake",
                 max_leads=3,
             )
 
-        assert len(result) <= 3, "Ska inte returnera fler än max_leads"
+        assert len(leads) <= 3, "Ska inte returnera fler än max_leads"
         # Should stop well before scanning all 20 areas
         assert area_scan_count[0] < 20, "Ska sluta scanna när max_leads nås"
+
+
+# ── 6. glesbygd fallback ───────────────────────────────────────────────────────
+
+class TestGlesbygdFallback:
+    """scan_city ska köra ett glesbygd-pass med hela viewport om leads < max_leads.
+
+    Hus UTANFÖR landuse=residential-polygoner (~20-30% på landsbygden) skannas
+    annars aldrig. Fallback-passet kallar _get_osm_buildings direkt på hela
+    city-viewporten och deduplikerar via seen_building_ids.
+    """
+
+    def test_glesbygd_fallback_scans_buildings_outside_residential_areas(self):
+        """Om residential_areas ger 0 leads ska glesbygd-passet köras med hela viewport.
+
+        Setup:
+          - 1 residential_area som ger 0 leads (0 byggnader)
+          - _get_osm_buildings(viewport) returnerar 3 byggnader (glesbygd)
+          - Verifiera att scan_buildings_ai anropas med dessa 3 byggnader
+        """
+        fake_gmaps = MagicMock()
+        fake_gmaps.geocode.return_value = _make_geocode_result(
+            south=59.30, west=18.00, north=59.40, east=18.10
+        )
+
+        fake_area = {"lat": 59.35, "lng": 18.05, "area_deg2": 0.01}
+
+        # Three buildings that live outside the residential area
+        glesbygd_buildings = [
+            _make_building(f"RURAL_{i}", 59.38 + i * 0.001, 18.08)
+            for i in range(3)
+        ]
+
+        # Track calls to _get_osm_buildings and scan_buildings_ai
+        get_osm_calls = []
+        scan_ai_calls = []
+
+        def fake_get_osm_buildings(south, west, north, east, **kwargs):
+            get_osm_calls.append((south, west, north, east))
+            # Area call (small bbox ~1 km radius) → 0 buildings
+            # Viewport call (large bbox 59.30..59.40) → glesbygd_buildings
+            is_viewport = (abs(south - 59.30) < 0.01 and abs(north - 59.40) < 0.01)
+            return glesbygd_buildings if is_viewport else []
+
+        def fake_scan_buildings_ai(buildings, *args, max_leads=None, **kwargs):
+            scan_ai_calls.append(list(buildings))
+            return [_make_lead(b["lat"], b["lng"]) for b in buildings], scanner.ScanStats()
+
+        with patch("googlemaps.Client", return_value=fake_gmaps), \
+             patch.object(scanner, "scan_area_osm", return_value=[]), \
+             patch.object(scanner, "_get_residential_areas", return_value=[fake_area]), \
+             patch.object(scanner, "_get_osm_buildings",
+                          side_effect=fake_get_osm_buildings), \
+             patch.object(scanner, "scan_buildings_ai",
+                          side_effect=fake_scan_buildings_ai):
+
+            result = scan_city(
+                city_name="Teststad",
+                google_key="fake",
+                anthropic_key="fake",
+            )
+
+        # At least one scan_buildings_ai call should include the glesbygd buildings
+        all_scanned_ids = [
+            b["osm_id"]
+            for call in scan_ai_calls
+            for b in call
+        ]
+        assert any(bid.startswith("RURAL_") for bid in all_scanned_ids), (
+            "Glesbygd-byggnader (RURAL_*) ska ha skannats av scan_buildings_ai. "
+            f"Faktiska IDs: {all_scanned_ids}"
+        )
+
+    def test_glesbygd_fallback_deduplicates_already_seen_buildings(self):
+        """Glesbygd-passet ska inte skicka redan-sedda OSM-IDs till scan_buildings_ai."""
+        fake_gmaps = MagicMock()
+        fake_gmaps.geocode.return_value = _make_geocode_result(
+            south=59.30, west=18.00, north=59.40, east=18.10
+        )
+
+        already_seen_building = _make_building("SEEN_ID", 59.35, 18.05)
+        new_rural_building = _make_building("NEW_RURAL", 59.38, 18.08)
+
+        def fake_get_osm_buildings(south, west, north, east, **kwargs):
+            is_viewport = (abs(south - 59.30) < 0.01 and abs(north - 59.40) < 0.01)
+            if is_viewport:
+                # Viewport returns both the already-seen and a new rural building
+                return [already_seen_building, new_rural_building]
+            else:
+                # Area call returns the already-seen building
+                return [already_seen_building]
+
+        scan_ai_calls = []
+
+        def fake_scan_buildings_ai(buildings, *args, max_leads=None, **kwargs):
+            scan_ai_calls.append(list(buildings))
+            return [_make_lead(b["lat"], b["lng"]) for b in buildings], scanner.ScanStats()
+
+        fake_area = {"lat": 59.35, "lng": 18.05, "area_deg2": 0.01}
+
+        with patch("googlemaps.Client", return_value=fake_gmaps), \
+             patch.object(scanner, "scan_area_osm", return_value=[]), \
+             patch.object(scanner, "_get_residential_areas", return_value=[fake_area]), \
+             patch.object(scanner, "_get_osm_buildings",
+                          side_effect=fake_get_osm_buildings), \
+             patch.object(scanner, "scan_buildings_ai",
+                          side_effect=fake_scan_buildings_ai):
+
+            scan_city(
+                city_name="Teststad",
+                google_key="fake",
+                anthropic_key="fake",
+            )
+
+        all_scanned_ids = [b["osm_id"] for call in scan_ai_calls for b in call]
+        assert all_scanned_ids.count("SEEN_ID") <= 1, (
+            "SEEN_ID ska inte passas till scan_buildings_ai mer än en gång"
+        )
+
+    def test_glesbygd_fallback_skipped_when_max_leads_already_reached(self):
+        """Om max_leads redan är uppnått INNAN glesbygd-passet, ska det inte köras."""
+        fake_gmaps = MagicMock()
+        fake_gmaps.geocode.return_value = _make_geocode_result(
+            south=59.30, west=18.00, north=59.40, east=18.10
+        )
+
+        fake_area = {"lat": 59.35, "lng": 18.05, "area_deg2": 0.01}
+        area_building = _make_building("AREA_BLD", 59.35, 18.05)
+
+        viewport_call_count = [0]
+
+        def fake_get_osm_buildings(south, west, north, east, **kwargs):
+            is_viewport = (abs(south - 59.30) < 0.01 and abs(north - 59.40) < 0.01)
+            if is_viewport:
+                viewport_call_count[0] += 1
+            return [area_building] if not is_viewport else []
+
+        def fake_scan_buildings_ai(buildings, *args, max_leads=None, **kwargs):
+            # First call fills up max_leads=1
+            return [_make_lead(59.35, 18.05)], scanner.ScanStats()
+
+        with patch("googlemaps.Client", return_value=fake_gmaps), \
+             patch.object(scanner, "scan_area_osm", return_value=[]), \
+             patch.object(scanner, "_get_residential_areas", return_value=[fake_area]), \
+             patch.object(scanner, "_get_osm_buildings",
+                          side_effect=fake_get_osm_buildings), \
+             patch.object(scanner, "scan_buildings_ai",
+                          side_effect=fake_scan_buildings_ai):
+
+            result, _stats = scan_city(
+                city_name="Teststad",
+                google_key="fake",
+                anthropic_key="fake",
+                max_leads=1,
+            )
+
+        assert len(result) <= 1
+        assert viewport_call_count[0] == 0, (
+            "Viewport-call (glesbygd-pass) ska inte köras när max_leads redan är uppnått"
+        )

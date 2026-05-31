@@ -5,9 +5,10 @@ Get David actual solar leads as fast as possible. Skip everything else.
 ## Decision tree
 
 ```
-Har vi Railway-appen uppe?
+Är scannern igång?
   Ja → Gå direkt till appen, scanna en stad, spara leads
-  Nej → Kolla Railway dashboard
+  Nej → Starta appen lokalt: streamlit run app.py
+         Startar inte? → kolla loggarna i terminalen efter felmeddelanden
 
 Fungerar scanningen?
   Ort-läge fungerar → Använd det, rita-läge är sekundärt
@@ -21,7 +22,7 @@ Vilken stad ger mest träffar?
 
 ## Snabbaste vägen till leads
 
-1. Öppna Railway-appen
+1. Öppna appen
 2. Flik "Scanna" → Ort/stad → t.ex. "Huskvarna"
 3. Max antal leads: 30
 4. Starta scanning (vänta 2–5 min)
@@ -34,8 +35,8 @@ Kör `/scan-debug` för strukturerad felsökning.
 
 Snabbkoll utan felsökning:
 - Försök med en annan ort
-- Kontrollera att ANTHROPIC_API_KEY är satt på Railway
-- Kolla Railway-loggarna efter `Overpass returned 0 elements`
+- Kontrollera att ANTHROPIC_API_KEY är satt i miljövariablerna
+- Kolla app-loggarna efter `Overpass returned 0 elements`
 
 ## Vad som är live just nu
 

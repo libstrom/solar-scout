@@ -174,10 +174,17 @@ def test_multiple_buildings_all_returned_without_addr_nodes():
 
 def _make_process_building_patches(analyze_return, has_extra_solar=False, img_bytes=b"fake_image"):
     """Return a context-manager stack that stubs out _fetch_satellite,
-    _analyze_building, _fetch_street_view, and _has_extra_solar_nearby."""
+    _analyze_building, _prefilter_building, _fetch_street_view, and
+    _has_extra_solar_nearby for _process_building tests.
+
+    _prefilter_building is stubbed to True (pass-through) so that existing tests
+    that focus on _analyze_building behaviour are not affected by the Haiku
+    pre-filter.
+    """
     from contextlib import ExitStack
     stack = ExitStack()
     stack.enter_context(patch("scanner._fetch_satellite", return_value=img_bytes))
+    stack.enter_context(patch("scanner._prefilter_building", return_value=True))
     stack.enter_context(patch("scanner._analyze_building", return_value=analyze_return))
     stack.enter_context(patch("scanner._fetch_street_view", return_value=None))
     stack.enter_context(patch("scanner._has_extra_solar_nearby", return_value={
@@ -265,6 +272,99 @@ def test_solar_unsure_address_kept_as_is_if_already_readable():
     assert lead is not None
     # The address contains alphabetical chars so no reverse geocoding should happen
     assert lead.address == "Björkvägen 12, Malmö"
+
+
+# ── Haiku pre-filter tests ────────────────────────────────────────────────────
+
+
+def _make_haiku_response(text: str):
+    """Return a minimal Anthropic messages.create mock response."""
+    mock_content = MagicMock()
+    mock_content.text = text
+    mock_response = MagicMock()
+    mock_response.content = [mock_content]
+    return mock_response
+
+
+def test_haiku_prefilter_skips_sonnet_when_no_solar():
+    """Haiku returnerar 'NO' → _analyze_building (Sonnet) ska INTE anropas och resultatet är None."""
+    building = _make_building_dict(address="Skuggvägen 8, Vellinge")
+
+    mock_client = MagicMock()
+    mock_client.messages.create.return_value = _make_haiku_response("NO")
+
+    with patch("scanner._fetch_satellite", return_value=b"fake_image"), \
+         patch("scanner._analyze_building") as mock_analyze:
+
+        lead = _process_building(building, google_key="fake", anthropic_client=mock_client)
+
+    assert lead is None, "Haiku=NO ska ge None (ingen lead)"
+    mock_analyze.assert_not_called(), "_analyze_building (Sonnet) ska INTE anropas när Haiku=NO"
+
+
+def test_haiku_prefilter_passes_through_when_yes():
+    """Haiku returnerar 'YES' → _analyze_building (Sonnet) ska anropas."""
+    building = _make_building_dict(address="Solvägen 3, Lund")
+
+    mock_client = MagicMock()
+    mock_client.messages.create.return_value = _make_haiku_response("YES")
+
+    analyze_return = (True, True, False, "Clear solar array on roof.")
+
+    with patch("scanner._fetch_satellite", return_value=b"fake_image"), \
+         patch("scanner._analyze_building", return_value=analyze_return) as mock_analyze, \
+         patch("scanner._has_extra_solar_nearby", return_value={
+             "extra_solar_found": False, "solar_locations": [], "villa_nearby": False
+         }):
+
+        lead = _process_building(building, google_key="fake", anthropic_client=mock_client)
+
+    mock_analyze.assert_called_once(), "_analyze_building (Sonnet) ska anropas när Haiku=YES"
+    assert lead is not None, "Haiku=YES + Sonnet=YES ska ge ett lead"
+
+
+def test_haiku_prefilter_fails_open():
+    """Om Haiku-anropet kastar exception ska _analyze_building ändå anropas (fail open)."""
+    building = _make_building_dict(address="Testgatan 1, Malmö")
+
+    mock_client = MagicMock()
+    mock_client.messages.create.side_effect = Exception("API timeout")
+
+    analyze_return = (True, True, False, "Solar panels visible.")
+
+    with patch("scanner._fetch_satellite", return_value=b"fake_image"), \
+         patch("scanner._analyze_building", return_value=analyze_return) as mock_analyze, \
+         patch("scanner._has_extra_solar_nearby", return_value={
+             "extra_solar_found": False, "solar_locations": [], "villa_nearby": False
+         }):
+
+        lead = _process_building(building, google_key="fake", anthropic_client=mock_client)
+
+    mock_analyze.assert_called_once(), (
+        "_analyze_building ska anropas när Haiku kastar exception (fail open)"
+    )
+
+
+def test_haiku_prefilter_no_on_none_image():
+    """Om _fetch_satellite returnerar None ska pre-filter inte köras (tidig None-return)."""
+    building = _make_building_dict()
+
+    mock_client = MagicMock()
+
+    with patch("scanner._fetch_satellite", return_value=None), \
+         patch("scanner._analyze_building") as mock_analyze:
+
+        lead = _process_building(building, google_key="fake", anthropic_client=mock_client)
+
+    assert lead is None
+    mock_analyze.assert_not_called()
+    # Haiku create should NOT be called if there's no image
+    # (existing early-return before prefilter)
+    haiku_calls = [
+        call for call in mock_client.messages.create.call_args_list
+        if "haiku" in str(call).lower()
+    ]
+    assert len(haiku_calls) == 0, "Haiku ska inte anropas när img är None"
 
 
 # ── Import guard ───────────────────────────────────────────────────────────────
