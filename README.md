@@ -6,7 +6,7 @@ Streamlit-app för att hitta villor utan solceller i ett geografiskt område —
 
 1. **Hämtar byggnader** från OpenStreetMap (Overpass API) inom en stad eller ritat område
 2. **Pre-filtrerar** varje byggnad med Claude Haiku (billigt, snabbt) — filtrerar bort ~60% som uppenbart inte är villor
-3. **Analyserar taket** med Claude Opus 4.8 via satellitbild — detekterar befintliga solceller
+3. **Analyserar taket** med Claude Sonnet/Opus via satellitbild — detekterar befintliga solceller
 4. **Sparar leads** till Supabase i realtid — adress, koordinater, takets bild
 5. **Visar leads** på interaktiv karta med mouseover-förhandsvisning av taket
 
@@ -23,7 +23,7 @@ streamlit run app.py
 |---|---|
 | `ANTHROPIC_API_KEY` | Claude API — bildanalys |
 | `SUPABASE_URL` | Projektets URL |
-| `SUPABASE_KEY` | Service role-nyckel — **bara för scanner.py** (systemnivå). I Streamlit-appen används `get_supabase()` som hämtar den autentiserade klienten ur `st.session_state` så att RLS upprätthålls. |
+| `SUPABASE_KEY` | Service role-nyckel (anon fungerar ej med RLS) |
 | `GOOGLE_API_KEY` | Google Static Maps (fallback-bildkälla) |
 | `MAPBOX_TOKEN` | Kartvisning i UI |
 | `RESEND_API_KEY` | E-postlarm |
@@ -42,4 +42,4 @@ python -m pytest -m acceptance -v
 
 ## Arkitektur
 
-Se [CONTEXT.md](CONTEXT.md) för fullständig arkitektur, scanner-pipeline och kostnadskalkyl.
+Se [CLAUDE.md](CLAUDE.md) för fullständig arkitektur, scanner-pipeline och kostnadskalkyl.
