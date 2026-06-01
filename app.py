@@ -192,22 +192,13 @@ def init_auth():
             pass
 
     if not access or not refresh:
-        # Fallback: stx.CookieManager (behöver JS round-trip, men sessioner
-        # satta med gamla versionen av appen läses fortfarande upp)
+        # Fallback: stx.CookieManager (sessioner satta med äldre appversion)
         cm = _get_cookie_manager()
         if cm is not None:
             access = cm.get("access_token") or access
             refresh = cm.get("refresh_token") or refresh
-            if not access or not refresh:
-                attempts = st.session_state.get("_cookie_load_attempted", 0)
-                if attempts < 2:
-                    st.session_state["_cookie_load_attempted"] = attempts + 1
-                    st.rerun()
         if not access or not refresh:
-            st.session_state.pop("_cookie_load_attempted", None)
             return None
-
-    st.session_state.pop("_cookie_load_attempted", None)
 
     # Validera mot Supabase (körs bara vid första rendern eller efter token-refresh).
     user_sb = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
@@ -230,8 +221,8 @@ def init_auth():
             cm = _get_cookie_manager()
             if cm is not None:
                 _exp = datetime.now() + timedelta(days=30)
-                cm.set("access_token", resp.session.access_token, expires_at=_exp)
-                cm.set("refresh_token", resp.session.refresh_token, expires_at=_exp)
+                cm.set("access_token", resp.session.access_token, expires_at=_exp, key="set_access_refresh")
+                cm.set("refresh_token", resp.session.refresh_token, expires_at=_exp, key="set_refresh_refresh")
             return resp.user
     except Exception:
         pass
@@ -240,15 +231,14 @@ def init_auth():
         st.session_state.pop(k, None)
     cm = _get_cookie_manager()
     if cm is not None:
-        cm.remove("access_token")
-        cm.remove("refresh_token")
+        cm.delete("access_token", key="del_access_fail")
+        cm.delete("refresh_token", key="del_refresh_fail")
     return None
 
 
 def do_login(email: str, password: str):
     user_sb = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
     resp = user_sb.auth.sign_in_with_password({"email": email, "password": password})
-    user_sb.auth.set_session(resp.session.access_token, resp.session.refresh_token)
     st.session_state["access_token"]    = resp.session.access_token
     st.session_state["refresh_token"]   = resp.session.refresh_token
     st.session_state["_auth_user"]      = resp.user
@@ -256,8 +246,8 @@ def do_login(email: str, password: str):
     cm = _get_cookie_manager()
     if cm is not None:
         _exp = datetime.now() + timedelta(days=30)
-        cm.set("access_token", resp.session.access_token, expires_at=_exp)
-        cm.set("refresh_token", resp.session.refresh_token, expires_at=_exp)
+        cm.set("access_token", resp.session.access_token, expires_at=_exp, key="set_access")
+        cm.set("refresh_token", resp.session.refresh_token, expires_at=_exp, key="set_refresh")
     return resp.user
 
 
@@ -282,8 +272,8 @@ def do_logout():
         st.session_state.pop(k, None)
     cm = _get_cookie_manager()
     if cm is not None:
-        cm.remove("access_token")
-        cm.remove("refresh_token")
+        cm.delete("access_token", key="del_access_logout")
+        cm.delete("refresh_token", key="del_refresh_logout")
 
 # ── Profil & subscription ─────────────────────────────────────────────────────
 
@@ -603,30 +593,6 @@ def page_auth():
             email    = st.text_input("E-postadress",  key="login_email")
             password = st.text_input("Lösenord", type="password", key="login_password")
             submitted = st.form_submit_button("Logga in", type="primary", use_container_width=True)
-        # Patch autocomplete attributes so browsers offer to save/fill credentials.
-        # components.html runs in an iframe and can reach window.parent.document.
-        # Defensive: st.components.v1.html is deprecated for removal after 2026-06-01.
-        # This autocomplete hack is cosmetic, so if a future Streamlit drops the API,
-        # skip it rather than crashing the entire login page.
-        try:
-            import streamlit.components.v1 as _stc
-            _stc.html("""
-            <script>
-            (function() {
-                function patch() {
-                    var p = window.parent.document;
-                    var em = p.querySelector('input[type="text"]');
-                    var pw = p.querySelector('input[type="password"]');
-                    if (em) { em.setAttribute('autocomplete', 'email'); em.setAttribute('name', 'email'); }
-                    if (pw) { pw.setAttribute('autocomplete', 'current-password'); pw.setAttribute('name', 'password'); }
-                }
-                patch();
-                setTimeout(patch, 300);
-            })();
-            </script>
-            """, height=0)
-        except (ImportError, AttributeError):
-            pass  # components.v1.html removed/renamed → skip cosmetic autocomplete hint
         if submitted:
             try:
                 do_login(email, password)
@@ -659,7 +625,7 @@ def page_auth():
     with tab_pw:
         st.caption("Vi skickar en länk till din e-post så att du kan sätta ett nytt lösenord.")
         with st.form("reset_form"):
-            email = st.text_input("E-postadress")
+            email = st.text_input("E-postadress", key="reset_email")
             submitted = st.form_submit_button("Skicka återställningslänk", type="primary", use_container_width=True)
         if submitted:
             try:
@@ -776,7 +742,7 @@ def page_paywall(user, lead_count: int = 0):
                     st.button(plan["cta"], disabled=True, use_container_width=True)
 
     st.divider()
-    if st.button("Logga ut", use_container_width=True):
+    if st.button("Logga ut", use_container_width=True, key="logout_account"):
         do_logout()
         st.rerun()
 
@@ -1041,6 +1007,11 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
         st.info("Gå till fliken **Konto** för att köpa credits.")
         return
 
+    # Visa ev. felmeddelande från föregående scan-försök (överlever reruns)
+    _prev_err = st.session_state.pop("_scanner_last_error", None)
+    if _prev_err:
+        st.error(_prev_err)
+
     south = west = north = east = None
     city_name = ""
 
@@ -1136,16 +1107,29 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                 edit_options={"edit": True, "remove": True},
             ).add_to(m)
 
-            # Existing lead markers
+            # Existing lead markers — hover visar en liten takbild (LM ortofoto,
+            # lagringsbar/gratis) + adress. Bilden laddas av webbläsaren först när
+            # tooltipen öppnas (mouseover), så alla 200 hämtas inte på en gång.
+            import html as _html
+            from scanner import lm_wms_url as _lm_wms_url  # noqa: PLC0415
             for _row in _map_rows[:200]:
                 if _row.get("lat") and _row.get("lng"):
+                    _addr = _html.escape(_row.get("address", "") or "")
+                    _thumb = _lm_wms_url(_row["lat"], _row["lng"], size_m=80, width=240, height=180)
+                    _tip_html = (
+                        f'<div style="text-align:center;width:220px">'
+                        f'<img src="{_html.escape(_thumb)}" width="210" '
+                        f'style="border-radius:6px;display:block;margin:0 auto 4px" '
+                        f"loading=\"lazy\" onerror=\"this.style.display='none'\">"
+                        f'<span style="font-size:12px">{_addr}</span></div>'
+                    )
                     folium.CircleMarker(
                         location=[_row["lat"], _row["lng"]],
                         radius=5,
                         color="#f59e0b",
                         fill=True,
                         fill_opacity=0.75,
-                        tooltip=_row.get("address", ""),
+                        tooltip=folium.Tooltip(_tip_html, sticky=True),
                     ).add_to(m)
 
             output = st_folium(
@@ -1279,7 +1263,7 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
         def _render_live_leads():
             with live_leads_ph.container():
                 st.caption(f"☀️ **{len(found_leads)} solcellstak hittade hittills** — ✅/❌ granskning möjlig efter scan")
-                for _live_lead in found_leads:
+                for _i, _live_lead in enumerate(found_leads):
                     with st.container(border=True):
                         _col_link, _col_info = st.columns([1, 2])
                         with _col_link:
@@ -1289,7 +1273,8 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                                 if _live_lead.lat and _live_lead.lng else None
                             )
                             if _url:
-                                st.link_button("🛰 Visa tak", _url, use_container_width=True)
+                                st.link_button("🛰 Visa tak", _url, use_container_width=True,
+                                               key=f"_live_tak_{_i}")
                             else:
                                 st.caption("(ingen bild)")
                         with _col_info:
@@ -1369,18 +1354,22 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                 )
         except ValueError as e:
             _log.error("scan ValueError: %s", e)
-            st.error(str(e))
+            _emsg = str(e)
+            st.session_state["_scanner_last_error"] = _emsg
+            st.error(_emsg)
             return
         except Exception as e:
             from scanner import APIQuotaExceededError as _QuotaErr  # noqa: PLC0415
             if isinstance(e, _QuotaErr):
                 _log.error("API quota exceeded: %s", e)
                 _send_quota_alert(e.api, e.detail)
-                st.error(
+                _emsg = (
                     f"**{e.api} har nått sin kvot eller saknar pengar på kontot.**\n\n"
                     f"Scanning är stoppad. Ägaren har fått ett akut mail. "
                     f"Försök igen om en stund eller kontakta Linus."
                 )
+                st.session_state["_scanner_last_error"] = _emsg
+                st.error(_emsg)
                 return
             _log.error("scan Exception: %s", e, exc_info=True)
             scan_crashed = True
@@ -1681,7 +1670,7 @@ def page_review(user):
     try:
         resp = (
             sb.table("scout_leads")
-            .select("id,address,lat,lng,ai_reasoning,building_type,maps_url,confidence")
+            .select("id,address,lat,lng,ai_reasoning,building_type,maps_url")
             .eq("user_id", str(user.id))
             .eq("needs_review", True)
             .is_("user_confirmed", "null")
@@ -1809,40 +1798,35 @@ def page_review(user):
     )
 
     # ── Tangentbordsgenvägar (←/A = Avvisa, →/D = Ja, S/↓ = Hoppa över) ────
-    try:
-        import streamlit.components.v1 as _components
-        _components.html("""
+    _kb_js = """
 <script>
 (function() {
-  function click(id) {
-    var btn = window.parent.document.querySelector('[data-testid="' + id + '"]');
-    if (!btn) {
-      // fallback: find by key pattern inside shadow DOM
-      var btns = window.parent.document.querySelectorAll('button');
-      for (var i = 0; i < btns.length; i++) {
-        if (btns[i].innerText && btns[i].innerText.includes(id)) { btns[i].click(); return; }
-      }
-    } else { btn.click(); }
-  }
   document.addEventListener('keydown', function(e) {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    var p = window.parent.document;
     if (e.key === 'ArrowLeft'  || e.key === 'a') {
-      window.parent.document.querySelectorAll('button').forEach(function(b){
+      p.querySelectorAll('button').forEach(function(b){
         if (b.innerText && b.innerText.includes('Avvisa')) b.click();
       });
     } else if (e.key === 'ArrowRight' || e.key === 'd') {
-      window.parent.document.querySelectorAll('button').forEach(function(b){
+      p.querySelectorAll('button').forEach(function(b){
         if (b.innerText && b.innerText.includes('Ja, solceller')) b.click();
       });
     } else if (e.key === 'ArrowDown'  || e.key === 's') {
-      window.parent.document.querySelectorAll('button').forEach(function(b){
+      p.querySelectorAll('button').forEach(function(b){
         if (b.innerText && b.innerText.includes('Hoppa')) b.click();
       });
     }
   });
 })();
 </script>
-""", height=0)
+"""
+    try:
+        import urllib.parse as _up
+        st.iframe(
+            src="data:text/html;charset=utf-8," + _up.quote(_kb_js),
+            height=0,
+        )
     except Exception:
         pass
 
@@ -1862,8 +1846,9 @@ def page_review(user):
                     "false_positive": True,
                     "reject_reason": reject_reason,
                 }).eq("id", lead_id).execute()
-            except Exception:
-                pass
+            except Exception as _rev_exc:
+                st.error(f"Kunde inte spara avvisning — försök igen. ({_rev_exc})")
+                st.stop()
             # Spara bild för dynamisk few-shot (NO-exempel)
             try:
                 _save_img = _img_bytes_review
@@ -1894,8 +1879,9 @@ def page_review(user):
                     "needs_review": False,
                     "has_solar": "Ja",
                 }).eq("id", lead_id).execute()
-            except Exception:
-                pass
+            except Exception as _rev_exc:
+                st.error(f"Kunde inte spara bekräftelse — försök igen. ({_rev_exc})")
+                st.stop()
             # Spara bild till Supabase Storage (används för dynamisk few-shot)
             try:
                 _save_img = _img_bytes_review
@@ -2127,8 +2113,9 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
                             update["david_note"] = new_note
                         try:
                             _sb.table("scout_leads").update(update).eq("id", lid).execute()
-                        except Exception:
-                            pass
+                        except Exception as _save_exc:
+                            st.error(f"Kunde inte spara — försök igen. ({_save_exc})")
+                            st.stop()
                         # Skicka mail till Linus om möte precis bokades
                         if new_status == "mote_bokat" and cur_status != "mote_bokat":
                             sent = _send_meeting_email(
@@ -2341,7 +2328,7 @@ def page_account(user, profile):
 
     col_cancel, col_delete = st.columns(2)
     with col_cancel:
-        if st.button("Avbryt", use_container_width=True):
+        if st.button("Avbryt", use_container_width=True, key="btn_delete_cancel"):
             st.session_state.pop("delete_account_confirm_open", None)
             st.session_state.pop("delete_account_confirm_input", None)
             st.rerun()
@@ -2377,7 +2364,7 @@ def page_app(user, profile, lead_count: int = 0):
             except Exception:
                 pass
 
-        if st.button("Logga ut", use_container_width=True):
+        if st.button("Logga ut", use_container_width=True, key="logout_sidebar"):
             do_logout()
             st.rerun()
 
