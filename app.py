@@ -1907,6 +1907,17 @@ def page_review(user):
 
 def _leads_html_with_thumbs(df_full: "pd.DataFrame") -> None:
     """Render leads as an HTML table with cursor-following thumbnail previews."""
+    import html as _html  # noqa: PLC0415
+    from urllib.parse import urlparse as _urlparse  # noqa: PLC0415
+
+    def _safe_url(raw: object) -> str:
+        url = str(raw or "").strip()
+        try:
+            scheme = _urlparse(url).scheme
+        except Exception:
+            return ""
+        return url if scheme in {"http", "https"} else ""
+
     try:
         from scanner import lm_wms_url as _lm_url  # noqa: PLC0415
         _has_lm = True
@@ -1932,9 +1943,10 @@ def _leads_html_with_thumbs(df_full: "pd.DataFrame") -> None:
 
     rows_html: list[str] = []
     for _, row in df_full.iterrows():
-        addr = str(row.get("address") or "–")
+        addr = _html.escape(str(row.get("address") or "–"))
         solar_icon = "☀️" if str(row.get("has_solar", "")) == "Ja" else "—"
-        img_url = str(row.get("image_url") or "")
+        # Prefer confirmed_image_url → fresh LM WMS → validated image_url only
+        img_url = _safe_url(row.get("confirmed_image_url"))
         if not img_url and _has_lm:
             lat, lng = row.get("lat"), row.get("lng")
             if lat and lng:
@@ -1942,14 +1954,18 @@ def _leads_html_with_thumbs(df_full: "pd.DataFrame") -> None:
                     img_url = _lm_url(float(lat), float(lng), size_m=80, width=240, height=180)
                 except Exception:
                     img_url = ""
+        if not img_url:
+            img_url = _safe_url(row.get("image_url"))
 
         if img_url:
+            safe_url = _html.escape(img_url, quote=True)
             thumb_cell = (
-                f'<span class="lth" data-src="{img_url}"'
+                f'<span class="lth" data-src="{safe_url}"'
                 f' onmouseenter="{_js_enter}"'
                 f' onmousemove="{_js_move}"'
                 f' onmouseleave="{_js_leave}">'
-                f'<a href="{img_url}" target="_blank" rel="noopener" title="Öppna takbild i ny flik"'
+                f'<a href="{safe_url}" target="_blank" rel="noopener noreferrer"'
+                f' title="Öppna takbild i ny flik"'
                 f' style="font-size:15px;text-decoration:none;cursor:pointer">🛰</a>'
                 f'</span>'
             )
@@ -2092,11 +2108,16 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
                         type="primary", key="btn_fp_confirm", use_container_width=True,
                     ):
                         sb = get_supabase()
-                        for lid in df_reset.loc[wrong_mask, "id"]:
-                            sb.table("scout_leads").update({
-                                "false_positive": True,
-                                "user_confirmed": False,
-                            }).eq("id", int(lid)).execute()
+                        try:
+                            for lid in df_reset.loc[wrong_mask, "id"]:
+                                sb.table("scout_leads").update({
+                                    "false_positive": True,
+                                    "user_confirmed": False,
+                                }).eq("id", int(lid)).execute()
+                        except Exception as _fp_exc:
+                            _log.error("page_leads false-positive save failed: %s", _fp_exc)
+                            st.error("Kunde inte spara alla felmarkeringar — försök igen.")
+                            st.stop()
                         st.success(f"✅ {n_wrong} lead(s) markerade som fel. AI:n använder detta nästa scan.")
                         st.rerun()
 

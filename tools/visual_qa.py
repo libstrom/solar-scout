@@ -125,6 +125,15 @@ def evaluate(screenshot_path: str | Path, criteria: str) -> QAResult:
 
     img_bytes = Path(screenshot_path).read_bytes()
     b64 = base64.standard_b64encode(img_bytes).decode()
+    # Detect actual image format from magic bytes
+    if img_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+        media_type = "image/png"
+    elif img_bytes[:3] == b"\xff\xd8\xff":
+        media_type = "image/jpeg"
+    elif img_bytes[:4] == b"RIFF" and img_bytes[8:12] == b"WEBP":
+        media_type = "image/webp"
+    else:
+        media_type = "image/png"
 
     client = anthropic.Anthropic(api_key=api_key)
     system = textwrap.dedent("""
@@ -148,7 +157,7 @@ def evaluate(screenshot_path: str | Path, criteria: str) -> QAResult:
                 "content": [
                     {
                         "type": "image",
-                        "source": {"type": "base64", "media_type": "image/png", "data": b64},
+                        "source": {"type": "base64", "media_type": media_type, "data": b64},
                     },
                     {
                         "type": "text",
@@ -192,7 +201,7 @@ def qa_result(
     """
     ts = int(time.time())
     out_path = SCREENSHOT_DIR / f"{tag}_{ts}_iter{iteration}.png"
-    screenshot_fn(out_path)
-    result = evaluate(out_path, criteria)
+    saved_path = screenshot_fn(out_path) or out_path
+    result = evaluate(saved_path, criteria)
     result.iteration = iteration
     return result

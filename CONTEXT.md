@@ -70,7 +70,10 @@ Nässjö och hela Småland ligger i SE3. Malmö/Skåne är SE4.
 | few-shot | Verifierade exempel som skickas till Claude för kalibrering |
 | mote_bokat | Status som triggar automatiskt mail till Linus |
 
-## Detektionspipeline
+## ~~Detektionspipeline~~ (förenklad — se "Verklig pipeline" nedan för aktuell beskrivning)
+
+> **Denna sektion är inaktuell.** Modellen är Opus 4.8 (inte Sonnet-4-6) och
+> `_enhance_contrast` körs nu FÖRE prefiltret. Se "Verklig pipeline" nedan.
 
 ```
 OSM Overpass → byggnader inom bbox   ← max 2 samtidiga anrop (_OVERPASS_SEM)
@@ -82,7 +85,7 @@ LM WMS (minkarta.lantmateriet.se)   ← primär bildkälla (gratis, CC-BY)
 _enhance_contrast()                 ← CLAHE 4×4-rutnät, YCbCr Y-kanal
      │
      ▼
-_analyze_building()                 ← Claude Sonnet-4-6 vision
+_analyze_building()                 ← Claude Opus 4.8 vision
      │   few-shot: SE3-kalibrerade exempel (Nässjö)
      │   prompt: smoothness-contrast, Nordic deny-list (Skandiategel, eternite, kopparplåt)
      ▼
@@ -129,15 +132,15 @@ lead David bekräftar eller avvisar i granskningskön.
 
 ```
 _fetch_satellite (LM WMS → Google fallback)
-  → _prefilter_building   ← Haiku 4.5, RAW obearbetad bild, GRINDAR allt
-  → _enhance_contrast     ← CLAHE, körs FÖRST i _analyze_building
+  → _enhance_contrast     ← CLAHE, körs FÖRE prefilter (fixad 2026-06-01)
+  → _prefilter_building   ← Haiku 4.5, får BEARBETAD bild
   → _analyze_building     ← Opus 4.8 (INTE Sonnet-4-6)
 ```
 
-**Känd bugg (2026-06):** prefiltret bedömer den obearbetade bilden men
-`_enhance_contrast` (som gör paneler synliga på flacka ortofoton) körs först
-EFTER grinden. Soltak som bara syns efter kontrastförstärkning gallras av Haiku
-och når aldrig Opus. Fix: flytta `_enhance_contrast` före prefiltret.
+**Tidigare bugg (fixad 2026-06-01):** prefiltret bedömde den obearbetade bilden
+medan `_enhance_contrast` kördes EFTER grinden. Soltak synliga bara efter CLAHE
+gallrades av Haiku och nådde aldrig Opus — rotsorsak till 0 leads i Dalby/Genarp.
+**Fix:** `_enhance_contrast` flyttad till `_process_building` FÖRE `_prefilter_building`.
 
 ## Datainsamlingsgapet — inga negativa sparas
 

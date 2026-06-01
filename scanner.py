@@ -1144,9 +1144,11 @@ def _analyze_building(
             msgs: list[dict] = []
             last_idx = len(few_shot) - 1
             for i, (ex_b64, verdict) in enumerate(few_shot):
+                ex_header = base64.standard_b64decode(ex_b64[:24])
+                ex_media = _image_media_type(ex_header + bytes(4))
                 img_block: dict = {
                     "type": "image",
-                    "source": {"type": "base64", "media_type": "image/jpeg", "data": ex_b64},
+                    "source": {"type": "base64", "media_type": ex_media, "data": ex_b64},
                 }
                 if i == last_idx:
                     img_block["cache_control"] = {"type": "ephemeral"}
@@ -1164,7 +1166,8 @@ def _analyze_building(
             if street_view_bytes:
                 sv_b64 = base64.standard_b64encode(street_view_bytes).decode()
                 final_content.append({"type": "text", "text": sv_notice})
-                final_content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": sv_b64}})
+                sv_media = _image_media_type(street_view_bytes[:16])
+                final_content.append({"type": "image", "source": {"type": "base64", "media_type": sv_media, "data": sv_b64}})
             msgs.append({"role": "user", "content": final_content})
         else:
             final_content = [
@@ -1173,7 +1176,8 @@ def _analyze_building(
             if street_view_bytes:
                 sv_b64 = base64.standard_b64encode(street_view_bytes).decode()
                 final_content.append({"type": "text", "text": sv_notice})
-                final_content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": sv_b64}})
+                sv_media = _image_media_type(street_view_bytes[:16])
+                final_content.append({"type": "image", "source": {"type": "base64", "media_type": sv_media, "data": sv_b64}})
             msgs = [{"role": "user", "content": final_content}]
         msg = client.messages.create(
             model="claude-opus-4-8",
@@ -1224,7 +1228,11 @@ def _analyze_building(
         return False, False, False, ""
 
 
-def _prefilter_building(img_bytes: bytes, client: anthropic.Anthropic) -> bool:
+def _prefilter_building(
+    img_bytes: bytes,
+    client: anthropic.Anthropic,
+    budget: "BudgetTracker | None" = None,
+) -> bool:
     """Cheap Haiku pre-filter — returns False if roof is obviously solar-free.
 
     Saves ~60% of Opus calls. Only passes ambiguous/positive cases through.
@@ -1247,6 +1255,8 @@ def _prefilter_building(img_bytes: bytes, client: anthropic.Anthropic) -> bool:
                 ],
             }],
         )
+        if budget is not None:
+            budget.add_anthropic_usage(msg.usage)
         return "YES" in msg.content[0].text.upper()
     except Exception:
         return True  # fail open — let Sonnet decide
@@ -1281,7 +1291,7 @@ def _process_building(
     # out by the prefilter before Opus is ever consulted (root cause of the
     # silent 0-leads bug — see CONTEXT.md).
     img = _enhance_contrast(img)
-    if not _prefilter_building(img, anthropic_client):
+    if not _prefilter_building(img, anthropic_client, budget=budget):
         _log.debug("_process_building haiku_prefilter=NO osm_id=%s", building.get("osm_id"))
         return None
     is_house, has_solar, is_unsure, reasoning = _analyze_building(
