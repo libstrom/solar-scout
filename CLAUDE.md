@@ -1,9 +1,10 @@
-# solar-scout
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Modell & konfiguration
 
-Kör på **claude-opus-4-8** med adaptive thinking (konfigurerat i `.claude/settings.json`).
-Dessa inställningar följer med repot — fungerar i lokala terminalen, cloud-sessioner och nya git-kloner.
+Kör på **claude-opus-4-8** (konfigurerat i `.claude/settings.json`). Inställningarna följer med repot.
 
 ## Kommandon
 
@@ -11,11 +12,15 @@ Dessa inställningar följer med repot — fungerar i lokala terminalen, cloud-s
 # Kör hela testsviten
 python -m pytest tests/ -q
 
-# Kör enbart acceptance-tester (appen är hel när dessa är gröna)
+# Acceptance-tester — appen är hel när dessa är gröna
 python -m pytest -m acceptance -v
 
-# Syntaxkoll app.py / scanner.py
+# Kör ett enskilt test
+python -m pytest tests/test_scan_cost.py::test_tracker_accumulates_cost -v
+
+# Syntaxkoll
 python -c "import ast; ast.parse(open('app.py').read()); print('OK')"
+python -c "import ast; ast.parse(open('scanner.py').read()); print('OK')"
 
 # Kör appen lokalt
 streamlit run app.py
@@ -23,52 +28,139 @@ streamlit run app.py
 
 ## Definition of done
 
-**Appen är hel när `pytest -m acceptance` är grön.**
+**`pytest -m acceptance` grön = appen är hel.**
 
-Acceptance-testerna i `tests/test_acceptance.py` täcker fem kritiska vägar:
-1. **Login-väg** — inloggning lyckas / svenska felmeddelanden vid fel
-2. **Scan-väg** — `scan_city` → `Lead` → `_lead_to_sb_row` → `load_leads`
-3. **Budget-väg** — scan stoppas vid budgettak, partial leads bevaras
-4. **DB-fel-väg** — Supabase-timeout → appen kraschar inte
-5. **Cost-estimat-väg** — `estimate_scan_cost` blockerar oversized scans
+`tests/test_acceptance.py` täcker fem kritiska vägar:
+1. **Login** — inloggning lyckas / svenska felmeddelanden vid fel
+2. **Scan** — `scan_city` → `Lead` → `_lead_to_sb_row` → `load_leads`
+3. **Budget** — scan stoppas vid budgettak, partial leads bevaras
+4. **DB-fel** — Supabase-timeout → appen kraschar inte
+5. **Kostnadsestimat** — `estimate_scan_cost` blockerar oversized scans
 
-En orkestrerare (se issue #56) kör `pytest -m acceptance` som grind innan den öppnar en PR.
+## Arkitektur
 
-## Agent skills
+### Tre filer — ett system
 
-### Issue tracker
+| Fil | Roll |
+|-----|------|
+| `app.py` (~2600 rader) | Streamlit UI, auth, lead-hantering, kostnadsgate |
+| `scanner.py` (~1900 rader) | OSM → byggnader → Claude Vision → Leads |
+| `scan_cost.py` | Kostnadsestimat + runtime-budgetspärr |
 
-Issues live in GitHub Issues (`libstrom/solar-scout`). See `docs/agents/issue-tracker.md`.
+`app.py` importerar `scanner.py` lazy (inne i funktioner, inte på modulnivå). `scanner.py` använder `BudgetTracker` från `scan_cost.py` via toppnivåimport.
 
-### Triage labels
+### Scanner-pipeline: scan_city() steg för steg
 
-Default label strings (needs-triage, needs-info, ready-for-agent, ready-for-human, wontfix). See `docs/agents/triage-labels.md`.
-
-### Domain docs
-
-Single-context — `CONTEXT.md` at root + `docs/adr/`. See `docs/agents/domain.md`.
-
-## claude-lens — veckouppdateringar
-
-Håller dig uppdaterad om nya Claude/Anthropic-features, releases och skill-gaps.
-
-```bash
-# Kör digest (senaste 7 dagarna) → ~/claude-updates/YYYY-WW.md
-python3 ~/.claude/scripts/claude-lens.py
-
-# Printa till stdout
-python3 ~/.claude/scripts/claude-lens.py --print
-
-# Senaste 30 dagarna, snabbläge
-python3 ~/.claude/scripts/claude-lens.py --since 30 --no-youtube
+```
+1. Google Maps geocoding → viewport bbox
+2. OSM solar-tags → gratisleads (instant)
+3. _get_residential_areas() → Overpass → landuse=residential polygoner
+4. Per zon: _get_osm_buildings() → filtrera bort icke-villor
+5. scan_buildings_ai() med ThreadPoolExecutor(max_workers=4):
+   └─ _fetch_satellite() → _enhance_contrast() (CLAHE 4×4) →
+      _prefilter_building() (Haiku, 10 tokens) →
+      _analyze_building() (Opus 4.8, cached few-shot) →
+      Om UNSURE: Street View → andra analys
+6. Glesbygd-pass: hela viewport utan landuse-filter (fångar 20-30% av villor)
+7. Returnera (leads, ScanStats)
 ```
 
-Eller använd slash-kommandot `/claude-lens` i valfri Claude Code-session.
-Script: `~/.claude/scripts/claude-lens.py` · Skill: `~/.claude/skills/claude-lens/`
+`on_progress`-callbacken i `app.py` sparar varje AI-lead progressivt till Supabase direkt — en krasch förlorar inga redan hittade leads.
+
+### Auth-flöde
+
+`init_auth()` läser i denna prioritetsordning:
+1. `st.session_state["_auth_user"]` + `"access_token"` (snabbast)
+2. `st.context.cookies` (HTTP request-headers, Streamlit 1.37+, synkront på första render)
+3. `stx.CookieManager` (JS-baserad fallback för sessioner satta med äldre appversion)
+4. `None` → ej inloggad
+
+`get_supabase()` returnerar den autentiserade Supabase-klienten ur `st.session_state["_sb_user_client"]`. **Kalla aldrig `create_client()` direkt — det ger en anonym klient utan row-level security.**
+
+`CookieManager` instansieras en gång och sparas i `st.session_state["_cookie_manager"]`. API: `.set()`, `.get()`, `.delete()` — **inte** `.remove()` (gammal API som kraschar).
+
+### Bildkällor (fallback-ordning)
+
+```
+_fetch_satellite()
+  1. LM official WMS (kräver LM_KEY = "consumer_key:consumer_secret", CC-BY, lagringsbar)
+  2. Google Static Maps (~$0.002/req, lagringsbar)  ← circuit breaker: _google_exhausted
+  3. LM minkarta WMS (gratis, ingen nyckel, lagringsbar)
+  4. Mapbox (ALDRIG lagra — 24h-regel, bara visa i UI)
+```
+
+`_google_exhausted = threading.Event()` sätts när Google returnerar 402/403/429. Nollställs av `reset_image_source_breakers()` i varje ny scan. **Mapbox-bilder får aldrig hamna i `image_url`-kolumnen i Supabase.**
+
+`lm_wms_url(lat, lng)` genererar en publik, lagringsbar LM-URL utan nyckel — används för tooltip-bilder i kartan och som `image_url` på leads.
+
+### Kostnadsmodell
+
+```python
+# USD per 1M tokens
+OPUS_4_8   = ModelPricing(input=5.00, output=25.00, cache_write=6.25, cache_read=0.50)
+SONNET_4_6 = ModelPricing(input=3.00, output=15.00, cache_write=3.75, cache_read=0.30)
+HAIKU_4_5  = ModelPricing(input=1.00, output=5.00,  cache_write=1.25, cache_read=0.10)
+USD_TO_SEK = 10.50
+```
+
+`estimate_scan_cost(n)` räknar på **värsta-fall** (utan Haiku-prefilter). Verklig kostnad är ~2.5× lägre tack vare att Haiku filtrerar 60% av byggnader. Siffran som visas i UI är konservativ med avsikt.
+
+Gates: **CONFIRM_THRESHOLD_SEK = 200 kr** (checkbox krävs) · **DEFAULT_BUDGET_SEK = 5000 kr** (hård stop).
+
+`BudgetTracker` är trådsäker (Lock). `budget.check()` kastas i main-tråden efter varje byggnad — inte inne i worker-trådar.
+
+### Felklassificering som måste stämma
+
+`APIQuotaExceededError` kastas av:
+- Anthropic HTTP 429, 401 och **400 med "credit balance" i body** (HTTP 400 är Anthropics svar vid tomt saldo — INTE 402)
+- Google Static Maps HTTP 429 och 403
+- Google Street View HTTP 429 och 403
+
+Om Anthropic returnerar en annan HTTP 400 (t.ex. ogiltig bild) → swallas tyst, returnerar `(False, False, False, "")`.
+
+### Supabase-schema (scout_leads)
+
+Kolumner som koden skriver/läser: `id`, `user_id`, `lat`, `lng`, `address`, `confidence`, `source` (osm|ai), `scan_source`, `solar_location`, `samtomt_solar_extra`, `status`, `david_note`, `user_confirmed`, `false_positive`, `reject_reason`, `tile_key`, `image_url`, `confirmed_image_url`, `building_type`, `ai_reasoning`, `needs_review`, `created_at`.
+
+**`confidence`-kolumnen existerar inte** i databasen — ta inte med den i `.select()`-anrop.
+
+### Streamlit-gotchas
+
+- `st.rerun()` inne i `init_auth()` är förbjudet — dödar pågående formulär-submits.
+- Widgets som skapas i loopar behöver explicit `key=` — auto-nyckeln krockar när containern återskapas under en pågående scan (`_render_live_leads` i `on_progress`).
+- Scan-fel sparas i `st.session_state["_scanner_last_error"]` och visas vid nästa render — hantera inte fel med bara `st.error()` + `return` (syns inte om sidan renderas om).
+- `st.components.v1.html` är borttaget sedan 2026-06-01 — använd `st.iframe(src="data:text/html;...", height=0)` för JS-injektion.
+
+## Aktörer och geografisk scope
+
+**David** (fältsäljare): ser bara Leads-fliken. Workflow: `ej_kontaktad → kontaktad → mote_bokat → kund/ej_intresserad`. `mote_bokat` triggar automatiskt mail till Linus via Resend API.
+
+**Linus** (admin): kör scans, granskar UNSURE-leads i Granska-fliken.
+
+**Primärt scanområde:** Nässjö, Eksjö, Vetlanda, Jönköping (Småland/SE3). Undvik Stockholm/Göteborg (timeout-risk) och ren glesbygd (för få OSM-byggnader).
 
 ## Nyckelregler
 
 - **Mapbox 24h-regel**: Mapbox-bilder får ALDRIG lagras — bara visas i UI
-- **LM WMS**: Primär bildkälla (CC-BY, lagring tillåten)
-- **Haiku pre-filter**: `_prefilter_building()` körs före Sonnet för att spara 60% kostnad
-- **Glesbygd**: `scan_city()` kör ett fallback-pass på hela viewport för hus utanför OSM residential-polygoner
+- **LM WMS / LM minkarta**: lagringsbar (CC-BY), alltid OK att spara `image_url`
+- **Haiku pre-filter**: `_prefilter_building()` körs före Opus för att spara ~60% kostnad
+- **Glesbygd-pass**: `scan_city()` kör ett extra pass på hela viewport för hus utanför OSM residential-polygoner
+- **OSM-attribution**: CSV-export måste innehålla attribution-header (ODbL); se `docs/adr/0001-osm-odbl-csv.md`
+
+## Agent skills
+
+- Issues: GitHub Issues (`libstrom/solar-scout`) — se `docs/agents/issue-tracker.md`
+- Triage-labels: `docs/agents/triage-labels.md`
+- Domändokumentation: `CONTEXT.md` + `docs/adr/`
+
+## Hemligheter som krävs
+
+| Variabel | Syfte |
+|----------|-------|
+| `SUPABASE_URL` + `SUPABASE_ANON_KEY` | DB & auth |
+| `ANTHROPIC_API_KEY` eller `SOLAR_SCOUT_ANTHROPIC_KEY` | Claude Vision |
+| `GOOGLE_API_KEY` | Geocoding (obligatorisk) + Static Maps (fallback) |
+| `LANTMATERIET_KEY` | `consumer_key:consumer_secret` (valfri, faller tillbaka på Google) |
+| `MAPBOX_TOKEN` | Kartvy i UI (valfri) |
+| `STRIPE_SECRET_KEY` + `STRIPE_PRICE_*` | Betalning |
+| `RESEND_API_KEY` | Mail vid mötesbokningar + kvotalarm |
