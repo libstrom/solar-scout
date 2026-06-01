@@ -125,6 +125,36 @@ max 2 samtida Overpass-anrop. HTTP 429 ger 60 s väntan. Backoff: 5/20/60 s.
 från Supabase som extra few-shot-exempel. AI:n lär sig automatiskt av varje
 lead David bekräftar eller avvisar i granskningskön.
 
+## Verklig pipeline (koden — ersätter den förenklade ovan)
+
+```
+_fetch_satellite (LM WMS → Google fallback)
+  → _prefilter_building   ← Haiku 4.5, RAW obearbetad bild, GRINDAR allt
+  → _enhance_contrast     ← CLAHE, körs FÖRST i _analyze_building
+  → _analyze_building     ← Opus 4.8 (INTE Sonnet-4-6)
+```
+
+**Känd bugg (2026-06):** prefiltret bedömer den obearbetade bilden men
+`_enhance_contrast` (som gör paneler synliga på flacka ortofoton) körs först
+EFTER grinden. Soltak som bara syns efter kontrastförstärkning gallras av Haiku
+och når aldrig Opus. Fix: flytta `_enhance_contrast` före prefiltret.
+
+## Datainsamlingsgapet — inga negativa sparas
+
+`_process_building` returnerar `None` för alla SOLAR=NO-byggnader (rad ~1322) —
+de **sparas aldrig**. Följd:
+
+| Klass | Finns i Supabase | Källa |
+|-------|------------------|-------|
+| Sanna positiva | ✅ | `user_confirmed=true, false_positive=false` |
+| Falska positiva | ✅ | `false_positive=true` el. `user_confirmed=false` |
+| Sanna negativa | ❌ | kastas på rad ~1322 |
+| Falska negativa (missade soltak) | ❌ | nådde aldrig en människa |
+
+**Mätbarhet:** precision går att mäta nu; **recall är omätbar** tills ett urval
+av NO-tak persisteras. Detta är roten till att "tak utan solceller"-listan är
+tom och varför Dalby-buggens missade tak var osynliga.
+
 ## Externa tjänster
 
 | Tjänst | Secret-nyckel | Syfte |
