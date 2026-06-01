@@ -1906,12 +1906,29 @@ def page_review(user):
 
 
 def _leads_html_with_thumbs(df_full: "pd.DataFrame") -> None:
-    """Render leads as an HTML table with CSS hover thumbnail previews."""
+    """Render leads as an HTML table with cursor-following thumbnail previews."""
     try:
         from scanner import lm_wms_url as _lm_url  # noqa: PLC0415
         _has_lm = True
     except Exception:
         _has_lm = False
+
+    # JS helpers (inline, no <script> tag — those are stripped by Streamlit's innerHTML)
+    # onmousemove: follow cursor, flip left when near right viewport edge
+    _js_move = (
+        "var p=document.getElementById('stp');"
+        "var x=event.clientX+14,y=event.clientY-88;"
+        "if(x+230>window.innerWidth)x=event.clientX-244;"
+        "if(y<4)y=4;"
+        "p.style.left=x+'px';p.style.top=y+'px';"
+    )
+    _js_enter = (
+        "var p=document.getElementById('stp');"
+        "document.getElementById('sti').src=this.dataset.src;"
+        "p.style.display='block';"
+        + _js_move
+    )
+    _js_leave = "document.getElementById('stp').style.display='none';"
 
     rows_html: list[str] = []
     for _, row in df_full.iterrows():
@@ -1928,9 +1945,12 @@ def _leads_html_with_thumbs(df_full: "pd.DataFrame") -> None:
 
         if img_url:
             thumb_cell = (
-                f'<span class="lth">'
-                f'<a href="{img_url}" target="_blank" rel="noopener" title="Öppna takbild i ny flik">🛰</a>'
-                f'<img class="lth-p" src="{img_url}" loading="lazy" />'
+                f'<span class="lth" data-src="{img_url}"'
+                f' onmouseenter="{_js_enter}"'
+                f' onmousemove="{_js_move}"'
+                f' onmouseleave="{_js_leave}">'
+                f'<a href="{img_url}" target="_blank" rel="noopener" title="Öppna takbild i ny flik"'
+                f' style="font-size:15px;text-decoration:none;cursor:pointer">🛰</a>'
                 f'</span>'
             )
         else:
@@ -1942,33 +1962,36 @@ def _leads_html_with_thumbs(df_full: "pd.DataFrame") -> None:
             f"<td class='lc'>{thumb_cell}</td></tr>"
         )
 
+    # Floating preview div — one instance, reused for all rows
+    floating_div = (
+        '<div id="stp" style="display:none;position:fixed;z-index:9999;'
+        'width:230px;height:175px;border:2px solid #6b7280;border-radius:6px;'
+        'box-shadow:0 4px 20px rgba(0,0,0,.45);background:#1a1a1a;pointer-events:none;overflow:hidden">'
+        '<img id="sti" src="" style="width:100%;height:100%;object-fit:cover" loading="lazy" />'
+        '</div>'
+    )
+
     html = (
-        "<style>"
+        floating_div
+        + "<style>"
         ".lt-t{width:100%;border-collapse:collapse;font-size:13px;font-family:sans-serif}"
         ".lt-t th{background:#f0f2f6;padding:7px 12px;text-align:left;border-bottom:2px solid #d1d5db}"
         ".lt-t td{padding:5px 12px;border-bottom:1px solid #e5e7eb;vertical-align:middle}"
         ".lt-t td.lc{text-align:center;width:56px}"
         ".lt-t td.la{max-width:320px;word-break:break-word}"
-        ".lth{position:relative;display:inline-block}"
-        ".lth a{font-size:15px;text-decoration:none;cursor:pointer}"
-        ".lth-p{display:none;position:absolute;top:1.4em;right:0;"
-        "z-index:9999;width:230px;height:175px;object-fit:cover;"
-        "border:2px solid #6b7280;border-radius:6px;"
-        "box-shadow:0 4px 20px rgba(0,0,0,.45);pointer-events:none;background:#fff}"
-        ".lth:hover .lth-p{display:block}"
+        ".lth{display:inline-block;cursor:pointer}"
         "</style>"
         '<div style="overflow-x:auto">'
-        '<table class="lt-t">'
-        "<thead><tr>"
+        '<table class="lt-t"><thead><tr>'
         "<th>Adress</th>"
         "<th style='text-align:center'>Sol</th>"
-        "<th style='text-align:center' title='Hovra 🛰 för takförhandsvisning'>Tak 🛰</th>"
+        "<th style='text-align:center' title='Hovra 🛰 för takbild'>Tak 🛰</th>"
         "</tr></thead>"
         f"<tbody>{''.join(rows_html)}</tbody>"
         "</table></div>"
     )
     st.markdown(html, unsafe_allow_html=True)
-    st.caption("Hovra 🛰 för att förhandsgranska taket — klicka för att öppna i ny flik")
+    st.caption("Hovra 🛰 för takbild — klicka för att öppna i ny flik")
 
 
 def page_leads(user):  # noqa: keep user param for confirm_lead calls
