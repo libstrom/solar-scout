@@ -1205,8 +1205,8 @@ def _analyze_building(
 def _prefilter_building(img_bytes: bytes, client: anthropic.Anthropic) -> bool:
     """Cheap Haiku pre-filter — returns False if roof is obviously solar-free.
 
-    Saves ~60% of Sonnet calls. Only passes ambiguous/positive cases through.
-    On any API error returns True (fail open — let Sonnet decide).
+    Saves ~60% of Opus calls. Only passes ambiguous/positive cases through.
+    On any API error returns True (fail open — let Opus decide).
     """
     b64 = base64.standard_b64encode(img_bytes).decode()
     try:

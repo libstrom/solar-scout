@@ -1847,7 +1847,8 @@ def page_review(user):
                     "reject_reason": reject_reason,
                 }).eq("id", lead_id).execute()
             except Exception as _rev_exc:
-                st.error(f"Kunde inte spara avvisning — försök igen. ({_rev_exc})")
+                _log.error("page_review avvisa misslyckades lead_id=%s: %s", lead_id, _rev_exc)
+                st.error("Kunde inte spara avvisning — försök igen. Kontakta support om problemet kvarstår.")
                 st.stop()
             # Spara bild för dynamisk few-shot (NO-exempel)
             try:
@@ -1880,7 +1881,8 @@ def page_review(user):
                     "has_solar": "Ja",
                 }).eq("id", lead_id).execute()
             except Exception as _rev_exc:
-                st.error(f"Kunde inte spara bekräftelse — försök igen. ({_rev_exc})")
+                _log.error("page_review bekräfta misslyckades lead_id=%s: %s", lead_id, _rev_exc)
+                st.error("Kunde inte spara bekräftelse — försök igen. Kontakta support om problemet kvarstår.")
                 st.stop()
             # Spara bild till Supabase Storage (används för dynamisk few-shot)
             try:
@@ -2114,7 +2116,8 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
                         try:
                             _sb.table("scout_leads").update(update).eq("id", lid).execute()
                         except Exception as _save_exc:
-                            st.error(f"Kunde inte spara — försök igen. ({_save_exc})")
+                            _log.error("page_leads spara misslyckades lead_id=%s: %s", lid, _save_exc)
+                            st.error("Kunde inte spara — försök igen. Kontakta support om problemet kvarstår.")
                             st.stop()
                         # Skicka mail till Linus om möte precis bokades
                         if new_status == "mote_bokat" and cur_status != "mote_bokat":
