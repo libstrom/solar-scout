@@ -1951,7 +1951,7 @@ def _leads_html_with_thumbs(df_full: "pd.DataFrame") -> None:
         ".lt-t td.la{max-width:320px;word-break:break-word}"
         ".lth{position:relative;display:inline-block}"
         ".lth a{font-size:15px;text-decoration:none;cursor:pointer}"
-        ".lth-p{display:none;position:absolute;bottom:1.9em;left:50%;transform:translateX(-50%);"
+        ".lth-p{display:none;position:absolute;top:1.4em;right:0;"
         "z-index:9999;width:230px;height:175px;object-fit:cover;"
         "border:2px solid #6b7280;border-radius:6px;"
         "box-shadow:0 4px 20px rgba(0,0,0,.45);pointer-events:none;background:#fff}"
