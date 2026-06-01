@@ -70,7 +70,10 @@ Nässjö och hela Småland ligger i SE3. Malmö/Skåne är SE4.
 | few-shot | Verifierade exempel som skickas till Claude för kalibrering |
 | mote_bokat | Status som triggar automatiskt mail till Linus |
 
-## Detektionspipeline
+## ~~Detektionspipeline~~ (förenklad — se "Verklig pipeline" nedan för aktuell beskrivning)
+
+> **Denna sektion är inaktuell.** Modellen är Opus 4.8 (inte Sonnet-4-6) och
+> `_enhance_contrast` körs nu FÖRE prefiltret. Se "Verklig pipeline" nedan.
 
 ```
 OSM Overpass → byggnader inom bbox   ← max 2 samtidiga anrop (_OVERPASS_SEM)
@@ -82,7 +85,7 @@ LM WMS (minkarta.lantmateriet.se)   ← primär bildkälla (gratis, CC-BY)
 _enhance_contrast()                 ← CLAHE 4×4-rutnät, YCbCr Y-kanal
      │
      ▼
-_analyze_building()                 ← Claude Sonnet-4-6 vision
+_analyze_building()                 ← Claude Opus 4.8 vision
      │   few-shot: SE3-kalibrerade exempel (Nässjö)
      │   prompt: smoothness-contrast, Nordic deny-list (Skandiategel, eternite, kopparplåt)
      ▼
@@ -124,6 +127,36 @@ max 2 samtida Overpass-anrop. HTTP 429 ger 60 s väntan. Backoff: 5/20/60 s.
 `_load_dynamic_few_shot(user_id)` laddar bekräftade leads och false positives
 från Supabase som extra few-shot-exempel. AI:n lär sig automatiskt av varje
 lead David bekräftar eller avvisar i granskningskön.
+
+## Verklig pipeline (koden — ersätter den förenklade ovan)
+
+```
+_fetch_satellite (LM WMS → Google fallback)
+  → _enhance_contrast     ← CLAHE, körs FÖRE prefilter (fixad 2026-06-01)
+  → _prefilter_building   ← Haiku 4.5, får BEARBETAD bild
+  → _analyze_building     ← Opus 4.8 (INTE Sonnet-4-6)
+```
+
+**Tidigare bugg (fixad 2026-06-01):** prefiltret bedömde den obearbetade bilden
+medan `_enhance_contrast` kördes EFTER grinden. Soltak synliga bara efter CLAHE
+gallrades av Haiku och nådde aldrig Opus — rotsorsak till 0 leads i Dalby/Genarp.
+**Fix:** `_enhance_contrast` flyttad till `_process_building` FÖRE `_prefilter_building`.
+
+## Datainsamlingsgapet — inga negativa sparas
+
+`_process_building` returnerar `None` för alla SOLAR=NO-byggnader (rad ~1322) —
+de **sparas aldrig**. Följd:
+
+| Klass | Finns i Supabase | Källa |
+|-------|------------------|-------|
+| Sanna positiva | ✅ | `user_confirmed=true, false_positive=false` |
+| Falska positiva | ✅ | `false_positive=true` el. `user_confirmed=false` |
+| Sanna negativa | ❌ | kastas på rad ~1322 |
+| Falska negativa (missade soltak) | ❌ | nådde aldrig en människa |
+
+**Mätbarhet:** precision går att mäta nu; **recall är omätbar** tills ett urval
+av NO-tak persisteras. Detta är roten till att "tak utan solceller"-listan är
+tom och varför Dalby-buggens missade tak var osynliga.
 
 ## Externa tjänster
 

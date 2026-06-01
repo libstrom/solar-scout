@@ -1040,12 +1040,32 @@ def _enhance_contrast(img_bytes: bytes) -> bytes:
         return img_bytes
 
 
+def _image_media_type(img_bytes: bytes) -> str:
+    """Sniff the real image format from magic bytes.
+
+    Anthropic rejects an image block whose declared media_type does not match
+    the actual bytes (HTTP 400), which `_analyze_building` swallows silently —
+    so a PNG from a fallback source mislabelled as JPEG would degrade into a
+    silent 0-leads. Derive the type instead of hardcoding it.
+    """
+    if img_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if img_bytes[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if img_bytes[:4] == b"RIFF" and img_bytes[8:12] == b"WEBP":
+        return "image/webp"
+    if img_bytes[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    return "image/jpeg"  # safe default — most sources serve JPEG
+
+
 def _analyze_building(
     client: anthropic.Anthropic,
     img_bytes: bytes,
     few_shot: list[tuple[str, str]] | None = None,
     street_view_bytes: bytes | None = None,
     budget: "BudgetTracker | None" = None,
+    already_enhanced: bool = False,
 ) -> tuple[bool, bool, bool, str]:
     """
     Returns (is_residential_house, has_solar_panels, is_unsure, reasoning).
@@ -1056,8 +1076,10 @@ def _analyze_building(
     street_view_bytes: optional JPEG from Google Street View, included as a
     second reference image to resolve ambiguous cases.
     """
-    img_bytes = _enhance_contrast(img_bytes)
+    if not already_enhanced:
+        img_bytes = _enhance_contrast(img_bytes)
     b64 = base64.standard_b64encode(img_bytes).decode()
+    media_type = _image_media_type(img_bytes)
     sv_notice = (
         "A street-level photo of the SAME property follows the aerial image. "
         "Use it as a secondary reference — solar panels on south-facing roof slopes "
@@ -1122,9 +1144,11 @@ def _analyze_building(
             msgs: list[dict] = []
             last_idx = len(few_shot) - 1
             for i, (ex_b64, verdict) in enumerate(few_shot):
+                ex_header = base64.standard_b64decode(ex_b64[:24])
+                ex_media = _image_media_type(ex_header + bytes(4))
                 img_block: dict = {
                     "type": "image",
-                    "source": {"type": "base64", "media_type": "image/jpeg", "data": ex_b64},
+                    "source": {"type": "base64", "media_type": ex_media, "data": ex_b64},
                 }
                 if i == last_idx:
                     img_block["cache_control"] = {"type": "ephemeral"}
@@ -1137,21 +1161,23 @@ def _analyze_building(
                 })
                 msgs.append({"role": "assistant", "content": verdict})
             final_content: list[dict] = [
-                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
+                {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
             ]
             if street_view_bytes:
                 sv_b64 = base64.standard_b64encode(street_view_bytes).decode()
                 final_content.append({"type": "text", "text": sv_notice})
-                final_content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": sv_b64}})
+                sv_media = _image_media_type(street_view_bytes[:16])
+                final_content.append({"type": "image", "source": {"type": "base64", "media_type": sv_media, "data": sv_b64}})
             msgs.append({"role": "user", "content": final_content})
         else:
             final_content = [
-                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
+                {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
             ]
             if street_view_bytes:
                 sv_b64 = base64.standard_b64encode(street_view_bytes).decode()
                 final_content.append({"type": "text", "text": sv_notice})
-                final_content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": sv_b64}})
+                sv_media = _image_media_type(street_view_bytes[:16])
+                final_content.append({"type": "image", "source": {"type": "base64", "media_type": sv_media, "data": sv_b64}})
             msgs = [{"role": "user", "content": final_content}]
         msg = client.messages.create(
             model="claude-opus-4-8",
@@ -1202,13 +1228,18 @@ def _analyze_building(
         return False, False, False, ""
 
 
-def _prefilter_building(img_bytes: bytes, client: anthropic.Anthropic) -> bool:
+def _prefilter_building(
+    img_bytes: bytes,
+    client: anthropic.Anthropic,
+    budget: "BudgetTracker | None" = None,
+) -> bool:
     """Cheap Haiku pre-filter — returns False if roof is obviously solar-free.
 
     Saves ~60% of Opus calls. Only passes ambiguous/positive cases through.
     On any API error returns True (fail open — let Opus decide).
     """
     b64 = base64.standard_b64encode(img_bytes).decode()
+    media_type = _image_media_type(img_bytes)
     try:
         msg = client.messages.create(
             model="claude-haiku-4-5-20251001",
@@ -1216,7 +1247,7 @@ def _prefilter_building(img_bytes: bytes, client: anthropic.Anthropic) -> bool:
             messages=[{
                 "role": "user",
                 "content": [
-                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
+                    {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
                     {"type": "text", "text": (
                         "Swedish roof aerial photo. Does this roof have ANY rectangular smooth patches "
                         "that could be solar panels? Reply only YES or NO."
@@ -1224,6 +1255,8 @@ def _prefilter_building(img_bytes: bytes, client: anthropic.Anthropic) -> bool:
                 ],
             }],
         )
+        if budget is not None:
+            budget.add_anthropic_usage(msg.usage)
         return "YES" in msg.content[0].text.upper()
     except Exception:
         return True  # fail open — let Sonnet decide
@@ -1251,12 +1284,20 @@ def _process_building(
         return None
     img = _fetch_satellite(google_key, lat, lng, zoom=zoom, mapbox_key=mapbox_key, lm_key=lm_key, lm_layer=lm_layer)
     if img is None:
+        _log.debug("_process_building no_satellite_image osm_id=%s", building.get("osm_id"))
         return None
-    if not _prefilter_building(img, anthropic_client):
+    # Enhance ONCE here so the Haiku prefilter judges the SAME contrast-boosted
+    # image Opus sees. Otherwise faint panels visible only after CLAHE get gated
+    # out by the prefilter before Opus is ever consulted (root cause of the
+    # silent 0-leads bug — see CONTEXT.md).
+    img = _enhance_contrast(img)
+    if not _prefilter_building(img, anthropic_client, budget=budget):
         _log.debug("_process_building haiku_prefilter=NO osm_id=%s", building.get("osm_id"))
         return None
-    is_house, has_solar, is_unsure, reasoning = _analyze_building(anthropic_client, img, few_shot=few_shot, budget=budget)
+    is_house, has_solar, is_unsure, reasoning = _analyze_building(
+        anthropic_client, img, few_shot=few_shot, budget=budget, already_enhanced=True)
     if not is_house:
+        _log.debug("_process_building not_house osm_id=%s", building.get("osm_id"))
         return None
 
     # Second pass: if AI is unsure, fetch Street View and reanalyse.
@@ -1272,7 +1313,8 @@ def _process_building(
         if sv_bytes:
             _log.debug("_process_building: UNSURE → Street View second pass lat=%s lng=%s", lat, lng)
             is_house, has_solar, is_unsure, reasoning = _analyze_building(
-                anthropic_client, img, few_shot=few_shot, street_view_bytes=sv_bytes, budget=budget
+                anthropic_client, img, few_shot=few_shot, street_view_bytes=sv_bytes,
+                budget=budget, already_enhanced=True
             )
             if not is_house:
                 return None
@@ -1319,6 +1361,7 @@ def _process_building(
             samtomt_solar_extra = True
             solar_location = "samtomt"
         else:
+            _log.debug("_process_building no_solar osm_id=%s", building.get("osm_id"))
             return None
 
     address = building["address"]
@@ -1755,6 +1798,10 @@ def scan_city(
     merged = merge_leads(osm_leads, all_ai_leads)
     _log.info("scan_city done city=%s total_leads=%d (osm=%d ai=%d)",
               city_name, len(merged), len(osm_leads), len(all_ai_leads))
+    # Emit ai_done so Ort-mode diagnostics show "AI bekräftade solceller: X"
+    # (scan_bbox already does this; without it Ort-mode 0-leads looks truncated).
+    if phase_callback:
+        phase_callback("ai_done", len(all_ai_leads))
     return merged, merged_stats
 
 

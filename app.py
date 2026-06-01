@@ -1905,6 +1905,111 @@ def page_review(user):
             st.rerun()
 
 
+def _leads_html_with_thumbs(df_full: "pd.DataFrame") -> None:
+    """Render leads as an HTML table with cursor-following thumbnail previews."""
+    import html as _html  # noqa: PLC0415
+    from urllib.parse import urlparse as _urlparse  # noqa: PLC0415
+
+    def _safe_url(raw: object) -> str:
+        url = str(raw or "").strip()
+        try:
+            scheme = _urlparse(url).scheme
+        except Exception:
+            return ""
+        return url if scheme in {"http", "https"} else ""
+
+    try:
+        from scanner import lm_wms_url as _lm_url  # noqa: PLC0415
+        _has_lm = True
+    except Exception:
+        _has_lm = False
+
+    # JS helpers (inline, no <script> tag — those are stripped by Streamlit's innerHTML)
+    # onmousemove: follow cursor, flip left when near right viewport edge
+    _js_move = (
+        "var p=document.getElementById('stp');"
+        "var x=event.clientX+14,y=event.clientY-88;"
+        "if(x+230>window.innerWidth)x=event.clientX-244;"
+        "if(y<4)y=4;"
+        "p.style.left=x+'px';p.style.top=y+'px';"
+    )
+    _js_enter = (
+        "var p=document.getElementById('stp');"
+        "document.getElementById('sti').src=this.dataset.src;"
+        "p.style.display='block';"
+        + _js_move
+    )
+    _js_leave = "document.getElementById('stp').style.display='none';"
+
+    rows_html: list[str] = []
+    for _, row in df_full.iterrows():
+        addr = _html.escape(str(row.get("address") or "–"))
+        solar_icon = "☀️" if str(row.get("has_solar", "")) == "Ja" else "—"
+        # Prefer confirmed_image_url → fresh LM WMS → validated image_url only
+        img_url = _safe_url(row.get("confirmed_image_url"))
+        if not img_url and _has_lm:
+            lat, lng = row.get("lat"), row.get("lng")
+            if lat and lng:
+                try:
+                    img_url = _lm_url(float(lat), float(lng), size_m=80, width=240, height=180)
+                except Exception:
+                    img_url = ""
+        if not img_url:
+            img_url = _safe_url(row.get("image_url"))
+
+        if img_url:
+            safe_url = _html.escape(img_url, quote=True)
+            thumb_cell = (
+                f'<span class="lth" data-src="{safe_url}"'
+                f' onmouseenter="{_js_enter}"'
+                f' onmousemove="{_js_move}"'
+                f' onmouseleave="{_js_leave}">'
+                f'<a href="{safe_url}" target="_blank" rel="noopener noreferrer"'
+                f' title="Öppna takbild i ny flik"'
+                f' style="font-size:15px;text-decoration:none;cursor:pointer">🛰</a>'
+                f'</span>'
+            )
+        else:
+            thumb_cell = '<span style="color:#aaa">–</span>'
+
+        rows_html.append(
+            f"<tr><td class='la'>{addr}</td>"
+            f"<td class='lc'>{solar_icon}</td>"
+            f"<td class='lc'>{thumb_cell}</td></tr>"
+        )
+
+    # Floating preview div — one instance, reused for all rows
+    floating_div = (
+        '<div id="stp" style="display:none;position:fixed;z-index:9999;'
+        'width:230px;height:175px;border:2px solid #6b7280;border-radius:6px;'
+        'box-shadow:0 4px 20px rgba(0,0,0,.45);background:#1a1a1a;pointer-events:none;overflow:hidden">'
+        '<img id="sti" src="" style="width:100%;height:100%;object-fit:cover" loading="lazy" />'
+        '</div>'
+    )
+
+    html = (
+        floating_div
+        + "<style>"
+        ".lt-t{width:100%;border-collapse:collapse;font-size:13px;font-family:sans-serif}"
+        ".lt-t th{background:#f0f2f6;padding:7px 12px;text-align:left;border-bottom:2px solid #d1d5db}"
+        ".lt-t td{padding:5px 12px;border-bottom:1px solid #e5e7eb;vertical-align:middle}"
+        ".lt-t td.lc{text-align:center;width:56px}"
+        ".lt-t td.la{max-width:320px;word-break:break-word}"
+        ".lth{display:inline-block;cursor:pointer}"
+        "</style>"
+        '<div style="overflow-x:auto">'
+        '<table class="lt-t"><thead><tr>'
+        "<th>Adress</th>"
+        "<th style='text-align:center'>Sol</th>"
+        "<th style='text-align:center' title='Hovra 🛰 för takbild'>Tak 🛰</th>"
+        "</tr></thead>"
+        f"<tbody>{''.join(rows_html)}</tbody>"
+        "</table></div>"
+    )
+    st.markdown(html, unsafe_allow_html=True)
+    st.caption("Hovra 🛰 för takbild — klicka för att öppna i ny flik")
+
+
 def page_leads(user):  # noqa: keep user param for confirm_lead calls
     st.subheader("Leadslista")
     df = load_leads(str(user.id))
@@ -1947,74 +2052,74 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
         except Exception:
             return "–"
 
+    df_reset = df.reset_index(drop=True)
+
+    # ── Leads med hover-thumbnail ──────────────────────────────────────────────
+    _leads_html_with_thumbs(df_reset)
+
+    # ── Markera felaktiga leads (FP-editor) ────────────────────────────────────
     display_cols = [c for c in
-        ["address", "has_solar", "samtomt_solar_extra", "air_to_air", "air_to_water", "notes", "image_url", "created_at"]
+        ["address", "has_solar", "samtomt_solar_extra", "notes", "created_at"]
         if c in df.columns]
     rename_map = {
         "address": "Adress", "has_solar": "Solceller",
         "samtomt_solar_extra": "Samtomt sol",
-        "air_to_air": "L/L", "air_to_water": "L/V",
-        "notes": "Noteringar", "image_url": "Satellitbild",
+        "notes": "Noteringar",
         "created_at": "Sparad",
     }
-    df_reset = df.reset_index(drop=True)
     display_df = df_reset[display_cols].rename(columns=rename_map)
     if "Samtomt sol" in display_df.columns:
         display_df["Samtomt sol"] = display_df["Samtomt sol"].apply(_samtomt_icon)
 
-    # Checkbox "❌ Fel" per rad — markera falska positiver → AI lär sig
-    editable_df = display_df.copy()
-    editable_df.insert(0, "❌ Fel", False)
-
-    column_config: dict = {
-        "❌ Fel": st.column_config.CheckboxColumn(
-            "❌ Fel",
-            width="small",
-            help="Markera om AI:n hade fel — inga solceller här. Listan uppdateras och AI:n lär sig till nästa scan.",
-        ),
-    }
-    if "Satellitbild" in display_df.columns:
-        column_config["Satellitbild"] = st.column_config.LinkColumn(
-            "Satellitbild",
-            display_text="🛰 Visa tak",
-            help="Öppnar LM WMS-bild direkt i webbläsaren",
+    with st.expander("❌ Markera felaktiga leads (AI lär sig)"):
+        editable_df = display_df.copy()
+        editable_df.insert(0, "❌ Fel", False)
+        column_config: dict = {
+            "❌ Fel": st.column_config.CheckboxColumn(
+                "❌ Fel",
+                width="small",
+                help="Markera om AI:n hade fel — inga solceller här. AI:n lär sig till nästa scan.",
+            ),
+        }
+        edited = st.data_editor(
+            editable_df,
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed",
+            column_config=column_config,
+            disabled=[c for c in display_df.columns],
+            key="leads_editor",
         )
-
-    edited = st.data_editor(
-        editable_df,
-        use_container_width=True,
-        hide_index=True,
-        num_rows="fixed",
-        column_config=column_config,
-        disabled=[c for c in display_df.columns],
-        key="leads_editor",
-    )
-
-    # Hantera felmarkering — inga bekräftelsesteg, enkel klick räcker
-    if "id" in df_reset.columns:
-        wrong_mask = edited["❌ Fel"] == True  # noqa: E712
-        n_wrong = int(wrong_mask.sum())
-        if n_wrong > 0:
-            wrong_addrs = edited.loc[wrong_mask, "Adress"].tolist() if "Adress" in edited.columns else []
-            preview = ", ".join(wrong_addrs[:3]) + ("…" if len(wrong_addrs) > 3 else "")
-            st.warning(f"**{n_wrong} lead(s) markerade som fel:** {preview}")
-            col_cancel, col_confirm = st.columns(2)
-            with col_cancel:
-                if st.button("Avbryt", key="btn_fp_cancel", use_container_width=True):
-                    st.rerun()
-            with col_confirm:
-                if st.button(
-                    f"✅ Bekräfta — AI lär sig av {n_wrong} fel",
-                    type="primary", key="btn_fp_confirm", use_container_width=True,
-                ):
-                    sb = get_supabase()
-                    for lid in df_reset.loc[wrong_mask, "id"]:
-                        sb.table("scout_leads").update({
-                            "false_positive": True,
-                            "user_confirmed": False,
-                        }).eq("id", int(lid)).execute()
-                    st.success(f"✅ {n_wrong} lead(s) markerade som fel. AI:n använder detta nästa scan.")
-                    st.rerun()
+        # Hantera felmarkering
+        if "id" in df_reset.columns:
+            wrong_mask = edited["❌ Fel"] == True  # noqa: E712
+            n_wrong = int(wrong_mask.sum())
+            if n_wrong > 0:
+                wrong_addrs = edited.loc[wrong_mask, "Adress"].tolist() if "Adress" in edited.columns else []
+                preview = ", ".join(wrong_addrs[:3]) + ("…" if len(wrong_addrs) > 3 else "")
+                st.warning(f"**{n_wrong} lead(s) markerade som fel:** {preview}")
+                col_cancel, col_confirm = st.columns(2)
+                with col_cancel:
+                    if st.button("Avbryt", key="btn_fp_cancel", use_container_width=True):
+                        st.rerun()
+                with col_confirm:
+                    if st.button(
+                        f"✅ Bekräfta — AI lär sig av {n_wrong} fel",
+                        type="primary", key="btn_fp_confirm", use_container_width=True,
+                    ):
+                        sb = get_supabase()
+                        try:
+                            for lid in df_reset.loc[wrong_mask, "id"]:
+                                sb.table("scout_leads").update({
+                                    "false_positive": True,
+                                    "user_confirmed": False,
+                                }).eq("id", int(lid)).execute()
+                        except Exception as _fp_exc:
+                            _log.error("page_leads false-positive save failed: %s", _fp_exc)
+                            st.error("Kunde inte spara alla felmarkeringar — försök igen.")
+                            st.stop()
+                        st.success(f"✅ {n_wrong} lead(s) markerade som fel. AI:n använder detta nästa scan.")
+                        st.rerun()
 
     with st.expander("➕ Lägg till manuell lead"):
         m_addr  = st.text_input("Adress", placeholder="Ljunggatan 12, Malmö")
@@ -2069,13 +2174,33 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
                 lid = int(c_row["id"])
                 addr = c_row.get("address", "–")
                 with st.expander(f"**{addr}**", expanded=False):
-                    _gs_url = c_row.get("google_search_url") or f"https://www.google.com/search?q=vem+bor+p%C3%A5+{urllib.parse.quote(addr)}"
-                    _ht_url = c_row.get("hitta_url") or f"https://www.hitta.se/s%C3%B6k?vad={urllib.parse.quote(addr)}"
-                    _lnk1, _lnk2, _lnk3 = st.columns(3)
-                    _lnk1.link_button("🔍 Google", _gs_url, use_container_width=True)
-                    _lnk2.link_button("📖 Hitta.se", _ht_url, use_container_width=True)
-                    if c_row.get("maps_url"):
-                        _lnk3.link_button("📍 Maps", c_row["maps_url"], use_container_width=True)
+                    # Satellite thumbnail + links
+                    _c_img_url = c_row.get("confirmed_image_url") or c_row.get("image_url") or ""
+                    if not _c_img_url:
+                        _c_lat, _c_lng = c_row.get("lat"), c_row.get("lng")
+                        if _c_lat and _c_lng:
+                            try:
+                                from scanner import lm_wms_url as _lm_wms_u  # noqa: PLC0415
+                                _c_img_url = _lm_wms_u(float(_c_lat), float(_c_lng), size_m=80, width=300, height=200)
+                            except Exception:
+                                pass
+                    _col_thumb, _col_links = st.columns([1, 2])
+                    with _col_thumb:
+                        if _c_img_url:
+                            try:
+                                st.image(_c_img_url, use_container_width=True)
+                            except Exception:
+                                st.link_button("🛰 Visa tak", _c_img_url, use_container_width=True)
+                        else:
+                            st.caption("(ingen bild)")
+                    with _col_links:
+                        _gs_url = c_row.get("google_search_url") or f"https://www.google.com/search?q=vem+bor+p%C3%A5+{urllib.parse.quote(addr)}"
+                        _ht_url = c_row.get("hitta_url") or f"https://www.hitta.se/s%C3%B6k?vad={urllib.parse.quote(addr)}"
+                        _lnk1, _lnk2 = st.columns(2)
+                        _lnk1.link_button("🔍 Google", _gs_url, use_container_width=True)
+                        _lnk2.link_button("📖 Hitta.se", _ht_url, use_container_width=True)
+                        if c_row.get("maps_url"):
+                            st.link_button("📍 Maps", c_row["maps_url"], use_container_width=True)
                     st.divider()
                     col_s, col_fp = st.columns([2, 1])
                     with col_s:
