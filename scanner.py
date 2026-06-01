@@ -1788,6 +1788,10 @@ def scan_city(
     merged = merge_leads(osm_leads, all_ai_leads)
     _log.info("scan_city done city=%s total_leads=%d (osm=%d ai=%d)",
               city_name, len(merged), len(osm_leads), len(all_ai_leads))
+    # Emit ai_done so Ort-mode diagnostics show "AI bekräftade solceller: X"
+    # (scan_bbox already does this; without it Ort-mode 0-leads looks truncated).
+    if phase_callback:
+        phase_callback("ai_done", len(all_ai_leads))
     return merged, merged_stats
 
 
