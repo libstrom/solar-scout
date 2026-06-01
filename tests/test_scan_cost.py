@@ -82,7 +82,7 @@ def test_tracker_accumulates_cost():
     t = BudgetTracker()
     t.add_usage(input_tokens=1_000_000, output_tokens=0)
     # 1 MTok input på Opus 4.8 (trackerns default) = $5 → ~52.5 kr
-    assert t.spent_sek == pytest.approx(SONNET_4_6.input * 10.5, rel=1e-6)
+    assert t.spent_sek == pytest.approx(OPUS_4_8.input * 10.5, rel=1e-6)
 
 
 def test_tracker_check_raises_over_budget():
@@ -141,7 +141,7 @@ def test_tracker_threadsafe_accumulation():
         th.join()
 
     # 8 trådar × 100 × 1000 = 800_000 input-tokens på Opus 4.8 (default)
-    expected_sek = 800_000 / 1_000_000 * SONNET_4_6.input * 10.5
+    expected_sek = 800_000 / 1_000_000 * OPUS_4_8.input * 10.5
     assert t.spent_sek == pytest.approx(expected_sek, rel=1e-6)
 
 
@@ -155,7 +155,7 @@ def test_shared_budget_accumulates_across_calls():
     t.add_usage(input_tokens=10_000)
     t.add_usage(input_tokens=10_000)
     t.add_usage(input_tokens=10_000)
-    total_expected = 30_000 / 1_000_000 * SONNET_4_6.input * 10.5
+    total_expected = 30_000 / 1_000_000 * OPUS_4_8.input * 10.5
     assert t.spent_sek == pytest.approx(total_expected, rel=1e-6)
 
 

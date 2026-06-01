@@ -1846,8 +1846,10 @@ def page_review(user):
                     "false_positive": True,
                     "reject_reason": reject_reason,
                 }).eq("id", lead_id).execute()
-            except Exception:
-                pass
+            except Exception as _rev_exc:
+                _log.error("page_review avvisa misslyckades lead_id=%s: %s", lead_id, _rev_exc)
+                st.error("Kunde inte spara avvisning — försök igen. Kontakta support om problemet kvarstår.")
+                st.stop()
             # Spara bild för dynamisk few-shot (NO-exempel)
             try:
                 _save_img = _img_bytes_review
@@ -1878,8 +1880,10 @@ def page_review(user):
                     "needs_review": False,
                     "has_solar": "Ja",
                 }).eq("id", lead_id).execute()
-            except Exception:
-                pass
+            except Exception as _rev_exc:
+                _log.error("page_review bekräfta misslyckades lead_id=%s: %s", lead_id, _rev_exc)
+                st.error("Kunde inte spara bekräftelse — försök igen. Kontakta support om problemet kvarstår.")
+                st.stop()
             # Spara bild till Supabase Storage (används för dynamisk few-shot)
             try:
                 _save_img = _img_bytes_review
@@ -2111,8 +2115,10 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
                             update["david_note"] = new_note
                         try:
                             _sb.table("scout_leads").update(update).eq("id", lid).execute()
-                        except Exception:
-                            pass
+                        except Exception as _save_exc:
+                            _log.error("page_leads spara misslyckades lead_id=%s: %s", lid, _save_exc)
+                            st.error("Kunde inte spara — försök igen. Kontakta support om problemet kvarstår.")
+                            st.stop()
                         # Skicka mail till Linus om möte precis bokades
                         if new_status == "mote_bokat" and cur_status != "mote_bokat":
                             sent = _send_meeting_email(

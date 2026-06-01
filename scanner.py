@@ -1154,7 +1154,7 @@ def _analyze_building(
                 final_content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": sv_b64}})
             msgs = [{"role": "user", "content": final_content}]
         msg = client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-opus-4-8",
             max_tokens=220,
             system=system_blocks,
             messages=msgs,
@@ -1205,8 +1205,8 @@ def _analyze_building(
 def _prefilter_building(img_bytes: bytes, client: anthropic.Anthropic) -> bool:
     """Cheap Haiku pre-filter — returns False if roof is obviously solar-free.
 
-    Saves ~60% of Sonnet calls. Only passes ambiguous/positive cases through.
-    On any API error returns True (fail open — let Sonnet decide).
+    Saves ~60% of Opus calls. Only passes ambiguous/positive cases through.
+    On any API error returns True (fail open — let Opus decide).
     """
     b64 = base64.standard_b64encode(img_bytes).decode()
     try:
