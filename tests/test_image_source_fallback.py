@@ -17,6 +17,8 @@ for _mod in ("googlemaps", "streamlit", "supabase", "stripe", "folium",
              "streamlit_folium", "openpyxl"):
     sys.modules.setdefault(_mod, MagicMock())
 
+import pytest  # noqa: E402
+
 import scanner  # noqa: E402
 from scanner import (  # noqa: E402
     _fetch_satellite,
@@ -39,11 +41,12 @@ def test_google_quota_falls_back_to_lm_wms():
     assert img == b"lm_image"
 
 
-def test_google_quota_sets_circuit_breaker():
-    """Kvotfelet på Google ska sätta breakern så resten av scanen hoppar Google."""
+@pytest.mark.parametrize("detail", ["402 billing", "403 billing/API-nyckel", "429 rate limit"])
+def test_google_quota_sets_circuit_breaker(detail):
+    """402/403/429 ska alla sätta breakern så resten av scanen hoppar Google."""
     with patch("scanner._fetch_lm_wms", return_value=None), \
          patch("scanner._fetch_google_static",
-               side_effect=APIQuotaExceededError("Google Static Maps", "429 rate limit")), \
+               side_effect=APIQuotaExceededError("Google Static Maps", detail)), \
          patch("scanner._fetch_mapbox", return_value=b"mapbox_image"):
         _fetch_satellite("gkey", 57.0, 14.0)
     assert scanner._google_exhausted.is_set()

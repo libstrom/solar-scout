@@ -1961,17 +1961,17 @@ def _leads_html_with_thumbs(df_full: "pd.DataFrame") -> None:
             img_url = _safe_url(row.get("image_url"))
 
         if img_url:
-            safe_url = _html.escape(img_url, quote=True)
+            safe_img_url = _html.escape(img_url, quote=True)
             lat_v, lng_v = row.get("lat"), row.get("lng")
             try:
                 maps_href = (
                     f"https://www.google.com/maps/@{float(lat_v)},{float(lng_v)},60m/data=!3m1!1e3"
-                    if lat_v and lng_v else safe_url
+                    if lat_v and lng_v else img_url
                 )
             except Exception:
-                maps_href = safe_url
+                maps_href = img_url
             thumb_cell = (
-                f'<span class="lth" data-src="{safe_url}"'
+                f'<span class="lth" data-src="{safe_img_url}"'
                 f' onmouseenter="{_js_enter}"'
                 f' onmousemove="{_js_move}"'
                 f' onmouseleave="{_js_leave}">'

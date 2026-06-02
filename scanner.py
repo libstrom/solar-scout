@@ -814,8 +814,8 @@ def _fetch_street_view(google_key: str, lat: float, lng: float) -> bytes | None:
     )
     try:
         resp = httpx.get(url, timeout=10)
-        if resp.status_code == 429:
-            raise APIQuotaExceededError("Google Street View", "429 rate limit")
+        if resp.status_code in (402, 429):
+            raise APIQuotaExceededError("Google Street View", f"{resp.status_code} billing/rate limit")
         if resp.status_code == 403:
             raise APIQuotaExceededError("Google Street View", "403 billing/API-nyckel")
         if resp.status_code == 200 and "image" in resp.headers.get("content-type", ""):
@@ -941,8 +941,8 @@ def _fetch_google_static(google_key: str, lat: float, lng: float, zoom: int = ZO
     )
     try:
         resp = httpx.get(url, timeout=20)
-        if resp.status_code == 429:
-            raise APIQuotaExceededError("Google Static Maps", "429 rate limit")
+        if resp.status_code in (402, 429):
+            raise APIQuotaExceededError("Google Static Maps", f"{resp.status_code} billing/rate limit")
         if resp.status_code == 403:
             raise APIQuotaExceededError("Google Static Maps", "403 billing/API-nyckel")
         resp.raise_for_status()
