@@ -195,22 +195,13 @@ def init_auth():
             pass
 
     if not access or not refresh:
-        # Fallback: stx.CookieManager (behöver JS round-trip, men sessioner
-        # satta med gamla versionen av appen läses fortfarande upp)
+        # Fallback: stx.CookieManager (sessioner satta med äldre appversion)
         cm = _get_cookie_manager()
         if cm is not None:
             access = cm.get("access_token") or access
             refresh = cm.get("refresh_token") or refresh
-            if not access or not refresh:
-                attempts = st.session_state.get("_cookie_load_attempted", 0)
-                if attempts < 2:
-                    st.session_state["_cookie_load_attempted"] = attempts + 1
-                    st.rerun()
         if not access or not refresh:
-            st.session_state.pop("_cookie_load_attempted", None)
             return None
-
-    st.session_state.pop("_cookie_load_attempted", None)
 
     # Validera mot Supabase (körs bara vid första rendern eller efter token-refresh).
     user_sb = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
@@ -233,8 +224,8 @@ def init_auth():
             cm = _get_cookie_manager()
             if cm is not None:
                 _exp = datetime.now() + timedelta(days=30)
-                cm.set("access_token", resp.session.access_token, expires_at=_exp)
-                cm.set("refresh_token", resp.session.refresh_token, expires_at=_exp)
+                cm.set("access_token", resp.session.access_token, expires_at=_exp, key="set_access_refresh")
+                cm.set("refresh_token", resp.session.refresh_token, expires_at=_exp, key="set_refresh_refresh")
             return resp.user
     except Exception:
         pass
@@ -243,8 +234,8 @@ def init_auth():
         st.session_state.pop(k, None)
     cm = _get_cookie_manager()
     if cm is not None:
-        cm.remove("access_token")
-        cm.remove("refresh_token")
+        cm.delete("access_token", key="del_access_fail")
+        cm.delete("refresh_token", key="del_refresh_fail")
 
     # OAuth callback — Microsoft/Azure PKCE code exchange
     _oauth_code = st.query_params.get("code")
@@ -272,6 +263,7 @@ def init_auth():
             _log.warning("oauth code exchange failed: %s", _oe)
             st.session_state["_oauth_error"] = str(_oe)
 
+
     return None
 
 
@@ -286,7 +278,6 @@ def _pkce_pair() -> tuple[str, str]:
 def do_login(email: str, password: str):
     user_sb = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
     resp = user_sb.auth.sign_in_with_password({"email": email, "password": password})
-    user_sb.auth.set_session(resp.session.access_token, resp.session.refresh_token)
     st.session_state["access_token"]    = resp.session.access_token
     st.session_state["refresh_token"]   = resp.session.refresh_token
     st.session_state["_auth_user"]      = resp.user
@@ -294,8 +285,8 @@ def do_login(email: str, password: str):
     cm = _get_cookie_manager()
     if cm is not None:
         _exp = datetime.now() + timedelta(days=30)
-        cm.set("access_token", resp.session.access_token, expires_at=_exp)
-        cm.set("refresh_token", resp.session.refresh_token, expires_at=_exp)
+        cm.set("access_token", resp.session.access_token, expires_at=_exp, key="set_access")
+        cm.set("refresh_token", resp.session.refresh_token, expires_at=_exp, key="set_refresh")
     return resp.user
 
 
@@ -320,8 +311,8 @@ def do_logout():
         st.session_state.pop(k, None)
     cm = _get_cookie_manager()
     if cm is not None:
-        cm.remove("access_token")
-        cm.remove("refresh_token")
+        cm.delete("access_token", key="del_access_logout")
+        cm.delete("refresh_token", key="del_refresh_logout")
 
 # ── Profil & subscription ─────────────────────────────────────────────────────
 
@@ -641,30 +632,6 @@ def page_auth():
             email    = st.text_input("E-postadress",  key="login_email")
             password = st.text_input("Lösenord", type="password", key="login_password")
             submitted = st.form_submit_button("Logga in", type="primary", use_container_width=True)
-        # Patch autocomplete attributes so browsers offer to save/fill credentials.
-        # components.html runs in an iframe and can reach window.parent.document.
-        # Defensive: st.components.v1.html is deprecated for removal after 2026-06-01.
-        # This autocomplete hack is cosmetic, so if a future Streamlit drops the API,
-        # skip it rather than crashing the entire login page.
-        try:
-            import streamlit.components.v1 as _stc
-            _stc.html("""
-            <script>
-            (function() {
-                function patch() {
-                    var p = window.parent.document;
-                    var em = p.querySelector('input[type="text"]');
-                    var pw = p.querySelector('input[type="password"]');
-                    if (em) { em.setAttribute('autocomplete', 'email'); em.setAttribute('name', 'email'); }
-                    if (pw) { pw.setAttribute('autocomplete', 'current-password'); pw.setAttribute('name', 'password'); }
-                }
-                patch();
-                setTimeout(patch, 300);
-            })();
-            </script>
-            """, height=0)
-        except (ImportError, AttributeError):
-            pass  # components.v1.html removed/renamed → skip cosmetic autocomplete hint
         if submitted:
             try:
                 do_login(email, password)
@@ -731,7 +698,7 @@ def page_auth():
     with tab_pw:
         st.caption("Vi skickar en länk till din e-post så att du kan sätta ett nytt lösenord.")
         with st.form("reset_form"):
-            email = st.text_input("E-postadress")
+            email = st.text_input("E-postadress", key="reset_email")
             submitted = st.form_submit_button("Skicka återställningslänk", type="primary", use_container_width=True)
         if submitted:
             try:
@@ -848,7 +815,7 @@ def page_paywall(user, lead_count: int = 0):
                     st.button(plan["cta"], disabled=True, use_container_width=True)
 
     st.divider()
-    if st.button("Logga ut", use_container_width=True):
+    if st.button("Logga ut", use_container_width=True, key="logout_account"):
         do_logout()
         st.rerun()
 
@@ -1113,6 +1080,11 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
         st.info("Gå till fliken **Konto** för att köpa credits.")
         return
 
+    # Visa ev. felmeddelande från föregående scan-försök (överlever reruns)
+    _prev_err = st.session_state.pop("_scanner_last_error", None)
+    if _prev_err:
+        st.error(_prev_err)
+
     south = west = north = east = None
     city_name = ""
 
@@ -1208,16 +1180,29 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                 edit_options={"edit": True, "remove": True},
             ).add_to(m)
 
-            # Existing lead markers
+            # Existing lead markers — hover visar en liten takbild (LM ortofoto,
+            # lagringsbar/gratis) + adress. Bilden laddas av webbläsaren först när
+            # tooltipen öppnas (mouseover), så alla 200 hämtas inte på en gång.
+            import html as _html
+            from scanner import lm_wms_url as _lm_wms_url  # noqa: PLC0415
             for _row in _map_rows[:200]:
                 if _row.get("lat") and _row.get("lng"):
+                    _addr = _html.escape(_row.get("address", "") or "")
+                    _thumb = _lm_wms_url(_row["lat"], _row["lng"], size_m=80, width=240, height=180)
+                    _tip_html = (
+                        f'<div style="text-align:center;width:220px">'
+                        f'<img src="{_html.escape(_thumb)}" width="210" '
+                        f'style="border-radius:6px;display:block;margin:0 auto 4px" '
+                        f"loading=\"lazy\" onerror=\"this.style.display='none'\">"
+                        f'<span style="font-size:12px">{_addr}</span></div>'
+                    )
                     folium.CircleMarker(
                         location=[_row["lat"], _row["lng"]],
                         radius=5,
                         color="#f59e0b",
                         fill=True,
                         fill_opacity=0.75,
-                        tooltip=_row.get("address", ""),
+                        tooltip=folium.Tooltip(_tip_html, sticky=True),
                     ).add_to(m)
 
             output = st_folium(
@@ -1347,13 +1332,14 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
         scan_errors: list[str] = []
         total_buildings_est = [0]
         cumulative_done = [0]
+        progress_floor = [0.0]  # never let the bar go backwards
 
         current_address = [""]
 
         def _render_live_leads():
             with live_leads_ph.container():
                 st.caption(f"☀️ **{len(found_leads)} solcellstak hittade hittills** — ✅/❌ granskning möjlig efter scan")
-                for _live_lead in found_leads:
+                for _i, _live_lead in enumerate(found_leads):
                     with st.container(border=True):
                         _col_link, _col_info = st.columns([1, 2])
                         with _col_link:
@@ -1363,7 +1349,8 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                                 if _live_lead.lat and _live_lead.lng else None
                             )
                             if _url:
-                                st.link_button("🛰 Visa tak", _url, use_container_width=True)
+                                st.link_button("🛰 Visa tak", _url, use_container_width=True,
+                                               key=f"_live_tak_{_i}")
                             else:
                                 st.caption("(ingen bild)")
                         with _col_info:
@@ -1395,13 +1382,15 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
             known_total = total_buildings_est[0]
             if known_total > 0:
                 frac = min(n / known_total, 0.97)
-                pct = int(frac * 100)
-                addr_str = f" — {current_address[0]}" if current_address[0] else ""
-                progress_bar.progress(frac, text=f"🔍 {pct}% · Byggnad {n} av {known_total}{addr_str}")
             else:
                 # Unknown total — asymptotic: moves fast early, slows near 95 %
                 frac = min(0.02 + 0.93 * (1 - 1 / (1 + n / 15)), 0.97)
-                progress_bar.progress(frac, text=f"🔍 Analyserar byggnad {n}...")
+            frac = max(frac, progress_floor[0])
+            progress_floor[0] = frac
+            pct = int(frac * 100)
+            addr_str = f" — {current_address[0]}" if current_address[0] else ""
+            total_str = f" av {known_total}" if known_total > 0 else ""
+            progress_bar.progress(frac, text=f"🔍 {pct}% · Byggnad {n}{total_str}{addr_str}")
 
         def on_phase(phase: str, count: int):
             if phase == "osm_leads":
@@ -1512,18 +1501,22 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                 )
         except ValueError as e:
             _log.error("scan ValueError: %s", e)
-            st.error(str(e))
+            _emsg = str(e)
+            st.session_state["_scanner_last_error"] = _emsg
+            st.error(_emsg)
             return
         except Exception as e:
             from scanner import APIQuotaExceededError as _QuotaErr  # noqa: PLC0415
             if isinstance(e, _QuotaErr):
                 _log.error("API quota exceeded: %s", e)
                 _send_quota_alert(e.api, e.detail)
-                st.error(
+                _emsg = (
                     f"**{e.api} har nått sin kvot eller saknar pengar på kontot.**\n\n"
                     f"Scanning är stoppad. Ägaren har fått ett akut mail. "
                     f"Försök igen om en stund eller kontakta Linus."
                 )
+                st.session_state["_scanner_last_error"] = _emsg
+                st.error(_emsg)
                 return
             _log.error("scan Exception: %s", e, exc_info=True)
             scan_crashed = True
@@ -1825,7 +1818,7 @@ def page_review(user):
     try:
         resp = (
             sb.table("scout_leads")
-            .select("id,address,lat,lng,ai_reasoning,building_type,maps_url,confidence")
+            .select("id,address,lat,lng,ai_reasoning,building_type,maps_url")
             .eq("user_id", str(user.id))
             .eq("needs_review", True)
             .is_("user_confirmed", "null")
@@ -1953,40 +1946,35 @@ def page_review(user):
     )
 
     # ── Tangentbordsgenvägar (←/A = Avvisa, →/D = Ja, S/↓ = Hoppa över) ────
-    try:
-        import streamlit.components.v1 as _components
-        _components.html("""
+    _kb_js = """
 <script>
 (function() {
-  function click(id) {
-    var btn = window.parent.document.querySelector('[data-testid="' + id + '"]');
-    if (!btn) {
-      // fallback: find by key pattern inside shadow DOM
-      var btns = window.parent.document.querySelectorAll('button');
-      for (var i = 0; i < btns.length; i++) {
-        if (btns[i].innerText && btns[i].innerText.includes(id)) { btns[i].click(); return; }
-      }
-    } else { btn.click(); }
-  }
   document.addEventListener('keydown', function(e) {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    var p = window.parent.document;
     if (e.key === 'ArrowLeft'  || e.key === 'a') {
-      window.parent.document.querySelectorAll('button').forEach(function(b){
+      p.querySelectorAll('button').forEach(function(b){
         if (b.innerText && b.innerText.includes('Avvisa')) b.click();
       });
     } else if (e.key === 'ArrowRight' || e.key === 'd') {
-      window.parent.document.querySelectorAll('button').forEach(function(b){
+      p.querySelectorAll('button').forEach(function(b){
         if (b.innerText && b.innerText.includes('Ja, solceller')) b.click();
       });
     } else if (e.key === 'ArrowDown'  || e.key === 's') {
-      window.parent.document.querySelectorAll('button').forEach(function(b){
+      p.querySelectorAll('button').forEach(function(b){
         if (b.innerText && b.innerText.includes('Hoppa')) b.click();
       });
     }
   });
 })();
 </script>
-""", height=0)
+"""
+    try:
+        import urllib.parse as _up
+        st.iframe(
+            src="data:text/html;charset=utf-8," + _up.quote(_kb_js),
+            height=0,
+        )
     except Exception:
         pass
 
@@ -2006,8 +1994,10 @@ def page_review(user):
                     "false_positive": True,
                     "reject_reason": reject_reason,
                 }).eq("id", lead_id).execute()
-            except Exception:
-                pass
+            except Exception as _rev_exc:
+                _log.error("page_review avvisa misslyckades lead_id=%s: %s", lead_id, _rev_exc)
+                st.error("Kunde inte spara avvisning — försök igen. Kontakta support om problemet kvarstår.")
+                st.stop()
             # Spara bild för dynamisk few-shot (NO-exempel)
             try:
                 _save_img = _img_bytes_review
@@ -2038,8 +2028,10 @@ def page_review(user):
                     "needs_review": False,
                     "has_solar": "Ja",
                 }).eq("id", lead_id).execute()
-            except Exception:
-                pass
+            except Exception as _rev_exc:
+                _log.error("page_review bekräfta misslyckades lead_id=%s: %s", lead_id, _rev_exc)
+                st.error("Kunde inte spara bekräftelse — försök igen. Kontakta support om problemet kvarstår.")
+                st.stop()
             # Spara bild till Supabase Storage (används för dynamisk few-shot)
             try:
                 _save_img = _img_bytes_review
@@ -2059,6 +2051,119 @@ def page_review(user):
             except Exception:
                 pass
             st.rerun()
+
+
+def _leads_html_with_thumbs(df_full: "pd.DataFrame") -> None:
+    """Render leads as an HTML table with cursor-following thumbnail previews."""
+    import html as _html  # noqa: PLC0415
+    from urllib.parse import urlparse as _urlparse  # noqa: PLC0415
+
+    def _safe_url(raw: object) -> str:
+        url = str(raw or "").strip()
+        try:
+            scheme = _urlparse(url).scheme
+        except Exception:
+            return ""
+        return url if scheme in {"http", "https"} else ""
+
+    try:
+        from scanner import lm_wms_url as _lm_url  # noqa: PLC0415
+        _has_lm = True
+    except Exception:
+        _has_lm = False
+
+    # JS helpers (inline, no <script> tag — those are stripped by Streamlit's innerHTML)
+    # onmousemove: follow cursor, flip left when near right viewport edge
+    _js_move = (
+        "var p=document.getElementById('stp');"
+        "var x=event.clientX+14,y=event.clientY-88;"
+        "if(x+230>window.innerWidth)x=event.clientX-244;"
+        "if(y<4)y=4;"
+        "p.style.left=x+'px';p.style.top=y+'px';"
+    )
+    _js_enter = (
+        "var p=document.getElementById('stp');"
+        "document.getElementById('sti').src=this.dataset.src;"
+        "p.style.display='block';"
+        + _js_move
+    )
+    _js_leave = "document.getElementById('stp').style.display='none';"
+
+    rows_html: list[str] = []
+    for _, row in df_full.iterrows():
+        addr = _html.escape(str(row.get("address") or "–"))
+        solar_icon = "☀️" if str(row.get("has_solar", "")) == "Ja" else "—"
+        # Prefer confirmed_image_url → fresh LM WMS → validated image_url only
+        img_url = _safe_url(row.get("confirmed_image_url"))
+        if not img_url and _has_lm:
+            lat, lng = row.get("lat"), row.get("lng")
+            if lat and lng:
+                try:
+                    img_url = _lm_url(float(lat), float(lng), size_m=80, width=240, height=180)
+                except Exception:
+                    img_url = ""
+        if not img_url:
+            img_url = _safe_url(row.get("image_url"))
+
+        if img_url:
+            safe_img_url = _html.escape(img_url, quote=True)
+            lat_v, lng_v = row.get("lat"), row.get("lng")
+            try:
+                maps_href = (
+                    f"https://www.google.com/maps/@{float(lat_v)},{float(lng_v)},60m/data=!3m1!1e3"
+                    if lat_v and lng_v else img_url
+                )
+            except Exception:
+                maps_href = img_url
+            thumb_cell = (
+                f'<span class="lth" data-src="{safe_img_url}"'
+                f' onmouseenter="{_js_enter}"'
+                f' onmousemove="{_js_move}"'
+                f' onmouseleave="{_js_leave}">'
+                f'<a href="{_html.escape(maps_href, quote=True)}" target="_blank" rel="noopener noreferrer"'
+                f' title="Öppna i Google Maps satellit"'
+                f' style="font-size:15px;text-decoration:none;cursor:pointer">🛰</a>'
+                f'</span>'
+            )
+        else:
+            thumb_cell = '<span style="color:#aaa">–</span>'
+
+        rows_html.append(
+            f"<tr><td class='la'>{addr}</td>"
+            f"<td class='lc'>{solar_icon}</td>"
+            f"<td class='lc'>{thumb_cell}</td></tr>"
+        )
+
+    # Floating preview div — one instance, reused for all rows
+    floating_div = (
+        '<div id="stp" style="display:none;position:fixed;z-index:9999;'
+        'width:230px;height:175px;border:2px solid #6b7280;border-radius:6px;'
+        'box-shadow:0 4px 20px rgba(0,0,0,.45);background:#1a1a1a;pointer-events:none;overflow:hidden">'
+        '<img id="sti" src="" style="width:100%;height:100%;object-fit:cover" loading="lazy" />'
+        '</div>'
+    )
+
+    html = (
+        floating_div
+        + "<style>"
+        ".lt-t{width:100%;border-collapse:collapse;font-size:13px;font-family:sans-serif}"
+        ".lt-t th{background:#f0f2f6;padding:7px 12px;text-align:left;border-bottom:2px solid #d1d5db}"
+        ".lt-t td{padding:5px 12px;border-bottom:1px solid #e5e7eb;vertical-align:middle}"
+        ".lt-t td.lc{text-align:center;width:56px}"
+        ".lt-t td.la{max-width:320px;word-break:break-word}"
+        ".lth{display:inline-block;cursor:pointer}"
+        "</style>"
+        '<div style="overflow-x:auto">'
+        '<table class="lt-t"><thead><tr>'
+        "<th>Adress</th>"
+        "<th style='text-align:center'>Sol</th>"
+        "<th style='text-align:center' title='Hovra 🛰 för takbild'>Tak 🛰</th>"
+        "</tr></thead>"
+        f"<tbody>{''.join(rows_html)}</tbody>"
+        "</table></div>"
+    )
+    st.markdown(html, unsafe_allow_html=True)
+    st.caption("Hovra 🛰 för takbild — klicka för att öppna i ny flik")
 
 
 def page_leads(user):  # noqa: keep user param for confirm_lead calls
@@ -2103,74 +2208,74 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
         except Exception:
             return "–"
 
+    df_reset = df.reset_index(drop=True)
+
+    # ── Leads med hover-thumbnail ──────────────────────────────────────────────
+    _leads_html_with_thumbs(df_reset)
+
+    # ── Markera felaktiga leads (FP-editor) ────────────────────────────────────
     display_cols = [c for c in
-        ["address", "has_solar", "samtomt_solar_extra", "air_to_air", "air_to_water", "notes", "image_url", "created_at"]
+        ["address", "has_solar", "samtomt_solar_extra", "notes", "created_at"]
         if c in df.columns]
     rename_map = {
         "address": "Adress", "has_solar": "Solceller",
         "samtomt_solar_extra": "Samtomt sol",
-        "air_to_air": "L/L", "air_to_water": "L/V",
-        "notes": "Noteringar", "image_url": "Satellitbild",
+        "notes": "Noteringar",
         "created_at": "Sparad",
     }
-    df_reset = df.reset_index(drop=True)
     display_df = df_reset[display_cols].rename(columns=rename_map)
     if "Samtomt sol" in display_df.columns:
         display_df["Samtomt sol"] = display_df["Samtomt sol"].apply(_samtomt_icon)
 
-    # Checkbox "❌ Fel" per rad — markera falska positiver → AI lär sig
-    editable_df = display_df.copy()
-    editable_df.insert(0, "❌ Fel", False)
-
-    column_config: dict = {
-        "❌ Fel": st.column_config.CheckboxColumn(
-            "❌ Fel",
-            width="small",
-            help="Markera om AI:n hade fel — inga solceller här. Listan uppdateras och AI:n lär sig till nästa scan.",
-        ),
-    }
-    if "Satellitbild" in display_df.columns:
-        column_config["Satellitbild"] = st.column_config.LinkColumn(
-            "Satellitbild",
-            display_text="🛰 Visa tak",
-            help="Öppnar LM WMS-bild direkt i webbläsaren",
+    with st.expander("❌ Markera felaktiga leads (AI lär sig)"):
+        editable_df = display_df.copy()
+        editable_df.insert(0, "❌ Fel", False)
+        column_config: dict = {
+            "❌ Fel": st.column_config.CheckboxColumn(
+                "❌ Fel",
+                width="small",
+                help="Markera om AI:n hade fel — inga solceller här. AI:n lär sig till nästa scan.",
+            ),
+        }
+        edited = st.data_editor(
+            editable_df,
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed",
+            column_config=column_config,
+            disabled=[c for c in display_df.columns],
+            key="leads_editor",
         )
-
-    edited = st.data_editor(
-        editable_df,
-        use_container_width=True,
-        hide_index=True,
-        num_rows="fixed",
-        column_config=column_config,
-        disabled=[c for c in display_df.columns],
-        key="leads_editor",
-    )
-
-    # Hantera felmarkering — inga bekräftelsesteg, enkel klick räcker
-    if "id" in df_reset.columns:
-        wrong_mask = edited["❌ Fel"] == True  # noqa: E712
-        n_wrong = int(wrong_mask.sum())
-        if n_wrong > 0:
-            wrong_addrs = edited.loc[wrong_mask, "Adress"].tolist() if "Adress" in edited.columns else []
-            preview = ", ".join(wrong_addrs[:3]) + ("…" if len(wrong_addrs) > 3 else "")
-            st.warning(f"**{n_wrong} lead(s) markerade som fel:** {preview}")
-            col_cancel, col_confirm = st.columns(2)
-            with col_cancel:
-                if st.button("Avbryt", key="btn_fp_cancel", use_container_width=True):
-                    st.rerun()
-            with col_confirm:
-                if st.button(
-                    f"✅ Bekräfta — AI lär sig av {n_wrong} fel",
-                    type="primary", key="btn_fp_confirm", use_container_width=True,
-                ):
-                    sb = get_supabase()
-                    for lid in df_reset.loc[wrong_mask, "id"]:
-                        sb.table("scout_leads").update({
-                            "false_positive": True,
-                            "user_confirmed": False,
-                        }).eq("id", int(lid)).execute()
-                    st.success(f"✅ {n_wrong} lead(s) markerade som fel. AI:n använder detta nästa scan.")
-                    st.rerun()
+        # Hantera felmarkering
+        if "id" in df_reset.columns:
+            wrong_mask = edited["❌ Fel"] == True  # noqa: E712
+            n_wrong = int(wrong_mask.sum())
+            if n_wrong > 0:
+                wrong_addrs = edited.loc[wrong_mask, "Adress"].tolist() if "Adress" in edited.columns else []
+                preview = ", ".join(wrong_addrs[:3]) + ("…" if len(wrong_addrs) > 3 else "")
+                st.warning(f"**{n_wrong} lead(s) markerade som fel:** {preview}")
+                col_cancel, col_confirm = st.columns(2)
+                with col_cancel:
+                    if st.button("Avbryt", key="btn_fp_cancel", use_container_width=True):
+                        st.rerun()
+                with col_confirm:
+                    if st.button(
+                        f"✅ Bekräfta — AI lär sig av {n_wrong} fel",
+                        type="primary", key="btn_fp_confirm", use_container_width=True,
+                    ):
+                        sb = get_supabase()
+                        try:
+                            for lid in df_reset.loc[wrong_mask, "id"]:
+                                sb.table("scout_leads").update({
+                                    "false_positive": True,
+                                    "user_confirmed": False,
+                                }).eq("id", int(lid)).execute()
+                        except Exception as _fp_exc:
+                            _log.error("page_leads false-positive save failed: %s", _fp_exc)
+                            st.error("Kunde inte spara alla felmarkeringar — försök igen.")
+                            st.stop()
+                        st.success(f"✅ {n_wrong} lead(s) markerade som fel. AI:n använder detta nästa scan.")
+                        st.rerun()
 
     with st.expander("➕ Lägg till manuell lead"):
         m_addr  = st.text_input("Adress", placeholder="Ljunggatan 12, Malmö")
@@ -2225,13 +2330,33 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
                 lid = int(c_row["id"])
                 addr = c_row.get("address", "–")
                 with st.expander(f"**{addr}**", expanded=False):
-                    _gs_url = c_row.get("google_search_url") or f"https://www.google.com/search?q=vem+bor+p%C3%A5+{urllib.parse.quote(addr)}"
-                    _ht_url = c_row.get("hitta_url") or f"https://www.hitta.se/s%C3%B6k?vad={urllib.parse.quote(addr)}"
-                    _lnk1, _lnk2, _lnk3 = st.columns(3)
-                    _lnk1.link_button("🔍 Google", _gs_url, use_container_width=True)
-                    _lnk2.link_button("📖 Hitta.se", _ht_url, use_container_width=True)
-                    if c_row.get("maps_url"):
-                        _lnk3.link_button("📍 Maps", c_row["maps_url"], use_container_width=True)
+                    # Satellite thumbnail + links
+                    _c_img_url = c_row.get("confirmed_image_url") or c_row.get("image_url") or ""
+                    if not _c_img_url:
+                        _c_lat, _c_lng = c_row.get("lat"), c_row.get("lng")
+                        if _c_lat and _c_lng:
+                            try:
+                                from scanner import lm_wms_url as _lm_wms_u  # noqa: PLC0415
+                                _c_img_url = _lm_wms_u(float(_c_lat), float(_c_lng), size_m=80, width=300, height=200)
+                            except Exception:
+                                pass
+                    _col_thumb, _col_links = st.columns([1, 2])
+                    with _col_thumb:
+                        if _c_img_url:
+                            try:
+                                st.image(_c_img_url, use_container_width=True)
+                            except Exception:
+                                st.link_button("🛰 Visa tak", _c_img_url, use_container_width=True)
+                        else:
+                            st.caption("(ingen bild)")
+                    with _col_links:
+                        _gs_url = c_row.get("google_search_url") or f"https://www.google.com/search?q=vem+bor+p%C3%A5+{urllib.parse.quote(addr)}"
+                        _ht_url = c_row.get("hitta_url") or f"https://www.hitta.se/s%C3%B6k?vad={urllib.parse.quote(addr)}"
+                        _lnk1, _lnk2 = st.columns(2)
+                        _lnk1.link_button("🔍 Google", _gs_url, use_container_width=True)
+                        _lnk2.link_button("📖 Hitta.se", _ht_url, use_container_width=True)
+                        if c_row.get("maps_url"):
+                            st.link_button("📍 Maps", c_row["maps_url"], use_container_width=True)
                     st.divider()
                     col_s, col_fp = st.columns([2, 1])
                     with col_s:
@@ -2271,8 +2396,10 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
                             update["david_note"] = new_note
                         try:
                             _sb.table("scout_leads").update(update).eq("id", lid).execute()
-                        except Exception:
-                            pass
+                        except Exception as _save_exc:
+                            _log.error("page_leads spara misslyckades lead_id=%s: %s", lid, _save_exc)
+                            st.error("Kunde inte spara — försök igen. Kontakta support om problemet kvarstår.")
+                            st.stop()
                         # Skicka mail till Linus om möte precis bokades
                         if new_status == "mote_bokat" and cur_status != "mote_bokat":
                             sent = _send_meeting_email(
@@ -2485,7 +2612,7 @@ def page_account(user, profile):
 
     col_cancel, col_delete = st.columns(2)
     with col_cancel:
-        if st.button("Avbryt", use_container_width=True):
+        if st.button("Avbryt", use_container_width=True, key="btn_delete_cancel"):
             st.session_state.pop("delete_account_confirm_open", None)
             st.session_state.pop("delete_account_confirm_input", None)
             st.rerun()
@@ -2521,7 +2648,7 @@ def page_app(user, profile, lead_count: int = 0):
             except Exception:
                 pass
 
-        if st.button("Logga ut", use_container_width=True):
+        if st.button("Logga ut", use_container_width=True, key="logout_sidebar"):
             do_logout()
             st.rerun()
 

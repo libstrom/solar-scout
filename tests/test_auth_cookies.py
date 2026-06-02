@@ -22,9 +22,10 @@ def _make_cookie_mock(data: dict | None = None):
     """Returnera en mock CookieManager med förinläst cookie-data."""
     cm = MagicMock()
     cookie_store = dict(data or {})
-    cm.get.side_effect = lambda key: cookie_store.get(key)
-    cm.set.side_effect = lambda key, value, **_kw: cookie_store.update({key: value})
-    cm.remove.side_effect = lambda key: cookie_store.pop(key, None)
+    cm.get.side_effect = lambda cookie: cookie_store.get(cookie)
+    cm.set.side_effect = lambda cookie, value, **_kw: cookie_store.update({cookie: value})
+    cm.remove.side_effect = lambda cookie, **_kw: cookie_store.pop(cookie, None)
+    cm.delete.side_effect = lambda cookie, **_kw: cookie_store.pop(cookie, None)
     cm._store = cookie_store
     return cm
 
@@ -97,10 +98,16 @@ def test_init_auth_returns_none_without_session_or_cookies():
 
     st_mock = sys.modules["streamlit"]
     st_mock.session_state = {}
-    # st.context.cookies ska också vara tom
-    st_mock.context.cookies.get.return_value = None
 
-    with patch("app._get_cookie_manager", return_value=cm):
+    # Patchä st.context.cookies.get så att den returnerar None (undviker AttributeError
+    # på riktiga Streamlit-modulen och falska positiver på MagicMock)
+    ctx_cookies = MagicMock()
+    ctx_cookies.get.return_value = None
+    ctx = MagicMock()
+    ctx.cookies = ctx_cookies
+
+    with patch("app.st.context", ctx, create=True), \
+         patch("app._get_cookie_manager", return_value=cm):
         result = app.init_auth()
 
     assert result is None

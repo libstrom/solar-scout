@@ -11,6 +11,8 @@ Testar att parsningslogiken och prompten ger rätt beteende för kända edge-cas
 
 import sys
 from unittest.mock import MagicMock
+import anthropic
+import httpx
 import pytest
 
 # Stub out packages unavailable in test environment before importing scanner
@@ -138,6 +140,55 @@ def test_api_error_returns_false_false():
     """Vid API-fel ska (False, False) returneras — aldrig krascha."""
     client = MagicMock()
     client.messages.create.side_effect = Exception("network error")
+    is_house, has_solar, _unsure, _reasoning = _analyze_building(client, b"fake_image")
+    assert is_house is False
+    assert has_solar is False
+
+
+def test_depleted_credits_raises_quota_error():
+    """Slut på credits (HTTP 400 'credit balance is too low') ska resa
+    APIQuotaExceededError — INTE sväljas tyst som '0 solcellstak'.
+
+    Detta var rotorsaken till den veckolånga 0-leads-buggen: 400-felet föll
+    igenom till tysta return (False, False) och scanen såg ut att bara sakna
+    solceller, så inget larm-mail gick ut.
+    """
+    import httpx
+    from scanner import APIQuotaExceededError
+
+    response = httpx.Response(
+        status_code=400,
+        request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"),
+    )
+    err = anthropic.APIStatusError(
+        "Your credit balance is too low to access the Anthropic API.",
+        response=response,
+        body=None,
+    )
+    client = MagicMock()
+    client.messages.create.side_effect = err
+
+    with pytest.raises(APIQuotaExceededError):
+        _analyze_building(client, b"fake_image")
+
+
+def test_other_400_error_still_swallowed():
+    """Ett vanligt 400-fel (inte credit-relaterat) ska INTE resa quota-fel —
+    bara loggas och returnera (False, False) som tidigare."""
+    import httpx
+
+    response = httpx.Response(
+        status_code=400,
+        request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"),
+    )
+    err = anthropic.APIStatusError(
+        "messages.0.content.0.image: invalid base64 data",
+        response=response,
+        body=None,
+    )
+    client = MagicMock()
+    client.messages.create.side_effect = err
+
     is_house, has_solar, _unsure, _reasoning = _analyze_building(client, b"fake_image")
     assert is_house is False
     assert has_solar is False

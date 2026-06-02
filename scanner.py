@@ -61,6 +61,18 @@ class APIQuotaExceededError(RuntimeError):
 # the overpass-api.de rate limiter. Cap at 2 simultaneous requests.
 _OVERPASS_SEM = threading.Semaphore(2)
 
+# Circuit breaker: när Google Static Maps nått kvot/billing-väggen är det
+# meningslöst (och rate-limit-förvärrande) att fortsätta hamra den för varje
+# byggnad. Första kvotfelet sätter flaggan → resten av scanen hoppar Google
+# och går direkt på den gratis, lagringsbara LM WMS-fallbacken. Nollställs
+# när en ny scan startar (reset_image_source_breakers).
+_google_exhausted = threading.Event()
+
+
+def reset_image_source_breakers() -> None:
+    """Nollställ circuit breakers inför en ny scan."""
+    _google_exhausted.clear()
+
 
 @dataclass
 class Lead:
@@ -549,10 +561,15 @@ def _has_extra_solar_nearby(lat: float, lng: float, radius_m: int = 30,
 
 # ── Lantmäteriet ortofoto ──────────────────────────────────────────────────────
 
-# Layer candidates in priority order — the debug script probes which one works.
-_LM_SERVICE  = "ortofoto-ccby"
-_LM_LAYERS   = ["Ortofoto_0.25", "orto", "ortofoto"]
-_LM_ZOOM     = 19   # max zoom for LM open ortofoto (3x3 tiles → ~95m × 95m view)
+# Officiell Lantmäteriet "Ortofoto Visning"-WMS (CC-BY via Geotorget).
+# Teknisk beskrivning: GEODOK/64. Kräver HTTP Basic auth med Geotorget-
+# credentials — LANTMATERIET_KEY ska ha formatet "consumer_key:consumer_secret".
+# OBS: detta är INTE samma som /open/-WMTS:en (som bara har topowebb + historiska
+# foton). Modern ortofoto är en Visning-produkt på maps.lantmateriet.se.
+_LM_WMS_ENDPOINT = "https://maps.lantmateriet.se/ortofoto/wms/v1.3"
+# Riktiga RGB-lagernamn enligt teknisk beskrivning. 0.16 m/px först = bästa
+# upplösningen för att se solpaneler. _LM_LAYERS[0] är default-lagret.
+_LM_LAYERS = ["Ortofoto_0.16,Ortofoto_0.25", "Ortofoto_0.25", "Ortofoto_0.16", "Ortofoto_0.4"]
 
 # Few-shot ground-truth buildings (verified by user).
 # Malmö (SE4) + Nässjö/Småland (SE3) for geographic diversity.
@@ -607,48 +624,80 @@ _FEW_SHOT_VERDICTS = {
 }
 
 
-def _lm_tile_url(token: str, layer: str, z: int, x: int, y: int) -> str:
-    # WMTS order: TileMatrix / TileRow / TileCol  →  z / y / x
+def _lm_basic_auth(lm_key: str) -> tuple[str, str] | None:
+    """Tolka LANTMATERIET_KEY som 'consumer_key:consumer_secret' för Basic auth."""
+    if not lm_key or ":" not in lm_key:
+        return None
+    user, _, pw = lm_key.partition(":")
+    if not user:  # ":secret" är en tyst felkonfig — kräv ett användarnamn
+        return None
+    return (user, pw)
+
+
+def _lm_wms_url(layer: str, lat: float, lng: float, size_m: float = 18) -> str:
+    """Bygg en WMS GetMap-URL mot officiella Ortofoto Visning runt en punkt.
+
+    Samma beprövade GetMap-mönster som _fetch_lm_wms (minkarta) men mot det
+    officiella maps.lantmateriet.se-endpointen. EPSG:4326-bbox stöds enligt
+    teknisk beskrivning (25+ CRS, inkl. 3006 och 3857).
+    """
+    d_lat = (size_m / 2) / 111_000
+    d_lng = d_lat / math.cos(math.radians(lat))
+    bbox = f"{lng - d_lng},{lat - d_lat},{lng + d_lng},{lat + d_lat}"
+    # WMS 1.1.1 kräver STYLES (får vara tom), ett värde per lager. Ett komma
+    # mindre än antalet lager: 1 lager → "", 2 lager → ",". Strikta servrar
+    # (officiella LM) ger annars ServiceException istället för en bild.
+    styles = "," * layer.count(",")
     return (
-        f"https://api.lantmateriet.se/open/{_LM_SERVICE}/v1/wmts"
-        f"/token/{token}/1.0.0/{layer}/default/3857/{z}/{y}/{x}.png"
+        f"{_LM_WMS_ENDPOINT}"
+        "?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap"
+        f"&LAYERS={layer}"
+        f"&STYLES={styles}"
+        "&FORMAT=image/jpeg&WIDTH=640&HEIGHT=640"
+        f"&SRS=EPSG:4326&BBOX={bbox}"
     )
 
 
 def _fetch_lantmateriet(lm_key: str, lat: float, lng: float, layer: str = _LM_LAYERS[0]) -> bytes | None:
-    """Fetch 3×3 tile grid from Lantmäteriet ortofoto and return a 640×640 PNG."""
-    if not _ENHANCE_AVAILABLE:
+    """Hämta ortofoto från Lantmäteriets officiella WMS (Ortofoto Visning, CC-BY).
+
+    lm_key ska vara "consumer_key:consumer_secret" (Geotorget Basic auth).
+    Returnerar en 640×640 JPEG, eller None vid fel/auth-miss — anroparen
+    faller då tillbaka på nästa bildkälla (minkarta-WMS → Mapbox → Google).
+    """
+    auth = _lm_basic_auth(lm_key)
+    if auth is None:
+        _log.warning("LANTMATERIET_KEY saknar 'consumer_key:consumer_secret'-format")
         return None
-    cx, cy = _lat_lng_to_tile(lat, lng, _LM_ZOOM)
-    canvas = _PILImage.new("RGB", (768, 768), (80, 80, 80))
-    got_any = False
-    for dx in range(-1, 2):
-        for dy in range(-1, 2):
-            url = _lm_tile_url(lm_key, layer, _LM_ZOOM, cx + dx, cy + dy)
-            try:
-                resp = httpx.get(url, timeout=20)
-                if resp.status_code == 200:
-                    tile = _PILImage.open(io.BytesIO(resp.content)).convert("RGB")
-                    canvas.paste(tile, ((dx + 1) * 256, (dy + 1) * 256))
-                    got_any = True
-            except Exception:
-                pass
-    if not got_any:
-        return None
-    # Crop centre 640×640
-    cropped = canvas.crop((64, 64, 704, 704))
-    buf = io.BytesIO()
-    cropped.save(buf, format="PNG")
-    return buf.getvalue()
+    url = _lm_wms_url(layer, lat, lng)
+    try:
+        resp = httpx.get(url, timeout=20, auth=auth)
+        if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("image"):
+            return resp.content
+        if resp.status_code in (401, 403):
+            _log.warning(
+                "Lantmäteriet WMS auth misslyckades (%s) — kontrollera LANTMATERIET_KEY",
+                resp.status_code,
+            )
+        else:
+            _log.debug("Lantmäteriet WMS gav status %s", resp.status_code)
+    except Exception as exc:
+        _log.warning("Lantmäteriet WMS-anrop misslyckades: %s", exc)
+    return None
 
 
 def _probe_lm_layer(lm_key: str, lat: float = 59.33, lng: float = 18.07) -> str | None:
-    """Return the first working layer name, or None if all fail."""
-    cx, cy = _lat_lng_to_tile(lat, lng, _LM_ZOOM)
+    """Returnera första fungerande lagret via ett test-GetMap, annars None.
+
+    Körs en gång före en scan för att validera credentials + lagernamn. Om
+    None returneras stänger anroparen av LM och faller tillbaka på minkarta.
+    """
+    auth = _lm_basic_auth(lm_key)
+    if auth is None:
+        return None
     for layer in _LM_LAYERS:
-        url = _lm_tile_url(lm_key, layer, _LM_ZOOM, cx, cy)
         try:
-            r = httpx.get(url, timeout=15)
+            r = httpx.get(_lm_wms_url(layer, lat, lng), timeout=15, auth=auth)
             if r.status_code == 200 and r.headers.get("content-type", "").startswith("image"):
                 return layer
         except Exception:
@@ -773,8 +822,8 @@ def _fetch_street_view(google_key: str, lat: float, lng: float) -> bytes | None:
     )
     try:
         resp = httpx.get(url, timeout=10)
-        if resp.status_code == 429:
-            raise APIQuotaExceededError("Google Street View", "429 rate limit")
+        if resp.status_code in (402, 429):
+            raise APIQuotaExceededError("Google Street View", f"{resp.status_code} billing/rate limit")
         if resp.status_code == 403:
             raise APIQuotaExceededError("Google Street View", "403 billing/API-nyckel")
         if resp.status_code == 200 and "image" in resp.headers.get("content-type", ""):
@@ -891,6 +940,28 @@ def _load_few_shot_images(user_id: str | None = None) -> list[tuple[str, str]]:
     return examples
 
 
+def _fetch_google_static(google_key: str, lat: float, lng: float, zoom: int = ZOOM_BUILDING) -> bytes | None:
+    """Google Maps Static API — primary satellite source (~2 USD/1000 requests)."""
+    url = (
+        f"https://maps.googleapis.com/maps/api/staticmap"
+        f"?center={lat},{lng}&zoom={zoom}&size=640x640"
+        f"&maptype=satellite&key={google_key}"
+    )
+    try:
+        resp = httpx.get(url, timeout=20)
+        if resp.status_code in (402, 429):
+            raise APIQuotaExceededError("Google Static Maps", f"{resp.status_code} billing/rate limit")
+        if resp.status_code == 403:
+            raise APIQuotaExceededError("Google Static Maps", "403 billing/API-nyckel")
+        resp.raise_for_status()
+        return resp.content
+    except APIQuotaExceededError:
+        raise
+    except Exception as exc:
+        _log.warning("_fetch_google_static failed lat=%s lng=%s: %s", lat, lng, exc)
+        return None
+
+
 def _fetch_satellite(
     google_key: str,
     lat: float,
@@ -900,40 +971,39 @@ def _fetch_satellite(
     lm_key: str | None = None,
     lm_layer: str = _LM_LAYERS[0],
 ) -> bytes | None:
-    # Priority: official LM API → free minkarta WMS → Mapbox → Google
-    if lm_key and _ENHANCE_AVAILABLE:
-        img = _fetch_lantmateriet(lm_key, lat, lng, layer=lm_layer)
-        if img:
-            _log.debug("_fetch_satellite source=lm_tile lat=%s lng=%s", lat, lng)
-            return img
+    # Priority: LM minkarta (free, 0.16m/px) → LM official (if key, same res but licensed)
+    # → Google (paid fallback) → Mapbox (last resort, never store).
+    # Minkarta and LM official serve the same Ortofoto_0.16 layer — no quality difference.
+    # Google is kept as a reliable paid fallback; its quota is preserved for Street View.
     img = _fetch_lm_wms(lat, lng)
     if img:
-        _log.debug("_fetch_satellite source=lm_wms lat=%s lng=%s", lat, lng)
+        _log.debug("_fetch_satellite source=lm_minkarta lat=%s lng=%s", lat, lng)
         return img
+    if lm_key:
+        img = _fetch_lantmateriet(lm_key, lat, lng, layer=lm_layer)
+        if img:
+            _log.debug("_fetch_satellite source=lm_official lat=%s lng=%s", lat, lng)
+            return img
+    # Hoppa Google helt om kvoten redan sprängts under denna scan.
+    if not _google_exhausted.is_set():
+        try:
+            img = _fetch_google_static(google_key, lat, lng, zoom)
+            if img:
+                _log.debug("_fetch_satellite source=google lat=%s lng=%s", lat, lng)
+                return img
+        except APIQuotaExceededError as exc:
+            if not _google_exhausted.is_set():
+                _log.warning(
+                    "Google Static Maps slut (%s) — degraderar till Mapbox för resten av scanen",
+                    exc.detail,
+                )
+            _google_exhausted.set()
     if mapbox_key:
         img = _fetch_mapbox(mapbox_key, lat, lng, zoom)
         if img:
             _log.debug("_fetch_satellite source=mapbox lat=%s lng=%s", lat, lng)
             return img
-    url = (
-        f"https://maps.googleapis.com/maps/api/staticmap"
-        f"?center={lat},{lng}&zoom={zoom}&size=640x640"
-        f"&maptype=satellite&key={google_key}"
-    )
-    try:
-        resp = httpx.get(url, timeout=20)
-        if resp.status_code == 429:
-            raise APIQuotaExceededError("Google Static Maps", "429 rate limit")
-        if resp.status_code == 403:
-            raise APIQuotaExceededError("Google Static Maps", "403 billing/API-nyckel")
-        resp.raise_for_status()
-        _log.debug("_fetch_satellite source=google lat=%s lng=%s", lat, lng)
-        return resp.content
-    except APIQuotaExceededError:
-        raise
-    except Exception as exc:
-        _log.warning("_fetch_satellite failed lat=%s lng=%s: %s", lat, lng, exc)
-        return None
+    return None
 
 
 def _enhance_contrast(img_bytes: bytes) -> bytes:
@@ -978,12 +1048,32 @@ def _enhance_contrast(img_bytes: bytes) -> bytes:
         return img_bytes
 
 
+def _image_media_type(img_bytes: bytes) -> str:
+    """Sniff the real image format from magic bytes.
+
+    Anthropic rejects an image block whose declared media_type does not match
+    the actual bytes (HTTP 400), which `_analyze_building` swallows silently —
+    so a PNG from a fallback source mislabelled as JPEG would degrade into a
+    silent 0-leads. Derive the type instead of hardcoding it.
+    """
+    if img_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if img_bytes[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if img_bytes[:4] == b"RIFF" and img_bytes[8:12] == b"WEBP":
+        return "image/webp"
+    if img_bytes[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    return "image/jpeg"  # safe default — most sources serve JPEG
+
+
 def _analyze_building(
     client: anthropic.Anthropic,
     img_bytes: bytes,
     few_shot: list[tuple[str, str]] | None = None,
     street_view_bytes: bytes | None = None,
     budget: "BudgetTracker | None" = None,
+    already_enhanced: bool = False,
 ) -> tuple[bool, bool, bool, str]:
     """
     Returns (is_residential_house, has_solar_panels, is_unsure, reasoning).
@@ -994,8 +1084,10 @@ def _analyze_building(
     street_view_bytes: optional JPEG from Google Street View, included as a
     second reference image to resolve ambiguous cases.
     """
-    img_bytes = _enhance_contrast(img_bytes)
+    if not already_enhanced:
+        img_bytes = _enhance_contrast(img_bytes)
     b64 = base64.standard_b64encode(img_bytes).decode()
+    media_type = _image_media_type(img_bytes)
     sv_notice = (
         "A street-level photo of the SAME property follows the aerial image. "
         "Use it as a secondary reference — solar panels on south-facing roof slopes "
@@ -1061,9 +1153,11 @@ def _analyze_building(
             msgs: list[dict] = []
             last_idx = len(few_shot) - 1
             for i, (ex_b64, verdict) in enumerate(few_shot):
+                ex_header = base64.standard_b64decode(ex_b64[:24])
+                ex_media = _image_media_type(ex_header + bytes(4))
                 img_block: dict = {
                     "type": "image",
-                    "source": {"type": "base64", "media_type": "image/jpeg", "data": ex_b64},
+                    "source": {"type": "base64", "media_type": ex_media, "data": ex_b64},
                 }
                 if i == last_idx:
                     img_block["cache_control"] = {"type": "ephemeral"}
@@ -1076,24 +1170,26 @@ def _analyze_building(
                 })
                 msgs.append({"role": "assistant", "content": verdict})
             final_content: list[dict] = [
-                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
+                {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
             ]
             if street_view_bytes:
                 sv_b64 = base64.standard_b64encode(street_view_bytes).decode()
                 final_content.append({"type": "text", "text": sv_notice})
-                final_content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": sv_b64}})
+                sv_media = _image_media_type(street_view_bytes[:16])
+                final_content.append({"type": "image", "source": {"type": "base64", "media_type": sv_media, "data": sv_b64}})
             msgs.append({"role": "user", "content": final_content})
         else:
             final_content = [
-                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
+                {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
             ]
             if street_view_bytes:
                 sv_b64 = base64.standard_b64encode(street_view_bytes).decode()
                 final_content.append({"type": "text", "text": sv_notice})
-                final_content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": sv_b64}})
+                sv_media = _image_media_type(street_view_bytes[:16])
+                final_content.append({"type": "image", "source": {"type": "base64", "media_type": sv_media, "data": sv_b64}})
             msgs = [{"role": "user", "content": final_content}]
         msg = client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-opus-4-8",
             max_tokens=220,
             system=system_blocks,
             messages=msgs,
@@ -1127,6 +1223,11 @@ def _analyze_building(
     except anthropic.APIStatusError as exc:
         if exc.status_code in (402, 403):
             raise APIQuotaExceededError("Anthropic", f"HTTP {exc.status_code} billing/auth") from exc
+        # Slut på credits ger HTTP 400 ("credit balance is too low") — INTE 402/403.
+        # Måste fångas här, annars sväljs felet tyst och scanen visar "0 solcellstak"
+        # i stället för att larma om tomt konto (rotorsaken till veckolånga 0-leads-buggen).
+        if exc.status_code == 400 and "credit balance" in str(exc).lower():
+            raise APIQuotaExceededError("Anthropic", "credit balance too low — fyll på saldo") from exc
         _log.error("_analyze_building API error: %s", exc)
         return False, False, False, ""
     except anthropic.AuthenticationError as exc:
@@ -1143,11 +1244,12 @@ def _analyze_building_opus(
 ) -> tuple[bool, bool, bool, str]:
     """Opus 4.8 + extended thinking for borderline UNSURE buildings.
 
+    Available for future use once F1-evaluated. Not wired into _process_building
+    currently — main uses Sonnet second pass instead.
     Forces a definitive YES/NO verdict — is_unsure is always False on success.
     On API error, returns (False, False, True, "") so the caller falls through
     to needs_review=True rather than silently dropping the lead.
     """
-    img_bytes = _enhance_contrast(img_bytes)
     b64 = base64.standard_b64encode(img_bytes).decode()
 
     sv_clause = (
@@ -1233,13 +1335,18 @@ def _analyze_building_opus(
         return True, False, True, ""  # preserve as needs_review on API error
 
 
-def _prefilter_building(img_bytes: bytes, client: anthropic.Anthropic) -> bool:
+def _prefilter_building(
+    img_bytes: bytes,
+    client: anthropic.Anthropic,
+    budget: "BudgetTracker | None" = None,
+) -> bool:
     """Cheap Haiku pre-filter — returns False if roof is obviously solar-free.
 
-    Saves ~60% of Sonnet calls. Only passes ambiguous/positive cases through.
-    On any API error returns True (fail open — let Sonnet decide).
+    Saves ~60% of Opus calls. Only passes ambiguous/positive cases through.
+    On any API error returns True (fail open — let Opus decide).
     """
     b64 = base64.standard_b64encode(img_bytes).decode()
+    media_type = _image_media_type(img_bytes)
     try:
         msg = client.messages.create(
             model="claude-haiku-4-5-20251001",
@@ -1247,7 +1354,7 @@ def _prefilter_building(img_bytes: bytes, client: anthropic.Anthropic) -> bool:
             messages=[{
                 "role": "user",
                 "content": [
-                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
+                    {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
                     {"type": "text", "text": (
                         "Swedish roof aerial photo. Does this roof have ANY rectangular smooth patches "
                         "that could be solar panels? Reply only YES or NO."
@@ -1255,6 +1362,8 @@ def _prefilter_building(img_bytes: bytes, client: anthropic.Anthropic) -> bool:
                 ],
             }],
         )
+        if budget is not None:
+            budget.add_anthropic_usage(msg.usage)
         return "YES" in msg.content[0].text.upper()
     except Exception:
         return True  # fail open — let Sonnet decide
@@ -1282,30 +1391,40 @@ def _process_building(
         return None
     img = _fetch_satellite(google_key, lat, lng, zoom=zoom, mapbox_key=mapbox_key, lm_key=lm_key, lm_layer=lm_layer)
     if img is None:
+        _log.debug("_process_building no_satellite_image osm_id=%s", building.get("osm_id"))
         return None
-    if not _prefilter_building(img, anthropic_client):
+    # Enhance ONCE here so the Haiku prefilter judges the SAME contrast-boosted
+    # image Opus sees. Otherwise faint panels visible only after CLAHE get gated
+    # out by the prefilter before Opus is ever consulted (root cause of the
+    # silent 0-leads bug — see CONTEXT.md).
+    img = _enhance_contrast(img)
+    if not _prefilter_building(img, anthropic_client, budget=budget):
         _log.debug("_process_building haiku_prefilter=NO osm_id=%s", building.get("osm_id"))
         return None
-    is_house, has_solar, is_unsure, reasoning = _analyze_building(anthropic_client, img, few_shot=few_shot, budget=budget)
+    is_house, has_solar, is_unsure, reasoning = _analyze_building(
+        anthropic_client, img, few_shot=few_shot, budget=budget, already_enhanced=True)
     if not is_house:
+        _log.debug("_process_building not_house osm_id=%s", building.get("osm_id"))
         return None
 
-    # Second pass: if AI is unsure, use Opus 4.8 + extended thinking.
-    # Fetches Street View first (south-facing slope evidence) then hands both
-    # images to Opus which reasons deeply and commits to a definitive verdict.
-    if is_unsure:
-        sv_bytes: bytes | None = None
-        if google_key:
+    # Second pass: if AI is unsure, fetch Street View and reanalyse.
+    # Street View shows south-facing roof slopes that are often invisible from above.
+    # Hoppa Street View om Google redan slut — annars reser samma billing-fel
+    # och dödar scanen (Street View är bara en bonus för osäkra fall).
+    if is_unsure and google_key and not _google_exhausted.is_set():
+        try:
             sv_bytes = _fetch_street_view(google_key, lat, lng)
-        _log.debug(
-            "_process_building: UNSURE → Opus 4.8 extended thinking lat=%s lng=%s sv=%s",
-            lat, lng, bool(sv_bytes),
-        )
-        is_house, has_solar, is_unsure, reasoning = _analyze_building_opus(
-            anthropic_client, img, street_view_bytes=sv_bytes
-        )
-        if not is_house:
-            return None
+        except APIQuotaExceededError:
+            _google_exhausted.set()
+            sv_bytes = None
+        if sv_bytes:
+            _log.debug("_process_building: UNSURE → Street View second pass lat=%s lng=%s", lat, lng)
+            is_house, has_solar, is_unsure, reasoning = _analyze_building(
+                anthropic_client, img, few_shot=few_shot, street_view_bytes=sv_bytes,
+                budget=budget, already_enhanced=True
+            )
+            if not is_house:
+                return None
 
     if is_unsure:
         # AI not certain — skip samtomt check (result unused for UNSURE), save for human review
@@ -1349,6 +1468,7 @@ def _process_building(
             samtomt_solar_extra = True
             solar_location = "samtomt"
         else:
+            _log.debug("_process_building no_solar osm_id=%s", building.get("osm_id"))
             return None
 
     address = building["address"]
@@ -1416,13 +1536,14 @@ def scan_buildings_ai(
     leads: list[Lead] = []
     total = len(buildings)
 
-    # Probe which LM layer works once up front to avoid per-tile probing
+    # Probe which LM layer works once up front to validate credentials + endpoint
     lm_layer = _LM_LAYERS[0]
-    if lm_key and _ENHANCE_AVAILABLE:
+    if lm_key:
         probed = _probe_lm_layer(lm_key)
         if probed:
             lm_layer = probed
         else:
+            _log.warning("Lantmäteriet WMS svarade inte — faller tillbaka på minkarta-WMS")
             lm_key = None
 
     # Load few-shot examples if not provided by caller.
@@ -1641,6 +1762,7 @@ def scan_city(
     """
     if budget is None:
         budget = BudgetTracker(budget_sek=DEFAULT_BUDGET_SEK)
+    reset_image_source_breakers()
     _log.info("scan_city city=%s max_leads=%s", city_name, max_leads)
     gmaps = googlemaps.Client(key=google_key)
     results = gmaps.geocode(city_name)
@@ -1807,6 +1929,10 @@ def scan_city(
     merged = merge_leads(osm_leads, all_ai_leads)
     _log.info("scan_city done city=%s total_leads=%d (osm=%d ai=%d)",
               city_name, len(merged), len(osm_leads), len(all_ai_leads))
+    # Emit ai_done so Ort-mode diagnostics show "AI bekräftade solceller: X"
+    # (scan_bbox already does this; without it Ort-mode 0-leads looks truncated).
+    if phase_callback:
+        phase_callback("ai_done", len(all_ai_leads))
     return merged, merged_stats
 
 
@@ -1914,6 +2040,7 @@ def scan_bbox(
     """
     if budget is None:
         budget = BudgetTracker(budget_sek=DEFAULT_BUDGET_SEK)
+    reset_image_source_breakers()
     tile_count = len(_bbox_tiles(south, west, north, east))
 
     # OSM solar tags: instant, works for any bbox size
