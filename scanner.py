@@ -814,8 +814,8 @@ def _fetch_street_view(google_key: str, lat: float, lng: float) -> bytes | None:
     )
     try:
         resp = httpx.get(url, timeout=10)
-        if resp.status_code == 429:
-            raise APIQuotaExceededError("Google Street View", "429 rate limit")
+        if resp.status_code in (402, 429):
+            raise APIQuotaExceededError("Google Street View", f"{resp.status_code} billing/rate limit")
         if resp.status_code == 403:
             raise APIQuotaExceededError("Google Street View", "403 billing/API-nyckel")
         if resp.status_code == 200 and "image" in resp.headers.get("content-type", ""):
@@ -941,8 +941,8 @@ def _fetch_google_static(google_key: str, lat: float, lng: float, zoom: int = ZO
     )
     try:
         resp = httpx.get(url, timeout=20)
-        if resp.status_code == 429:
-            raise APIQuotaExceededError("Google Static Maps", "429 rate limit")
+        if resp.status_code in (402, 429):
+            raise APIQuotaExceededError("Google Static Maps", f"{resp.status_code} billing/rate limit")
         if resp.status_code == 403:
             raise APIQuotaExceededError("Google Static Maps", "403 billing/API-nyckel")
         resp.raise_for_status()
@@ -963,14 +963,20 @@ def _fetch_satellite(
     lm_key: str | None = None,
     lm_layer: str = _LM_LAYERS[0],
 ) -> bytes | None:
-    # Priority: official LM WMS (if key) → Google Maps Static → minkarta WMS → Mapbox
+    # Priority: LM minkarta (free, 0.16m/px) → LM official (if key, same res but licensed)
+    # → Google (paid fallback) → Mapbox (last resort, never store).
+    # Minkarta and LM official serve the same Ortofoto_0.16 layer — no quality difference.
+    # Google is kept as a reliable paid fallback; its quota is preserved for Street View.
+    img = _fetch_lm_wms(lat, lng)
+    if img:
+        _log.debug("_fetch_satellite source=lm_minkarta lat=%s lng=%s", lat, lng)
+        return img
     if lm_key:
         img = _fetch_lantmateriet(lm_key, lat, lng, layer=lm_layer)
         if img:
             _log.debug("_fetch_satellite source=lm_official lat=%s lng=%s", lat, lng)
             return img
-    # Hoppa Google helt om kvoten redan sprängts under denna scan — annars
-    # faller vi tillbaka på den gratis LM WMS i stället för att döda scanen.
+    # Hoppa Google helt om kvoten redan sprängts under denna scan.
     if not _google_exhausted.is_set():
         try:
             img = _fetch_google_static(google_key, lat, lng, zoom)
@@ -978,18 +984,12 @@ def _fetch_satellite(
                 _log.debug("_fetch_satellite source=google lat=%s lng=%s", lat, lng)
                 return img
         except APIQuotaExceededError as exc:
-            # Google slut — bryt kretsen och degradera till gratis LM WMS för
-            # resten av scanen i stället för att avbryta. Ägaren larmas separat.
             if not _google_exhausted.is_set():
                 _log.warning(
-                    "Google Static Maps slut (%s) — degraderar till LM WMS för resten av scanen",
+                    "Google Static Maps slut (%s) — degraderar till Mapbox för resten av scanen",
                     exc.detail,
                 )
             _google_exhausted.set()
-    img = _fetch_lm_wms(lat, lng)
-    if img:
-        _log.debug("_fetch_satellite source=lm_wms lat=%s lng=%s", lat, lng)
-        return img
     if mapbox_key:
         img = _fetch_mapbox(mapbox_key, lat, lng, zoom)
         if img:

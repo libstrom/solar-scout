@@ -83,9 +83,9 @@ streamlit run app.py
 
 ```
 _fetch_satellite()
-  1. LM official WMS (kräver LM_KEY = "consumer_key:consumer_secret", CC-BY, lagringsbar)
-  2. Google Static Maps (~$0.002/req, lagringsbar)  ← circuit breaker: _google_exhausted
-  3. LM minkarta WMS (gratis, ingen nyckel, lagringsbar)
+  1. LM minkarta WMS (gratis, ingen nyckel, 0.16m/px, lagringsbar)  ← primär
+  2. LM official WMS (kräver LM_KEY, samma 0.16m/px, bara om formell licens behövs)
+  3. Google Static Maps (~$0.002/req, lagringsbar)  ← circuit breaker: _google_exhausted
   4. Mapbox (ALDRIG lagra — 24h-regel, bara visa i UI)
 ```
 
