@@ -1,0 +1,14 @@
+language: sv-SE
+
+reviews:
+  profile: chill
+  auto_review:
+    enabled: true
+    drafts: false
+  poem: false
+
+tools:
+  ruff:
+    enabled: true
+  docstring_coverage:
+    enabled: false
