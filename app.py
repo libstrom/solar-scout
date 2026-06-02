@@ -1257,6 +1257,7 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
         scan_errors: list[str] = []
         total_buildings_est = [0]
         cumulative_done = [0]
+        progress_floor = [0.0]  # never let the bar go backwards
 
         current_address = [""]
 
@@ -1306,13 +1307,15 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
             known_total = total_buildings_est[0]
             if known_total > 0:
                 frac = min(n / known_total, 0.97)
-                pct = int(frac * 100)
-                addr_str = f" — {current_address[0]}" if current_address[0] else ""
-                progress_bar.progress(frac, text=f"🔍 {pct}% · Byggnad {n} av {known_total}{addr_str}")
             else:
                 # Unknown total — asymptotic: moves fast early, slows near 95 %
                 frac = min(0.02 + 0.93 * (1 - 1 / (1 + n / 15)), 0.97)
-                progress_bar.progress(frac, text=f"🔍 Analyserar byggnad {n}...")
+            frac = max(frac, progress_floor[0])
+            progress_floor[0] = frac
+            pct = int(frac * 100)
+            addr_str = f" — {current_address[0]}" if current_address[0] else ""
+            total_str = f" av {known_total}" if known_total > 0 else ""
+            progress_bar.progress(frac, text=f"🔍 {pct}% · Byggnad {n}{total_str}{addr_str}")
 
         def on_phase(phase: str, count: int):
             if phase == "osm_leads":
