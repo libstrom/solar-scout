@@ -463,9 +463,12 @@ class TestAllAreas:
         area_scan_count = [0]
 
         def fake_get_osm_buildings(south, west, north, east, **kwargs):
-            # Unique building per area call — avoids seen_building_ids dedup
-            area_idx = area_scan_count[0]
-            return [_make_building(f"BLD_AREA_{area_idx}", 59.30 + area_idx * 0.01, 18.05)]
+            # Derive area_idx from center lat so this works with parallel prefetch
+            # (the old approach used area_scan_count[0] which breaks under
+            # ThreadPoolExecutor.map where all fetches run before any scan).
+            center_lat = round((south + north) / 2, 4)
+            area_idx = round((center_lat - 59.30) / 0.01)
+            return [_make_building(f"BLD_AREA_{area_idx}", center_lat, 18.05)]
 
         def fake_scan_buildings_ai(buildings, *args, max_leads=None, **kwargs):
             area_scan_count[0] += 1

@@ -1,0 +1,27 @@
+{
+  "skill": "to-prd",
+  "description": "Tests that to-prd synthesizes a PRD from context with problem statement, user stories, and deep-module decisions",
+  "tests": [
+    {
+      "id": "t1",
+      "prompt": "Skriv en PRD för en ny dashboard-feature.",
+      "expected_output_description": "Problem-first PRD with user stories, implementation/testing decisions, out-of-scope",
+      "assertions": [
+        {"id": "t1.a1", "check": "Output starts from the problem statement (user's perspective) rather than jumping to the solution"},
+        {"id": "t1.a2", "check": "Output includes a list of user stories in an 'As a... I want... so that...' style"},
+        {"id": "t1.a3", "check": "Output includes implementation decisions, ideally identifying deep modules"},
+        {"id": "t1.a4", "check": "Output includes an out-of-scope section"},
+        {"id": "t1.a5", "check": "Output mentions testing decisions or which modules will be tested"}
+      ]
+    },
+    {
+      "id": "t2",
+      "prompt": "Vad är viktigast att börja med i en PRD?",
+      "expected_output_description": "Problem first, synthesize rather than interview",
+      "assertions": [
+        {"id": "t2.a1", "check": "Output emphasizes starting with the problem, not the solution"},
+        {"id": "t2.a2", "check": "Output says to synthesize from existing context rather than interviewing the user at length"}
+      ]
+    }
+  ]
+}

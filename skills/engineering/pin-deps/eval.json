@@ -1,0 +1,27 @@
+{
+  "skill": "pin-deps",
+  "description": "Tests that pin-deps freezes requirements.txt to known-good versions and verifies via tests + boot before shipping",
+  "tests": [
+    {
+      "id": "t1",
+      "prompt": "Jag vill lägga till requests i requirements.txt.",
+      "expected_output_description": "Pins the version, verifies tests and boot, doesn't blindly take latest",
+      "assertions": [
+        {"id": "t1.a1", "check": "Output recommends pinning the version with == rather than a bare package name"},
+        {"id": "t1.a2", "check": "Output mentions running the test suite (pytest) after adding the dependency"},
+        {"id": "t1.a3", "check": "Output mentions verifying the app boots (e.g. AppTest or streamlit run) before shipping"},
+        {"id": "t1.a4", "check": "Output does NOT advise blindly taking the latest version without checking"}
+      ]
+    },
+    {
+      "id": "t2",
+      "prompt": "Ett paket funkar lokalt men kraschar i produktion, varför?",
+      "expected_output_description": "Identifies unpinned/drifting dependency as root cause, recommends pinning",
+      "assertions": [
+        {"id": "t2.a1", "check": "Output identifies an unpinned or version-drifted dependency as a likely cause"},
+        {"id": "t2.a2", "check": "Output recommends pinning the exact known-good version with =="},
+        {"id": "t2.a3", "check": "Output mentions that Railway/redeploy reinstalls latest, causing 'works today breaks tomorrow'"}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "skill": "autoresearch",
+  "description": "Tests that autoresearch runs the skill_improve.py score-improve-keep/revert loop and verifies the API key first",
+  "tests": [
+    {
+      "id": "t1",
+      "prompt": "Kör autoresearch på leads-now-skillen.",
+      "expected_output_description": "Runs skill_improve.py against the SKILL.md, verifies key, reports results",
+      "assertions": [
+        {"id": "t1.a1", "check": "Output mentions running skills/eval/skill_improve.py"},
+        {"id": "t1.a2", "check": "Output references the --skill argument pointing at the SKILL.md file"},
+        {"id": "t1.a3", "check": "Output mentions verifying an Anthropic API key is available before running"},
+        {"id": "t1.a4", "check": "Output mentions that improvements are committed and regressions reverted"}
+      ]
+    },
+    {
+      "id": "t2",
+      "prompt": "Vad gör autoresearch-loopen egentligen?",
+      "expected_output_description": "Describes the Karpathy score-improve-rescore loop",
+      "assertions": [
+        {"id": "t2.a1", "check": "Output describes scoring the skill, making one targeted change, and re-scoring"},
+        {"id": "t2.a2", "check": "Output mentions keeping the change if the score improves and reverting otherwise"},
+        {"id": "t2.a3", "check": "Output mentions it repeats until a perfect score or a max-iterations limit"}
+      ]
+    }
+  ]
+}

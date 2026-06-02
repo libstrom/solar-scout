@@ -8,6 +8,9 @@ import os
 import time
 import logging
 import urllib.parse
+import secrets
+import hashlib
+import base64
 import httpx
 import stripe
 import pandas as pd
@@ -233,7 +236,43 @@ def init_auth():
     if cm is not None:
         cm.delete("access_token", key="del_access_fail")
         cm.delete("refresh_token", key="del_refresh_fail")
+
+    # OAuth callback — Microsoft/Azure PKCE code exchange
+    _oauth_code = st.query_params.get("code")
+    _verifier   = st.session_state.get("_oauth_code_verifier")
+    if _oauth_code and _verifier:
+        st.session_state.pop("_oauth_code_verifier", None)
+        try:
+            user_sb = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+            resp = user_sb.auth.exchange_code_for_session(
+                {"auth_code": _oauth_code, "code_verifier": _verifier}
+            )
+            if resp.session and resp.user:
+                st.session_state["access_token"]    = resp.session.access_token
+                st.session_state["refresh_token"]   = resp.session.refresh_token
+                st.session_state["_auth_user"]      = resp.user
+                st.session_state["_sb_user_client"] = user_sb
+                _cm = _get_cookie_manager()
+                if _cm is not None:
+                    _exp = datetime.now() + timedelta(days=30)
+                    _cm.set("access_token", resp.session.access_token, expires_at=_exp)
+                    _cm.set("refresh_token", resp.session.refresh_token, expires_at=_exp)
+                st.query_params.pop("code", None)
+                return resp.user
+        except Exception as _oe:
+            _log.warning("oauth code exchange failed: %s", _oe)
+            st.session_state["_oauth_error"] = str(_oe)
+
+
     return None
+
+
+def _pkce_pair() -> tuple[str, str]:
+    """Return (verifier, challenge) for OAuth PKCE S256 flow."""
+    verifier = secrets.token_urlsafe(32)
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return verifier, challenge
 
 
 def do_login(email: str, password: str):
@@ -609,6 +648,40 @@ def page_auth():
                     detail=f"{type(e).__name__}: {e}",
                     user_email=email,
                 )
+
+        # Microsoft OAuth button — requires Azure provider enabled in Supabase dashboard
+        st.divider()
+        if st.button(
+            "**Logga in med Microsoft**",
+            icon=":material/microsoft:",
+            use_container_width=True,
+            key="ms_oauth_btn",
+        ):
+            _v, _ch = _pkce_pair()
+            st.session_state["_oauth_code_verifier"] = _v
+            try:
+                _anon_sb = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+                _oa = _anon_sb.auth.sign_in_with_oauth({
+                    "provider": "azure",
+                    "options": {
+                        "redirect_to": APP_URL,
+                        "scopes": "email",
+                        "query_params": {
+                            "code_challenge": _ch,
+                            "code_challenge_method": "S256",
+                        },
+                    },
+                })
+                import streamlit.components.v1 as _stc_ms
+                _stc_ms.html(
+                    f'<script>window.top.location.replace("{_oa.url}")</script>',
+                    height=0,
+                )
+            except Exception as _mse:
+                st.error(f"Microsoft-inloggning misslyckades: {_mse}")
+
+        if "_oauth_error" in st.session_state:
+            st.error(f"Microsoft-inloggning: {st.session_state.pop('_oauth_error')}")
 
     with tab_up:
         with st.form("signup_form"):
@@ -1253,6 +1326,8 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
         status_text    = st.empty()
         found_leads: list[Lead] = []
         live_leads_ph  = st.empty()
+        area_map_ph    = st.empty()
+        area_states: list[dict] = []
         scan_debug: list[str] = []
         scan_errors: list[str] = []
         total_buildings_est = [0]
@@ -1333,6 +1408,73 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                 scan_debug.append(f"AI bekräftade solceller: {count}")
 
         from scan_cost import BudgetTracker as _BudgetTracker, DEFAULT_BUDGET_SEK as _BUDGET_SEK
+
+        def _render_area_map():
+            if not area_states:
+                return
+            try:
+                import folium as _folium
+                from streamlit_folium import st_folium as _st_folium
+            except ImportError:
+                return
+            lats_c = [a["lat"] for a in area_states]
+            lngs_c = [a["lng"] for a in area_states]
+            center = [sum(lats_c) / len(lats_c), sum(lngs_c) / len(lngs_c)]
+            _m = _folium.Map(location=center, zoom_start=12,
+                             tiles="CartoDB positron", prefer_canvas=True)
+            _state_color = {
+                "scanning":   "#f97316",   # orange
+                "done_leads": "#22c55e",   # green
+                "done_empty": "#e5e7eb",   # light grey
+            }
+            for _a in area_states:
+                _color = _state_color.get(_a.get("state", "done_empty"), "#e5e7eb")
+                _nb = _a.get("n_buildings", 0)
+                _tip = (
+                    f"🔍 Skannar ({_nb} hus)" if _a.get("state") == "scanning"
+                    else f"☀️ {_a.get('n_leads', 0)} leads" if _a.get("state") == "done_leads"
+                    else "Inga hus"
+                )
+                _folium.Rectangle(
+                    bounds=[[_a["south"], _a["west"]], [_a["north"], _a["east"]]],
+                    color=_color,
+                    fill=True,
+                    fill_opacity=0.40,
+                    weight=2,
+                    tooltip=_tip,
+                ).add_to(_m)
+            with area_map_ph.container():
+                scanning_count = sum(1 for a in area_states if a.get("state") == "scanning")
+                done_count     = sum(1 for a in area_states if a.get("state") != "scanning")
+                leads_count    = sum(a.get("n_leads", 0) for a in area_states)
+                st.caption(
+                    f"🗺 **Bostadsområden** · "
+                    f"🟠 {scanning_count} skannas · "
+                    f"✅ {done_count} klara · "
+                    f"☀️ {leads_count} leads"
+                )
+                _st_folium(
+                    _m, width="100%", height=260,
+                    returned_objects=[],
+                    key=f"area_progress_map_{len(area_states)}",
+                )
+
+        def on_area_start(area: dict):
+            area["state"] = "scanning"
+            area["n_buildings"] = 0
+            area["n_leads"] = 0
+            area_states.append(area)
+            _render_area_map()
+
+        def on_area_done(area: dict, n_leads: int):
+            for _a in area_states:
+                if _a["lat"] == area["lat"] and _a["lng"] == area["lng"]:
+                    _a["state"] = "done_leads" if n_leads > 0 else "done_empty"
+                    _a["n_leads"] = n_leads
+                    break
+            _render_area_map()
+
+
         anthr_key = ANTHROPIC_API_KEY if ai_available else None
         _log.info("scan start mode=%s ai=%s max_leads=%s", "bbox" if use_bbox else "city", bool(anthr_key), max_leads)
         _scan_budget = _BudgetTracker(budget_sek=_BUDGET_SEK)
@@ -1346,6 +1488,7 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                     mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads,
                     phase_callback=on_phase, skip_tile_keys=_skip_tile_keys,
                     user_id=str(user.id), budget=_scan_budget,
+                    on_area_start=on_area_start, on_area_done=on_area_done,
                 )
             else:
                 status_text.info("Hämtar byggnadsdata från OSM (kan ta 20–60 s)...")
@@ -1354,6 +1497,7 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                     mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads,
                     phase_callback=on_phase, skip_tile_keys=_skip_tile_keys,
                     user_id=str(user.id), budget=_scan_budget,
+                    on_area_start=on_area_start, on_area_done=on_area_done,
                 )
         except ValueError as e:
             _log.error("scan ValueError: %s", e)
@@ -1381,6 +1525,7 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
         progress_bar.progress(1.0, text="Klar!")
         status_text.empty()
         live_leads_ph.empty()  # Full results UI renders below — no duplicate
+        area_map_ph.empty()    # Area progress map no longer needed
 
         if _scan_budget.stopped_over_budget:
             st.warning(
@@ -2523,8 +2668,8 @@ def page_app(user, profile, lead_count: int = 0):
 
     review_label = f"👁 Granska ({review_count})" if review_count else "👁 Granska"
     if is_admin(profile):
-        tab_scanner, tab_scout, tab_leads, tab_review, tab_account = st.tabs(
-            ["🔍 AI Scanner", "🏠 Scouta Tak", "📋 Leads", review_label, "⚙ Konto"]
+        tab_scanner, tab_scout, tab_leads, tab_dash, tab_review, tab_account = st.tabs(
+            ["🔍 AI Scanner", "🏠 Scouta Tak", "📋 Leads", "📊 Dashboard", review_label, "⚙ Konto"]
         )
         with tab_scanner:
             page_scanner(user, profile, lead_count)
@@ -2532,15 +2677,19 @@ def page_app(user, profile, lead_count: int = 0):
             page_scout(user)
         with tab_leads:
             page_leads(user)
+        with tab_dash:
+            page_dashboard(user)
         with tab_review:
             page_review(user)
         with tab_account:
             page_account(user, profile)
     else:
-        # Fältsäljare ser bara leads och granskningskön
-        tab_leads, tab_review = st.tabs(["📋 Leads", review_label])
+        # Fältsäljare ser leads, dashboard och granskningskön
+        tab_leads, tab_dash, tab_review = st.tabs(["📋 Leads", "📊 Dashboard", review_label])
         with tab_leads:
             page_leads(user)
+        with tab_dash:
+            page_dashboard(user)
         with tab_review:
             page_review(user)
 
@@ -2553,26 +2702,91 @@ def page_app(user, profile, lead_count: int = 0):
     )
 
 
+# ── Dashboard ─────────────────────────────────────────────────────────────────
+
+def page_dashboard(user) -> None:
+    """Statistik-dashboard: lead-tratt, skannings-precision, toppstäder."""
+    st.header("📊 Dashboard")
+    sb = get_supabase()
+
+    # Lead funnel
+    st.subheader("Lead-tratt")
+    try:
+        rows = sb.from_("scout_leads").select("status").eq("user_id", user.id).execute().data or []
+        counts: dict[str, int] = {}
+        for row in rows:
+            s = row.get("status") or "ny"
+            counts[s] = counts.get(s, 0) + 1
+        total = sum(counts.values())
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Totalt", total)
+        c2.metric("Kontaktade", counts.get("kontaktad", 0))
+        c3.metric("Intresserade", counts.get("intresserad", 0))
+        c4.metric("Ej intresserade", counts.get("ej_intresserad", 0))
+    except Exception as _exc:
+        st.error(f"Kunde inte hämta lead-data: {_exc}")
+
+    st.divider()
+
+    # Scan precision — requires migration 004
+    st.subheader("Skannings-precision per session")
+    try:
+        prec_rows = sb.from_("scan_precision").select("*").eq("user_id", user.id).execute().data or []
+        if prec_rows:
+            import pandas as _pd
+            _df = _pd.DataFrame(prec_rows)[
+                ["scan_started_at", "total_leads", "confirmed", "rejected", "false_positive_pct"]
+            ]
+            _df.columns = ["Startad", "Totalt", "Bekräftade", "Avvisade", "Falska pos. (%)"]
+            st.dataframe(_df, use_container_width=True)
+        else:
+            st.info("Inga sessioner med precision-data än. Starta en ny skanning för att börja samla data.")
+    except Exception as _exc:
+        _msg = str(_exc).lower()
+        if "relation" in _msg or "does not exist" in _msg or "undefined" in _msg:
+            st.warning("Kör migration 004 för att aktivera precision-statistik.")
+        else:
+            st.error(f"Precision-data ej tillgänglig: {_exc}")
+
+    st.divider()
+
+    # Top cities
+    st.subheader("Toppstäder")
+    try:
+        addr_rows = sb.from_("scout_leads").select("address").eq("user_id", user.id).execute().data or []
+        city_counts: dict[str, int] = {}
+        for row in addr_rows:
+            addr = row.get("address") or ""
+            parts = addr.split(",")
+            if len(parts) >= 2:
+                city = parts[-1].strip()
+                if city:
+                    city_counts[city] = city_counts.get(city, 0) + 1
+        if city_counts:
+            import pandas as _pd
+            _top = sorted(city_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+            _df_c = _pd.DataFrame(_top, columns=["Stad", "Antal leads"]).set_index("Stad")
+            st.bar_chart(_df_c)
+        else:
+            st.info("Inga leads med adressdata ännu.")
+    except Exception as _exc:
+        st.error(f"Kunde inte hämta städer: {_exc}")
+
+
 # ── Integritetspolicy ─────────────────────────────────────────────────────────
 
 def page_privacy():
     st.title("Integritetspolicy")
-    # TODO: Byt ut "Linus Bergström" mot det slutgiltiga företagsnamnet när
-    # bolagsregistrering är klar.
-    # TODO: Byt ut gdpr@solar-scout.example mot en riktig kontaktadress innan
-    # produktionssläpp.
     st.markdown(
         """
-Denna integritetspolicy beskriver hur Scout (”tjänsten”) behandlar
+Denna integritetspolicy beskriver hur Scout (“tjänsten”) behandlar
 personuppgifter i enlighet med EU:s dataskyddsförordning (GDPR), särskilt
 informationsplikten i Art. 13.
 
 ### Personuppgiftsansvarig
 
-Personuppgiftsansvarig för behandlingen är **Linus Bergström**
-(placeholder — slutgiltigt företagsnamn fylls i innan produktionssläpp).
-Kontakt för förfrågningar från registrerade: **gdpr@solar-scout.example**
-(placeholder — byts ut före lansering).
+Personuppgiftsansvarig för behandlingen är **Solar Scout AB**.
+Kontakt för förfrågningar från registrerade: **gdpr@solar-scout.se**.
 
 ### Ändamål med behandlingen
 

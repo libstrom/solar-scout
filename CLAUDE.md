@@ -143,7 +143,7 @@ Kolumner som koden skriver/läser: `id`, `user_id`, `lat`, `lng`, `address`, `co
 
 - **Mapbox 24h-regel**: Mapbox-bilder får ALDRIG lagras — bara visas i UI
 - **LM WMS / LM minkarta**: lagringsbar (CC-BY), alltid OK att spara `image_url`
-- **Haiku pre-filter**: `_prefilter_building()` körs före Opus för att spara ~60% kostnad
+- **Haiku pre-filter**: `_prefilter_building()` körs före Sonnet för att spara ~60% kostnad
 - **Glesbygd-pass**: `scan_city()` kör ett extra pass på hela viewport för hus utanför OSM residential-polygoner
 - **OSM-attribution**: CSV-export måste innehålla attribution-header (ODbL); se `docs/adr/0001-osm-odbl-csv.md`
 
@@ -164,3 +164,7 @@ Kolumner som koden skriver/läser: `id`, `user_id`, `lat`, `lng`, `address`, `co
 | `MAPBOX_TOKEN` | Kartvy i UI (valfri) |
 | `STRIPE_SECRET_KEY` + `STRIPE_PRICE_*` | Betalning |
 | `RESEND_API_KEY` | Mail vid mötesbokningar + kvotalarm |
+
+## Svarsstil
+
+- **Visa alltid adresser**: När leads eller byggnadsresultat diskuteras, visa alltid de faktiska adresserna i svaret — inte bara antal eller statistik.

@@ -1,0 +1,27 @@
+{
+  "skill": "prototype",
+  "description": "Tests that prototype builds throwaway code to answer one question, kept out of production paths until validated",
+  "tests": [
+    {
+      "id": "t1",
+      "prompt": "Jag vill testa en ny scan-strategi utan att riskera produktionen.",
+      "expected_output_description": "Builds a throwaway prototype in isolation, one command to run, deletes or absorbs when done",
+      "assertions": [
+        {"id": "t1.a1", "check": "Output recommends building in a new throwaway file/module rather than editing app.py or scanner.py directly"},
+        {"id": "t1.a2", "check": "Output frames the prototype as answering a specific question"},
+        {"id": "t1.a3", "check": "Output mentions it should be runnable with a single command"},
+        {"id": "t1.a4", "check": "Output mentions deleting or absorbing the prototype once it has answered the question"}
+      ]
+    },
+    {
+      "id": "t2",
+      "prompt": "Jag har en idé om en ny UI-komponent.",
+      "expected_output_description": "Routes to the UI branch — several variations on one route, throwaway",
+      "assertions": [
+        {"id": "t2.a1", "check": "Output recommends building it as throwaway code separate from production"},
+        {"id": "t2.a2", "check": "Output mentions exploring multiple design variations or switching between them"},
+        {"id": "t2.a3", "check": "Output advises skipping polish (no tests, no abstractions) for a prototype"}
+      ]
+    }
+  ]
+}

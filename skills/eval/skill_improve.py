@@ -39,16 +39,46 @@ logging.basicConfig(
 )
 _log = logging.getLogger("skill_improve")
 
-ANTHROPIC_API_KEY = (
-    os.getenv("SOLAR_SCOUT_ANTHROPIC_KEY")
-    or os.getenv("ANTHROPIC_API_KEY")
-    or ""
-)
+def _read_api_key() -> str:
+    """Try every place the key could live — env var, .streamlit/secrets.toml, app.py _secret."""
+    # 1. Explicit env vars
+    key = os.getenv("SOLAR_SCOUT_ANTHROPIC_KEY") or os.getenv("ANTHROPIC_API_KEY")
+    if key:
+        return key
+    # 2. .streamlit/secrets.toml (local dev)
+    try:
+        import tomllib
+        secrets_path = Path(__file__).parent.parent.parent / ".streamlit" / "secrets.toml"
+        if secrets_path.exists():
+            with open(secrets_path, "rb") as f:
+                s = tomllib.load(f)
+            key = s.get("SOLAR_SCOUT_ANTHROPIC_KEY") or s.get("ANTHROPIC_API_KEY")
+            if key:
+                return key
+    except Exception:
+        pass
+    # 3. Try importing app._secret (works when running from project root)
+    try:
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+        from app import _secret  # type: ignore
+        key = _secret("SOLAR_SCOUT_ANTHROPIC_KEY") or _secret("ANTHROPIC_API_KEY")
+        if key:
+            return key
+    except Exception:
+        pass
+    # 4. Claude Code web / proxy environment — ANTHROPIC_BASE_URL handles auth,
+    #    the SDK only needs a non-empty api_key string as a placeholder.
+    if os.getenv("ANTHROPIC_BASE_URL"):
+        return "proxy-auth"
+    return ""
+
+ANTHROPIC_API_KEY = _read_api_key()
 
 # Haiku for both skill simulation and assertion checks — fast and cheap
 EVAL_MODEL   = "claude-haiku-4-5-20251001"
-# Sonnet for skill improvements — needs to reason well about what to change
-IMPROVE_MODEL = "claude-sonnet-4-6"
+# Opus 4.8 for skill improvements — deepest reasoning for targeted edits
+IMPROVE_MODEL = "claude-opus-4-8"
 
 
 # ── Data types ──────────────────────────────────────────────────────────────────
@@ -123,11 +153,15 @@ def run_skill(skill_content: str, test_prompt: str) -> str:
     response = client.messages.create(
         model=EVAL_MODEL,
         max_tokens=1500,
-        system=(
-            "You are Claude Code executing the following skill. "
-            "Follow its instructions precisely and produce the output it describes.\n\n"
-            f"<skill>\n{skill_content}\n</skill>"
-        ),
+        system=[{
+            "type": "text",
+            "text": (
+                "You are Claude Code executing the following skill. "
+                "Follow its instructions precisely and produce the output it describes.\n\n"
+                f"<skill>\n{skill_content}\n</skill>"
+            ),
+            "cache_control": {"type": "ephemeral"},
+        }],
         messages=[{"role": "user", "content": test_prompt}],
     )
     return response.content[0].text
@@ -139,11 +173,15 @@ def check_assertion(output: str, assertion: dict) -> AssertionResult:
     response = client.messages.create(
         model=EVAL_MODEL,
         max_tokens=100,
-        system=(
-            "You are a precise binary evaluator. "
-            "Given a text output and an assertion, determine if the assertion is TRUE or FALSE. "
-            "Answer with exactly one word: 'true' or 'false', followed by a brief reason."
-        ),
+        system=[{
+            "type": "text",
+            "text": (
+                "You are a precise binary evaluator. "
+                "Given a text output and an assertion, determine if the assertion is TRUE or FALSE. "
+                "Answer with exactly one word: 'true' or 'false', followed by a brief reason."
+            ),
+            "cache_control": {"type": "ephemeral"},
+        }],
         messages=[{
             "role": "user",
             "content": (
@@ -207,12 +245,16 @@ def improve_skill(skill_path: str, failures: list[AssertionResult], iteration: i
     response = client.messages.create(
         model=IMPROVE_MODEL,
         max_tokens=3000,
-        system=(
-            "You are improving a Claude Code skill file (skill.md). "
-            "Make exactly ONE targeted change to address the failing assertions. "
-            "Be surgical — add a rule, clarify an instruction, or add an example. "
-            "Do not rewrite the whole file. Return the COMPLETE updated skill.md content."
-        ),
+        system=[{
+            "type": "text",
+            "text": (
+                "You are improving a Claude Code skill file (skill.md). "
+                "Make exactly ONE targeted change to address the failing assertions. "
+                "Be surgical — add a rule, clarify an instruction, or add an example. "
+                "Do not rewrite the whole file. Return the COMPLETE updated skill.md content."
+            ),
+            "cache_control": {"type": "ephemeral"},
+        }],
         messages=[{
             "role": "user",
             "content": (

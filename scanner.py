@@ -329,7 +329,7 @@ _NON_RESIDENTIAL_TYPES = {
 # most Swedish villor are 80-300 m²; 400+ m² is more likely a parhus-cluster or
 # multi-unit residence we don't want.
 MIN_BUILDING_AREA_M2 = 40
-MAX_BUILDING_AREA_M2 = 400
+MAX_BUILDING_AREA_M2 = 350
 
 # Max distance (m) to snap a building centroid to a nearby OSM address node.
 ADDRESS_SNAP_RADIUS_M = 25
@@ -412,6 +412,14 @@ def _get_osm_buildings(south: float, west: float, north: float,
         tags = el.get("tags", {})
         btype = tags.get("building", "house")
         if btype in _NON_RESIDENTIAL_TYPES:
+            continue
+
+        # Skip buildings with commercial/public amenity tags even if building=yes
+        amenity = tags.get("amenity", "")
+        if amenity in _NON_RESIDENTIAL_AMENITIES:
+            continue
+        # Shop or office tags override the building type
+        if tags.get("shop") or tags.get("office"):
             continue
 
         # Flerfamiljshus often tagged as residential but carry building:flats.
@@ -1095,7 +1103,8 @@ def _analyze_building(
 
         "STEP 1 — Is the CENTRAL structure a single-family home?\n"
         "(villa, parhus, radhus, fritidshus — NOT garage, carport, barn, shed, "
-        "warehouse, industrial, church, school, kiosk, construction site)\n"
+        "warehouse, industrial, church, school, kiosk, construction site, "
+        "apartment block/BRF/flerfamiljshus, office building, retail/commercial)\n"
         "→ If NO: HOUSE=NO, SOLAR=NO. Stop here.\n\n"
 
         "STEP 2 — Describe the roof in one sentence:\n"
@@ -1226,6 +1235,104 @@ def _analyze_building(
     except Exception as exc:
         _log.error("_analyze_building API error: %s", exc)
         return False, False, False, ""
+
+
+def _analyze_building_opus(
+    client: anthropic.Anthropic,
+    img_bytes: bytes,
+    street_view_bytes: bytes | None = None,
+) -> tuple[bool, bool, bool, str]:
+    """Opus 4.8 + extended thinking for borderline UNSURE buildings.
+
+    Available for future use once F1-evaluated. Not wired into _process_building
+    currently — main uses Sonnet second pass instead.
+    Forces a definitive YES/NO verdict — is_unsure is always False on success.
+    On API error, returns (False, False, True, "") so the caller falls through
+    to needs_review=True rather than silently dropping the lead.
+    """
+    b64 = base64.standard_b64encode(img_bytes).decode()
+
+    sv_clause = (
+        "\n\nA street-level photo of the same property follows the aerial image. "
+        "Solar panels on south-facing slopes are often clearly visible from the street. "
+        "Weight it heavily if it confirms or refutes panels."
+        if street_view_bytes
+        else ""
+    )
+    instruction = (
+        "You are an expert solar panel detection system. "
+        "A faster model already flagged this image as uncertain — use your extended "
+        "reasoning to reach a definitive answer.\n\n"
+        "Swedish aerial orthophoto, ~50 m wide, top-down view. SE3/SE4 grid zone "
+        "(Småland, Skåne, Jönköping). Dominant roof materials: red/brown clay tiles "
+        "(Skandiategel, tegelpannor), grey fibre cement, black bitumen/EPDM, "
+        "corrugated cement, standing-seam metal (plåttak).\n\n"
+        "STEP 1 — Is the CENTRAL structure a single-family home?\n"
+        "(villa, parhus, radhus, fritidshus — NOT garage, barn, warehouse, industrial, "
+        "church, school, apartment block/BRF/flerfamiljshus, office, retail)\n"
+        "→ If NO: HOUSE=NO, SOLAR=NO\n\n"
+        "STEP 2 — Look for PV evidence:\n"
+        "  (a) SMOOTHNESS CONTRAST — a clearly smoother, more uniform area against "
+        "      the bumpy/ribbed texture of adjacent tiles\n"
+        "  (b) RECTANGULAR BOUNDARY — a discrete rectangular sub-area with a visible edge\n"
+        "  (c) MODULE GRID — parallel seam lines; uniform dark-blue/black colour\n\n"
+        "NOT solar: Skandiategel clay tiles (bumpy ridges), corrugated fibre cement "
+        "(ribbed, uniform grey), standing-seam metal (parallel ribs ridge-to-eave, "
+        "no smoother sub-area), bitumen/EPDM (whole-roof uniform dark, no patch), "
+        "copper/green-patina metal (uniform across the whole roof).\n\n"
+        "Think deeply. Commit to a verdict — do not hedge."
+        + sv_clause
+        + "\n\nEnd with exactly two lines:\nHOUSE=YES or HOUSE=NO\nSOLAR=YES or SOLAR=NO"
+    )
+
+    final_content: list[dict] = [
+        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
+    ]
+    if street_view_bytes:
+        sv_b64 = base64.standard_b64encode(street_view_bytes).decode()
+        final_content.append({"type": "text", "text": "Street-level view of the same property:"})
+        final_content.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/jpeg", "data": sv_b64},
+        })
+
+    try:
+        system_blocks: list[dict] = [
+            {"type": "text", "text": instruction, "cache_control": {"type": "ephemeral"}}
+        ]
+        resp = client.messages.create(
+            model="claude-opus-4-8",
+            max_tokens=4096,
+            thinking={"type": "enabled", "budget_tokens": 1024},
+            system=system_blocks,
+            messages=[{"role": "user", "content": final_content}],
+        )
+        raw = ""
+        think_excerpt = ""
+        for block in resp.content:
+            if block.type == "thinking":
+                think_excerpt = (block.thinking or "")[:300]
+            elif block.type == "text":
+                raw = block.text
+
+        text = raw.upper()
+        is_house = "HOUSE=YES" in text
+        has_solar = is_house and "SOLAR=YES" in text
+        reasoning = think_excerpt
+        for line in raw.splitlines():
+            if line.strip().upper().startswith(("HOUSE=", "SOLAR=")):
+                break
+            if line.strip():
+                reasoning = line.strip()
+                break
+        _log.debug(
+            "_analyze_building_opus HOUSE=%s SOLAR=%s sv=%s",
+            is_house, has_solar, bool(street_view_bytes),
+        )
+        return is_house, has_solar, False, reasoning
+    except Exception as exc:
+        _log.error("_analyze_building_opus error: %s", exc)
+        return True, False, True, ""  # preserve as needs_review on API error
 
 
 def _prefilter_building(
@@ -1569,13 +1676,21 @@ def _get_residential_areas(south: float, west: float, north: float, east: float)
                     (bounds.get("maxlat", lat) - bounds.get("minlat", lat)) *
                     (bounds.get("maxlon", lng) - bounds.get("minlon", lng))
                 )
+                s = bounds.get("minlat", lat - 0.005)
+                w = bounds.get("minlon", lng - 0.005)
+                n = bounds.get("maxlat", lat + 0.005)
+                e = bounds.get("maxlon", lng + 0.005)
             else:
                 area_deg2 = 0.0
-            areas.append({"lat": lat, "lng": lng, "area_deg2": area_deg2})
+                s, w, n, e = lat - 0.005, lng - 0.005, lat + 0.005, lng + 0.005
+            areas.append({"lat": lat, "lng": lng, "area_deg2": area_deg2,
+                          "south": s, "west": w, "north": n, "east": e})
         elif el.get("type") == "relation" and "center" in el:
             lat = el["center"]["lat"]
             lng = el["center"]["lon"]
-            areas.append({"lat": lat, "lng": lng, "area_deg2": 0.0})
+            areas.append({"lat": lat, "lng": lng, "area_deg2": 0.0,
+                          "south": lat - 0.005, "west": lng - 0.005,
+                          "north": lat + 0.005, "east": lng + 0.005})
     # Largest residential area first
     areas.sort(key=lambda a: a["area_deg2"], reverse=True)
     return areas
@@ -1630,6 +1745,8 @@ def scan_city(
     phase_callback: Callable[[str, int], None] | None = None,
     skip_tile_keys: frozenset[str] = frozenset(),
     user_id: str | None = None,
+    on_area_start: Callable[[dict], None] | None = None,
+    on_area_done: Callable[[dict, int], None] | None = None,
     budget: "BudgetTracker | None" = None,
 ) -> tuple[list[Lead], ScanStats]:
     """Scan a city for buildings with solar panels.
@@ -1692,12 +1809,24 @@ def scan_city(
     _log.info("scan_city residential_areas=%d", len(residential_areas))
 
     if residential_areas:
-        # Scan all areas — inner loop breaks early when max_leads is reached.
-        # The old max_leads//5 cap caused 0 leads in large cities (e.g. Lund:
-        # 465 areas but only 2 were scanned, missing all villa suburbs).
-        max_areas = len(residential_areas)
-        _log.info("scan_city scanning %d/%d areas", max_areas, len(residential_areas))
-        for area in residential_areas[:max_areas]:
+        _log.info("scan_city scanning %d areas", len(residential_areas))
+
+        # Phase 1: Parallel OSM pre-fetch (3 workers) — overlaps network I/O
+        # across areas so each area's HTTP round-trip doesn't block the next.
+        # Returns results in original order via pool.map.
+        def _fetch_city_area(area_: dict) -> list[dict]:
+            s_, w_, n_, e_ = _center_bbox(area_["lat"], area_["lng"], radius_km=1.0)
+            try:
+                return _get_osm_buildings(s_, w_, n_, e_)
+            except Exception as exc:
+                _log.warning("scan_city OSM prefetch failed lat=%s: %s", area_["lat"], exc)
+                return []
+
+        with ThreadPoolExecutor(max_workers=3) as _pool:
+            _prefetched: list[list[dict]] = list(_pool.map(_fetch_city_area, residential_areas))
+
+        # Phase 2: Serial dedup + AI scan (scan_buildings_ai is parallel internally)
+        for area, raw_buildings in zip(residential_areas, _prefetched):
             # Remaining lead budget for AI scan
             remaining = None
             if max_leads is not None:
@@ -1706,14 +1835,12 @@ def scan_city(
                 if remaining <= 0:
                     break
 
-            a_south, a_west, a_north, a_east = _center_bbox(
-                area["lat"], area["lng"], radius_km=1.0
-            )
-            buildings = _get_osm_buildings(a_south, a_west, a_north, a_east)
+            if on_area_start:
+                on_area_start(area)
 
             # Deduplicate across areas and against OSM leads
             buildings = [
-                b for b in buildings
+                b for b in raw_buildings
                 if b["osm_id"] not in seen_building_ids
                 and f"{b['lat']:.4f},{b['lng']:.4f}" not in osm_keys
             ]
@@ -1722,6 +1849,8 @@ def scan_city(
 
             if not buildings:
                 _log.info("scan_city area lat=%s lng=%s no new buildings", area["lat"], area["lng"])
+                if on_area_done:
+                    on_area_done(area, 0)
                 continue
 
             _log.info("scan_city area lat=%s lng=%s buildings=%d", area["lat"], area["lng"], len(buildings))
@@ -1735,6 +1864,8 @@ def scan_city(
                 budget=budget,
             )
             _log.info("scan_city area_leads=%d", len(area_leads))
+            if on_area_done:
+                on_area_done(area, len(area_leads))
             all_ai_leads.extend(area_leads)
             merged_stats.yes += area_stats.yes
             merged_stats.unsure += area_stats.unsure
@@ -1894,6 +2025,8 @@ def scan_bbox(
     phase_callback: Callable[[str, int], None] | None = None,
     skip_tile_keys: frozenset[str] = frozenset(),
     user_id: str | None = None,
+    on_area_start: Callable[[dict], None] | None = None,
+    on_area_done: Callable[[dict, int], None] | None = None,
     budget: "BudgetTracker | None" = None,
 ) -> tuple[list[Lead], ScanStats]:
     """Scan a bounding box for buildings with solar panels.
@@ -1936,25 +2069,37 @@ def scan_bbox(
 
         if residential_areas:
             seen_building_ids: set[str] = set()
-            for area in residential_areas:
+
+            # Parallel OSM pre-fetch with bbox clamping (3 workers)
+            _bbox_south, _bbox_west, _bbox_north, _bbox_east = south, west, north, east
+
+            def _fetch_bbox_area(area_: dict) -> list[dict]:
+                s_, w_, n_, e_ = _center_bbox(area_["lat"], area_["lng"], radius_km=1.0)
+                s_ = max(s_, _bbox_south)
+                w_ = max(w_, _bbox_west)
+                n_ = min(n_, _bbox_north)
+                e_ = min(e_, _bbox_east)
+                try:
+                    return _get_osm_buildings(s_, w_, n_, e_)
+                except Exception as exc:
+                    _log.warning("scan_bbox OSM prefetch failed lat=%s: %s", area_["lat"], exc)
+                    return []
+
+            with ThreadPoolExecutor(max_workers=3) as _pool:
+                _prefetched: list[list[dict]] = list(_pool.map(_fetch_bbox_area, residential_areas))
+
+            for area, raw_buildings in zip(residential_areas, _prefetched):
                 remaining = None
                 if max_leads is not None:
                     remaining = max_leads - len(osm_leads) - len(all_ai_leads)
                     if remaining <= 0:
                         break
 
-                a_south, a_west, a_north, a_east = _center_bbox(
-                    area["lat"], area["lng"], radius_km=1.0
-                )
-                # Clamp to drawn bbox so we don't spill outside the user's selection
-                a_south = max(a_south, south)
-                a_west  = max(a_west,  west)
-                a_north = min(a_north, north)
-                a_east  = min(a_east,  east)
+                if on_area_start:
+                    on_area_start(area)
 
-                buildings = _get_osm_buildings(a_south, a_west, a_north, a_east)
                 buildings = [
-                    b for b in buildings
+                    b for b in raw_buildings
                     if b["osm_id"] not in seen_building_ids
                     and f"{b['lat']:.4f},{b['lng']:.4f}" not in osm_keys
                 ]
@@ -1962,6 +2107,8 @@ def scan_bbox(
                     seen_building_ids.add(b["osm_id"])
 
                 if not buildings:
+                    if on_area_done:
+                        on_area_done(area, 0)
                     continue
 
                 if phase_callback:
@@ -1973,6 +2120,8 @@ def scan_bbox(
                     skip_tile_keys=skip_tile_keys,
                     budget=budget,
                 )
+                if on_area_done:
+                    on_area_done(area, len(area_leads))
                 all_ai_leads.extend(area_leads)
                 merged_stats.yes    += area_stats.yes
                 merged_stats.unsure += area_stats.unsure
