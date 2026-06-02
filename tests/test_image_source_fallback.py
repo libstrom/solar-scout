@@ -40,22 +40,24 @@ def test_google_quota_falls_back_to_lm_wms():
 
 
 def test_google_quota_sets_circuit_breaker():
-    """Första kvotfelet ska sätta breakern så resten av scanen hoppar Google."""
-    with patch("scanner._fetch_google_static",
+    """Kvotfelet på Google ska sätta breakern så resten av scanen hoppar Google."""
+    with patch("scanner._fetch_lm_wms", return_value=None), \
+         patch("scanner._fetch_google_static",
                side_effect=APIQuotaExceededError("Google Static Maps", "429 rate limit")), \
-         patch("scanner._fetch_lm_wms", return_value=b"lm_image"):
+         patch("scanner._fetch_mapbox", return_value=b"mapbox_image"):
         _fetch_satellite("gkey", 57.0, 14.0)
     assert scanner._google_exhausted.is_set()
 
 
 def test_breaker_skips_google_on_subsequent_calls():
-    """När breakern är satt ska Google INTE anropas igen — direkt till LM WMS."""
+    """När breakern är satt ska Google INTE anropas igen — direkt till Mapbox."""
     scanner._google_exhausted.set()
     google_mock = MagicMock()
-    with patch("scanner._fetch_google_static", google_mock), \
-         patch("scanner._fetch_lm_wms", return_value=b"lm_image"):
-        img = _fetch_satellite("gkey", 57.0, 14.0)
-    assert img == b"lm_image"
+    with patch("scanner._fetch_lm_wms", return_value=None), \
+         patch("scanner._fetch_google_static", google_mock), \
+         patch("scanner._fetch_mapbox", return_value=b"mapbox_image"):
+        img = _fetch_satellite("gkey", 57.0, 14.0, mapbox_key="mbkey")
+    assert img == b"mapbox_image"
     google_mock.assert_not_called()
 
 
@@ -66,10 +68,19 @@ def test_reset_clears_breaker():
     assert not scanner._google_exhausted.is_set()
 
 
-def test_healthy_google_still_primary():
-    """Utan kvotfel ska Google fortfarande vara primärkälla (ingen regression)."""
-    with patch("scanner._fetch_google_static", return_value=b"google_image"), \
-         patch("scanner._fetch_lm_wms", return_value=b"lm_image") as lm_mock:
+def test_lm_minkarta_is_primary():
+    """LM minkarta ska vara primärkälla — gratis, ingen nyckel, samma 0.16m/px."""
+    google_mock = MagicMock()
+    with patch("scanner._fetch_lm_wms", return_value=b"lm_image"), \
+         patch("scanner._fetch_google_static", google_mock):
+        img = _fetch_satellite("gkey", 57.0, 14.0)
+    assert img == b"lm_image"
+    google_mock.assert_not_called()
+
+
+def test_google_fallback_when_lm_fails():
+    """Om LM minkarta misslyckas ska Google användas som fallback."""
+    with patch("scanner._fetch_lm_wms", return_value=None), \
+         patch("scanner._fetch_google_static", return_value=b"google_image"):
         img = _fetch_satellite("gkey", 57.0, 14.0)
     assert img == b"google_image"
-    lm_mock.assert_not_called()
