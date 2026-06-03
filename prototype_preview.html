@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Solar Scout — UI Prototype</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0e1117; color: #e2e8f0; }
+
+  .top-bar {
+    background: #1a1a2e; border-bottom: 1px solid #2d3748;
+    padding: 12px 24px; display: flex; align-items: center; gap: 16px;
+  }
+  .top-bar h1 { font-size: 16px; color: #ffd700; }
+  .top-bar span { font-size: 11px; color: #718096; background: #2d3748; padding: 2px 8px; border-radius: 4px; }
+
+  .switcher {
+    background: #161b22; border-bottom: 2px solid #21262d;
+    padding: 12px 24px; display: flex; gap: 8px;
+  }
+  .switch-btn {
+    padding: 8px 16px; border-radius: 6px; cursor: pointer; border: 1px solid #30363d;
+    font-size: 13px; background: #21262d; color: #8b949e; transition: all .2s;
+  }
+  .switch-btn.active { background: #1f6feb; color: #fff; border-color: #1f6feb; }
+
+  .variant { display: none; }
+  .variant.active { display: flex; flex-direction: column; height: calc(100vh - 100px); }
+
+  /* ── TABS ── */
+  .tabs { display: flex; background: #161b22; border-bottom: 1px solid #30363d; padding: 0 16px; }
+  .tab {
+    padding: 10px 18px; font-size: 13px; color: #8b949e; cursor: pointer;
+    border-bottom: 2px solid transparent; transition: all .2s;
+  }
+  .tab.active { color: #e2e8f0; border-bottom-color: #1f6feb; }
+
+  /* ── LAYOUTS ── */
+  .layout-split { display: flex; flex: 1; overflow: hidden; }
+  .sidebar { width: 280px; min-width: 280px; background: #161b22; border-right: 1px solid #30363d; padding: 16px; overflow-y: auto; }
+  .main-area { flex: 1; position: relative; overflow: hidden; }
+
+  /* ── MAP ── */
+  .map-bg {
+    width: 100%; height: 100%;
+    background: linear-gradient(135deg, #1a2a1a 0%, #0d1f0d 40%, #1a2a1a 100%);
+    position: relative; overflow: hidden;
+  }
+  .map-grid {
+    position: absolute; inset: 0;
+    background-image:
+      linear-gradient(rgba(34,197,94,.06) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(34,197,94,.06) 1px, transparent 1px);
+    background-size: 40px 40px;
+  }
+  .map-label { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); text-align: center; }
+  .map-label .city { font-size: 22px; font-weight: 700; color: rgba(255,255,255,.15); letter-spacing: 2px; }
+  .map-label .sub { font-size: 12px; color: rgba(255,255,255,.08); margin-top: 4px; }
+
+  /* Lead pins */
+  .pin {
+    position: absolute; width: 14px; height: 14px; border-radius: 50%;
+    border: 2px solid rgba(255,255,255,.3); cursor: pointer;
+    transition: transform .15s;
+  }
+  .pin:hover { transform: scale(1.6); z-index: 10; }
+  .pin.green  { background: #22c55e; }
+  .pin.orange { background: #f97316; }
+  .pin.blue   { background: #3b82f6; }
+  .pin.gray   { background: #6b7280; }
+
+  .draw-box {
+    position: absolute; border: 2px dashed #3b82f6; background: rgba(59,130,246,.08);
+    border-radius: 4px; pointer-events: none;
+  }
+
+  /* ── COMPONENTS ── */
+  .input {
+    width: 100%; padding: 8px 10px; background: #0d1117; border: 1px solid #30363d;
+    border-radius: 6px; color: #e2e8f0; font-size: 13px; margin-bottom: 10px;
+  }
+  .btn {
+    width: 100%; padding: 9px; border: none; border-radius: 6px; font-size: 13px;
+    cursor: pointer; font-weight: 600; margin-bottom: 10px;
+  }
+  .btn-primary { background: #1f6feb; color: #fff; }
+  .btn-secondary { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; }
+
+  .metric { background: #21262d; border-radius: 6px; padding: 10px 12px; margin-bottom: 10px; }
+  .metric .val { font-size: 22px; font-weight: 700; color: #22c55e; }
+  .metric .lbl { font-size: 11px; color: #6b7280; margin-top: 2px; }
+
+  .expander {
+    border: 1px solid #30363d; border-radius: 6px; margin-bottom: 10px; overflow: hidden;
+  }
+  .expander-head {
+    padding: 8px 12px; font-size: 12px; color: #8b949e; cursor: pointer;
+    background: #21262d; display: flex; justify-content: space-between;
+  }
+  .expander-body { padding: 10px 12px; display: none; }
+  .expander.open .expander-body { display: block; }
+
+  /* Lead row */
+  .lead-row {
+    display: flex; gap: 10px; padding: 10px; border-bottom: 1px solid #21262d;
+    align-items: flex-start; cursor: pointer; transition: background .15s;
+  }
+  .lead-row:hover { background: #1c2128; }
+  .thumb { width: 52px; height: 52px; border-radius: 5px; object-fit: cover; flex-shrink: 0; }
+  .lead-info { flex: 1; min-width: 0; }
+  .lead-addr { font-size: 12px; font-weight: 600; color: #e2e8f0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .lead-status { font-size: 11px; margin-top: 2px; }
+  .status-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 4px; }
+  .status-gray   { background: #6b7280; }
+  .status-orange { background: #f97316; }
+  .status-green  { background: #22c55e; }
+
+  select.mini {
+    font-size: 11px; padding: 3px 6px; background: #21262d; border: 1px solid #30363d;
+    border-radius: 4px; color: #c9d1d9; width: 100%; margin-top: 4px;
+  }
+  .note-input {
+    font-size: 11px; padding: 3px 6px; background: #0d1117; border: 1px solid #30363d;
+    border-radius: 4px; color: #8b949e; width: 100%; margin-top: 3px;
+  }
+
+  .section-title { font-size: 11px; font-weight: 700; color: #8b949e; letter-spacing: .05em; text-transform: uppercase; margin-bottom: 10px; }
+
+  .filter-row { display: flex; gap: 8px; padding: 10px 12px; background: #161b22; border-bottom: 1px solid #30363d; }
+  .filter-row select { flex: 1; padding: 6px 8px; background: #21262d; border: 1px solid #30363d; border-radius: 5px; color: #c9d1d9; font-size: 12px; }
+
+  .leads-panel { flex: 1; overflow-y: auto; }
+
+  .badge { display: inline-block; padding: 1px 6px; border-radius: 10px; font-size: 10px; font-weight: 600; }
+  .badge-gray   { background: #374151; color: #9ca3af; }
+  .badge-orange { background: #431407; color: #f97316; }
+  .badge-green  { background: #052e16; color: #22c55e; }
+  .badge-blue   { background: #1e3a5f; color: #60a5fa; }
+
+  .variant-label {
+    background: #0d1117; border-bottom: 1px solid #21262d;
+    padding: 6px 16px; font-size: 11px; color: #6b7280;
+  }
+  .variant-label strong { color: #e2e8f0; }
+
+  .panel-section { padding: 14px; }
+  .panel-section + .panel-section { border-top: 1px solid #21262d; }
+</style>
+</head>
+<body>
+
+<div class="top-bar">
+  <h1>☀️ Solar Scout — UI Prototype</h1>
+  <span>THROWAWAY — delete after design decision</span>
+</div>
+
+<div class="switcher">
+  <button class="switch-btn active" onclick="show('a')">A — Status quo (5 flikar)</button>
+  <button class="switch-btn"        onclick="show('b')">B — Konsoliderad (4 flikar) ⭐</button>
+  <button class="switch-btn"        onclick="show('c')">C — Karta-först (sidebar)</button>
+</div>
+
+<!-- ══════════════════════════════════════════════════════
+     VARIANT A — Status quo
+     ══════════════════════════════════════════════════════ -->
+<div id="v-a" class="variant active">
+  <div class="variant-label"><strong>A — Nuläge.</strong> 5 flikar. "Scouta Tak" är en hel flik för en sökruta. Karta inbäddad i Scanner-fliken.</div>
+  <div class="tabs">
+    <div class="tab active">🔍 AI Scanner</div>
+    <div class="tab">🏠 Scouta Tak</div>
+    <div class="tab">📋 Leads</div>
+    <div class="tab">🔎 Granska</div>
+    <div class="tab">⚙ Konto</div>
+  </div>
+  <div class="layout-split">
+    <div class="sidebar">
+      <div class="section-title">AI Scanner</div>
+      <input class="input" placeholder="Stad / kommun" value="Nässjö">
+      <button class="btn btn-primary">🚀 Starta scan</button>
+      <div class="metric"><div class="val">5</div><div class="lbl">Leads hittade</div></div>
+      <div class="metric"><div class="val">~4 kr</div><div class="lbl">Uppskattad kostnad</div></div>
+    </div>
+    <div class="main-area">
+      <div class="map-bg">
+        <div class="map-grid"></div>
+        <div class="map-label"><div class="city">NÄSSJÖ</div><div class="sub">Klicka Rita för att markera område</div></div>
+        <div class="draw-box" style="left:30%;top:25%;width:35%;height:40%"></div>
+        <div class="pin green"  style="left:52%;top:40%"></div>
+        <div class="pin orange" style="left:58%;top:52%"></div>
+        <div class="pin green"  style="left:44%;top:48%"></div>
+        <div class="pin gray"   style="left:61%;top:35%"></div>
+        <div class="pin blue"   style="left:48%;top:58%"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════
+     VARIANT B — Konsoliderad (recommended)
+     ══════════════════════════════════════════════════════ -->
+<div id="v-b" class="variant">
+  <div class="variant-label"><strong>B — Rekommenderad.</strong> "Scouta Tak" borttaget som flik → expander i Scanner. 4 flikar. Leads-panel med filter.</div>
+  <div class="tabs">
+    <div class="tab active">🔍 Scanner</div>
+    <div class="tab">📋 Leads (David)</div>
+    <div class="tab">🔎 Granska</div>
+    <div class="tab">⚙ Konto</div>
+  </div>
+  <div class="layout-split">
+    <div class="sidebar">
+      <div class="section-title">Scan</div>
+      <input class="input" placeholder="Stad / område" value="Nässjö">
+      <button class="btn btn-primary">🚀 Starta scan</button>
+      <div class="expander" onclick="this.classList.toggle('open')">
+        <div class="expander-head">🏠 Scouta enskild adress <span>▸</span></div>
+        <div class="expander-body">
+          <input class="input" placeholder="Storgatan 4, Nässjö">
+          <button class="btn btn-secondary">Sök</button>
+        </div>
+      </div>
+      <div class="metric"><div class="val">5</div><div class="lbl">Leads denna scan</div></div>
+      <div class="metric"><div class="val">~4 kr</div><div class="lbl">Uppskattad kostnad</div></div>
+    </div>
+    <div class="main-area">
+      <div class="map-bg">
+        <div class="map-grid"></div>
+        <div class="map-label"><div class="city">NÄSSJÖ</div><div class="sub">Rita rektangel eller polygon</div></div>
+        <div class="draw-box" style="left:28%;top:22%;width:38%;height:44%"></div>
+        <div class="pin green"  style="left:52%;top:40%"></div>
+        <div class="pin orange" style="left:58%;top:52%"></div>
+        <div class="pin green"  style="left:44%;top:48%"></div>
+        <div class="pin gray"   style="left:61%;top:35%"></div>
+        <div class="pin blue"   style="left:48%;top:58%"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════
+     VARIANT C — Karta-först
+     ══════════════════════════════════════════════════════ -->
+<div id="v-c" class="variant">
+  <div class="variant-label"><strong>C — Karta-först.</strong> Karta 70% av skärmen. Allt annat i vänsterpanel. Aurora Solar-stil.</div>
+  <div class="layout-split" style="height:calc(100vh - 100px)">
+
+    <!-- Left sidebar -->
+    <div class="sidebar" style="width:320px;min-width:320px;overflow-y:auto;display:flex;flex-direction:column;gap:0;padding:0">
+      <div class="panel-section">
+        <div style="font-size:15px;font-weight:700;color:#ffd700;margin-bottom:12px">☀️ Solar Scout</div>
+        <div style="display:flex;gap:6px;margin-bottom:14px">
+          <button class="btn btn-primary" style="width:auto;flex:1;margin:0;font-size:12px">Scan</button>
+          <button class="btn btn-secondary" style="width:auto;flex:1;margin:0;font-size:12px">Leads</button>
+          <button class="btn btn-secondary" style="width:auto;flex:1;margin:0;font-size:12px">Granska</button>
+        </div>
+        <input class="input" placeholder="Stad / område" value="Nässjö">
+        <button class="btn btn-primary">🚀 Starta scan</button>
+        <div class="expander" onclick="this.classList.toggle('open')">
+          <div class="expander-head">🏠 Enskild adress <span>▸</span></div>
+          <div class="expander-body">
+            <input class="input" placeholder="Storgatan 4…">
+            <button class="btn btn-secondary">Sök</button>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <div class="metric" style="flex:1"><div class="val">5</div><div class="lbl">Leads</div></div>
+          <div class="metric" style="flex:1"><div class="val">4 kr</div><div class="lbl">Kostnad</div></div>
+        </div>
+      </div>
+
+      <div style="padding:8px 14px;background:#0d1117;border-top:1px solid #21262d;border-bottom:1px solid #21262d">
+        <div class="filter-row" style="padding:0;gap:6px">
+          <select style="flex:1;padding:5px;background:#21262d;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;font-size:11px">
+            <option>Alla städer</option><option selected>Nässjö</option><option>Eksjö</option>
+          </select>
+          <select style="flex:1;padding:5px;background:#21262d;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;font-size:11px">
+            <option selected>Alla status</option><option>Ej kontaktad</option><option>Kontaktad</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="leads-panel">
+        <div class="lead-row">
+          <img class="thumb" src="https://placehold.co/52x52/2d6a4f/22c55e?text=☀" alt="">
+          <div class="lead-info">
+            <div class="lead-addr">Storgatan 4, Nässjö</div>
+            <div class="lead-status"><span class="status-dot status-gray"></span><span class="badge badge-gray">Ej kontaktad</span></div>
+            <select class="mini"><option selected>Ej kontaktad</option><option>Kontaktad</option><option>Möte bokat</option></select>
+            <input class="note-input" placeholder="Snabbnotering…">
+          </div>
+        </div>
+        <div class="lead-row">
+          <img class="thumb" src="https://placehold.co/52x52/431407/f97316?text=☀" alt="">
+          <div class="lead-info">
+            <div class="lead-addr">Björkvägen 12, Nässjö</div>
+            <div class="lead-status"><span class="status-dot status-orange"></span><span class="badge badge-orange">Kontaktad</span></div>
+            <select class="mini"><option>Ej kontaktad</option><option selected>Kontaktad</option><option>Möte bokat</option></select>
+            <input class="note-input" placeholder="Ring på fm" value="Ring på fm">
+          </div>
+        </div>
+        <div class="lead-row">
+          <img class="thumb" src="https://placehold.co/52x52/052e16/22c55e?text=☀" alt="">
+          <div class="lead-info">
+            <div class="lead-addr">Tallstigen 8, Nässjö</div>
+            <div class="lead-status"><span class="status-dot status-green"></span><span class="badge badge-green">Möte bokat</span></div>
+            <select class="mini"><option>Ej kontaktad</option><option>Kontaktad</option><option selected>Möte bokat</option></select>
+            <input class="note-input" placeholder="Snabbnotering…">
+          </div>
+        </div>
+        <div class="lead-row">
+          <img class="thumb" src="https://placehold.co/52x52/2d6a4f/22c55e?text=☀" alt="">
+          <div class="lead-info">
+            <div class="lead-addr">Ekvägen 3, Eksjö</div>
+            <div class="lead-status"><span class="status-dot status-gray"></span><span class="badge badge-gray">Ej kontaktad</span></div>
+            <select class="mini"><option selected>Ej kontaktad</option><option>Kontaktad</option></select>
+            <input class="note-input" placeholder="Snabbnotering…">
+          </div>
+        </div>
+        <div class="lead-row">
+          <img class="thumb" src="https://placehold.co/52x52/2d6a4f/22c55e?text=☀" alt="">
+          <div class="lead-info">
+            <div class="lead-addr">Granvägen 17, Vetlanda</div>
+            <div class="lead-status"><span class="status-dot status-gray"></span><span class="badge badge-gray">Ej kontaktad</span></div>
+            <select class="mini"><option selected>Ej kontaktad</option><option>Kontaktad</option></select>
+            <input class="note-input" placeholder="Snabbnotering…">
+          </div>
+        </div>
+      </div>
+
+      <div style="padding:10px 14px;border-top:1px solid #21262d;background:#161b22">
+        <button class="btn btn-secondary" style="margin:0;font-size:12px">📥 Exportera Excel</button>
+      </div>
+    </div>
+
+    <!-- Map -->
+    <div class="main-area">
+      <div class="map-bg" style="height:100%">
+        <div class="map-grid"></div>
+        <div class="map-label"><div class="city">NÄSSJÖ</div><div class="sub">Rita område för scan · Klicka pin för detaljer</div></div>
+        <div class="draw-box" style="left:32%;top:20%;width:42%;height:48%"></div>
+        <div class="pin green"  style="left:55%;top:42%" title="Storgatan 4"></div>
+        <div class="pin orange" style="left:62%;top:55%" title="Björkvägen 12"></div>
+        <div class="pin blue"   style="left:47%;top:50%" title="Tallstigen 8 — Möte bokat"></div>
+        <div class="pin gray"   style="left:65%;top:36%"></div>
+        <div class="pin gray"   style="left:50%;top:62%"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function show(id) {
+  document.querySelectorAll('.variant').forEach(v => v.classList.remove('active'));
+  document.querySelectorAll('.switch-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('v-' + id).classList.add('active');
+  event.target.classList.add('active');
+}
+</script>
+</body>
+</html>
