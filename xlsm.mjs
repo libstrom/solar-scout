@@ -235,7 +235,7 @@ export async function extractXlsmFields(filePath) {
   if (sheetEntries.length === 0) return null;
 
   // 3. Sort: certifikat / indata first; merge all cells
-  const PRIO = ['certifikat', 'indata', 'rapport', 'deklaration', 'data'];
+  const PRIO = ['inmatning', 'certifikat', 'indata', 'rapport', 'deklaration', 'data'];
   sheetEntries.sort((a, b) => {
     const pa = PRIO.findIndex(p => a.name.includes(p));
     const pb = PRIO.findIndex(p => b.name.includes(p));
