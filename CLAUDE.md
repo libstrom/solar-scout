@@ -158,9 +158,25 @@ Kolumner som koden skriver/läser: `id`, `user_id`, `lat`, `lng`, `address`, `co
 | Variabel | Syfte |
 |----------|-------|
 | `SUPABASE_URL` + `SUPABASE_ANON_KEY` | DB & auth |
-| `ANTHROPIC_API_KEY` eller `SOLAR_SCOUT_ANTHROPIC_KEY` | Claude Vision |
+| `SOLAR_SCOUT_ANTHROPIC_KEY` (primär) / `ANTHROPIC_API_KEY` (fallback) | Claude Vision |
 | `GOOGLE_API_KEY` | Geocoding (obligatorisk) + Static Maps (fallback) |
 | `LANTMATERIET_KEY` | `consumer_key:consumer_secret` (valfri, faller tillbaka på Google) |
 | `MAPBOX_TOKEN` | Kartvy i UI (valfri) |
 | `STRIPE_SECRET_KEY` + `STRIPE_PRICE_*` | Betalning |
 | `RESEND_API_KEY` | Mail vid mötesbokningar + kvotalarm |
+
+`app.py` läser `_secret("SOLAR_SCOUT_ANTHROPIC_KEY") or _secret("ANTHROPIC_API_KEY")`.
+Använd alltid den prefixade varianten lokalt — Claude Code CLI plockar annars upp
+`ANTHROPIC_API_KEY` och växlar sin egen billing från OAuth-prenumeration till
+API-credits utan varning (en `source .env` kan börja kosta pengar nästa gång
+`claude` startas).
+
+### Bring your own key (per kund/grupp)
+
+solar-scout är den tyngsta Anthropic-förbrukaren (Opus 4.8 Vision per byggnad).
+Vill man hålla isär förbrukning per kund (t.ex. Keyto gruppen) kör man en egen
+deploy per kund och sätter kundens egen nyckel i `SOLAR_SCOUT_ANTHROPIC_KEY` för
+den deployen — då hamnar varje kunds scan-kostnad i deras egen Anthropic-billing,
+skild från din. Det är bara värt att be en extern part om en nyckel om de ska
+äga eller stå för driftkostnaden av en sådan instans; en ren demo-mottagare
+behöver ingen nyckel.
