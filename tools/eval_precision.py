@@ -69,7 +69,7 @@ def _fetch_labeled_leads(sb_url: str, sb_key: str, limit: int) -> list[EvalRow]:
 
     rows = (
         sb.table("scout_leads")
-        .select("id,user_id,lat,lng,address,image_url,ai_reasoning,user_confirmed,false_positive")
+        .select("id,user_id,lat,lng,address,image_url,confirmed_image_url,ai_reasoning,user_confirmed,false_positive")
         .eq("source", "ai")
         .or_("user_confirmed.not.is.null,false_positive.not.is.null")
         .order("created_at", desc=True)
@@ -94,7 +94,7 @@ def _fetch_labeled_leads(sb_url: str, sb_key: str, limit: int) -> list[EvalRow]:
         else:
             continue  # ambiguous, skip
 
-        image_url = r.get("image_url") or ""
+        image_url = r.get("confirmed_image_url") or r.get("image_url") or ""
         if not image_url:
             continue  # can't evaluate without image
 
@@ -146,9 +146,6 @@ def _run_classifier(rows: list[EvalRow], anthropic_key: str) -> None:
     done = 0
     for row in rows:
         if row.img_bytes is None:
-            row.prefilter_pass = False
-            row.ai_solar = False
-            row.ai_unsure = False
             continue
 
         try:
@@ -166,8 +163,7 @@ def _run_classifier(rows: list[EvalRow], anthropic_key: str) -> None:
                 row.ai_reasoning_new = reasoning
         except Exception as e:
             print(f"  WARN: classifier error for {row.id}: {e}")
-            row.ai_solar = False
-            row.ai_unsure = False
+            continue
 
         done += 1
         if done % 5 == 0 or done == total:

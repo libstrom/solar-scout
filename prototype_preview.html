@@ -113,9 +113,9 @@
 </div>
 
 <div class="nav-tabs">
-  <div class="nav-tab active" onclick="showPage('scanner')">🔍 Scanner (Variant B)</div>
-  <div class="nav-tab" onclick="showPage('leads')">📋 Leads (David)</div>
-  <div class="nav-tab" onclick="showPage('competitors')">🌍 Konkurrenter &amp; Best practice</div>
+  <div class="nav-tab active" onclick="showPage('scanner', this)">🔍 Scanner (Variant B)</div>
+  <div class="nav-tab" onclick="showPage('leads', this)">📋 Leads (David)</div>
+  <div class="nav-tab" onclick="showPage('competitors', this)">🌍 Konkurrenter &amp; Best practice</div>
 </div>
 
 <!-- ══════════════════════════════════════════════════
@@ -367,11 +367,11 @@ LEADS.forEach(l => {
 });
 
 // ── Page switching ────────────────────────────────────────────────────────────
-function showPage(id) {
+function showPage(id, el) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
   document.getElementById('page-'+id).classList.add('active');
-  event.target.classList.add('active');
+  if (el) el.classList.add('active');
   if (id==='scanner') setTimeout(()=>map.invalidateSize(),50);
 }
 </script>

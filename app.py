@@ -1985,7 +1985,7 @@ def _leads_html_with_thumbs(df_full: "pd.DataFrame") -> None:
                 f' onmousemove="{_js_move}"'
                 f' onmouseleave="{_js_leave}">'
                 + inline_img
-                + f'</span>'
+                + '</span>'
             )
         else:
             thumb_cell = '<span style="color:#aaa">–</span>'
