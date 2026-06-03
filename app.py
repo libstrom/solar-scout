@@ -2117,8 +2117,7 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
 
     # Tillämpa stad-filter
     if _city_filter != "Alla städer" and not df.empty:
-        _city_mask = df.apply(lambda r: _extract_city(r) == _city_filter, axis=1)
-        df = df[_city_mask]
+        df = df[_cities_raw[df.index] == _city_filter]
 
     # Tillämpa sortering
     if not df.empty:
@@ -2127,10 +2126,10 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
         elif _sort_by == "Äldst först" and "created_at" in df.columns:
             df = df.sort_values("created_at", ascending=True)
         elif _sort_by == "Stad A–Ö":
-            _sort_keys = df.apply(_extract_city, axis=1)
+            _sort_keys = _cities_raw[df.index]
             df = df.iloc[_sort_keys.argsort().values]
         elif _sort_by == "Stad Ö–A":
-            _sort_keys = df.apply(_extract_city, axis=1)
+            _sort_keys = _cities_raw[df.index]
             df = df.iloc[_sort_keys.argsort().values[::-1]]
 
     df_reset = df.reset_index(drop=True)

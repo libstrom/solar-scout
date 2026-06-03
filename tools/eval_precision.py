@@ -12,6 +12,7 @@ import argparse
 import base64
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -113,16 +114,21 @@ def _fetch_labeled_leads(sb_url: str, sb_key: str, limit: int) -> list[EvalRow]:
 
 def _download_images(rows: list[EvalRow]) -> None:
     """Download image bytes for each row in-place, skipping failures."""
-    with httpx.Client(timeout=15) as client:
-        for row in rows:
-            try:
+    def _fetch(row: EvalRow) -> None:
+        try:
+            with httpx.Client(timeout=15) as client:
                 resp = client.get(row.image_url)
                 if resp.status_code == 200 and resp.content:
                     row.img_bytes = resp.content
                 else:
                     print(f"  WARN: image {row.id} HTTP {resp.status_code} — skipping")
-            except Exception as e:
-                print(f"  WARN: image {row.id} download failed: {e} — skipping")
+        except Exception as e:
+            print(f"  WARN: image {row.id} download failed: {e} — skipping")
+
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = {pool.submit(_fetch, row): row for row in rows}
+        for fut in as_completed(futures):
+            fut.result()
 
 
 def _run_classifier(rows: list[EvalRow], anthropic_key: str) -> None:
@@ -249,7 +255,7 @@ CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS few_shot_examples (
     id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id      text,
-    tile_key     text,
+    tile_key     text NOT NULL UNIQUE,
     image_b64    text NOT NULL,
     verdict      text NOT NULL,
     created_at   timestamptz DEFAULT now()
