@@ -1970,23 +1970,32 @@ def _leads_html_with_thumbs(df_full: "pd.DataFrame") -> None:
                 )
             except Exception:
                 maps_href = img_url
+            safe_maps_href = _html.escape(maps_href, quote=True)
+            # Inline 96×96 thumbnail — always visible, lazy loaded
+            inline_img = (
+                f'<a href="{safe_maps_href}" target="_blank" rel="noopener noreferrer"'
+                f' title="Öppna i Google Maps satellit">'
+                f'<img src="{safe_img_url}" loading="lazy"'
+                f' style="max-width:96px;width:96px;height:96px;object-fit:cover;'
+                f'border-radius:4px;display:block" /></a>'
+            )
             thumb_cell = (
                 f'<span class="lth" data-src="{safe_img_url}"'
                 f' onmouseenter="{_js_enter}"'
                 f' onmousemove="{_js_move}"'
                 f' onmouseleave="{_js_leave}">'
-                f'<a href="{_html.escape(maps_href, quote=True)}" target="_blank" rel="noopener noreferrer"'
-                f' title="Öppna i Google Maps satellit"'
-                f' style="font-size:15px;text-decoration:none;cursor:pointer">🛰</a>'
-                f'</span>'
+                + inline_img
+                + f'</span>'
             )
         else:
             thumb_cell = '<span style="color:#aaa">–</span>'
 
         rows_html.append(
-            f"<tr><td class='la'>{addr}</td>"
+            f"<tr>"
+            f"<td class='li'>{thumb_cell}</td>"
+            f"<td class='la'>{addr}</td>"
             f"<td class='lc'>{solar_icon}</td>"
-            f"<td class='lc'>{thumb_cell}</td></tr>"
+            f"</tr>"
         )
 
     # Floating preview div — one instance, reused for all rows
@@ -2005,20 +2014,21 @@ def _leads_html_with_thumbs(df_full: "pd.DataFrame") -> None:
         ".lt-t th{background:#f0f2f6;padding:7px 12px;text-align:left;border-bottom:2px solid #d1d5db}"
         ".lt-t td{padding:5px 12px;border-bottom:1px solid #e5e7eb;vertical-align:middle}"
         ".lt-t td.lc{text-align:center;width:56px}"
-        ".lt-t td.la{max-width:320px;word-break:break-word}"
+        ".lt-t td.li{width:108px;padding:4px 6px;vertical-align:middle}"
+        ".lt-t td.la{max-width:280px;word-break:break-word}"
         ".lth{display:inline-block;cursor:pointer}"
         "</style>"
         '<div style="overflow-x:auto">'
         '<table class="lt-t"><thead><tr>'
+        "<th style='width:108px'>Tak</th>"
         "<th>Adress</th>"
         "<th style='text-align:center'>Sol</th>"
-        "<th style='text-align:center' title='Hovra 🛰 för takbild'>Tak 🛰</th>"
         "</tr></thead>"
         f"<tbody>{''.join(rows_html)}</tbody>"
         "</table></div>"
     )
     st.markdown(html, unsafe_allow_html=True)
-    st.caption("Hovra 🛰 för takbild — klicka för att öppna i ny flik")
+    st.caption("Klicka på takbilden för att öppna i Google Maps satellit — hovra för förstoring")
 
 
 def page_leads(user):  # noqa: keep user param for confirm_lead calls
@@ -2063,9 +2073,69 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
         except Exception:
             return "–"
 
+    # ── Sortering och filter ───────────────────────────────────────────────────
+    _sort_col, _city_col, _status_col = st.columns([2, 2, 2])
+
+    _sort_options = ["Nyast först", "Äldst först", "Stad A–Ö", "Stad Ö–A"]
+    _sort_by = _sort_col.selectbox("Sortera efter", _sort_options, key="leads_sort")
+
+    def _extract_city(row) -> str:
+        src = str(row.get("scan_source") or "").strip()
+        if src and src not in {"ai", "osm", "manual"}:
+            return src.capitalize()
+        addr = str(row.get("address") or "")
+        parts = [p.strip() for p in addr.split(",")]
+        return parts[-1] if parts else ""
+
+    if not df.empty:
+        _cities_raw = df.apply(_extract_city, axis=1)
+        _unique_cities = sorted({c for c in _cities_raw if c})
+    else:
+        _unique_cities = []
+
+    _city_options = ["Alla städer"] + _unique_cities
+    _city_filter = _city_col.selectbox("Stad", _city_options, key="leads_city")
+
+    _status_display = {
+        "Alla": "Alla",
+        "ej_kontaktad": "Ej kontaktad",
+        "kontaktad": "Kontaktad",
+        "mote_bokat": "Möte bokat",
+        "kund": "Kund",
+        "ej_intresserad": "Ej intresserad",
+    }
+    _status_filter = _status_col.selectbox(
+        "Status",
+        list(_status_display.keys()),
+        format_func=lambda k: _status_display[k],
+        key="leads_status_filter",
+    )
+
+    # Tillämpa status-filter
+    if _status_filter != "Alla" and "status" in df.columns:
+        df = df[df["status"].fillna("ej_kontaktad") == _status_filter]
+
+    # Tillämpa stad-filter
+    if _city_filter != "Alla städer" and not df.empty:
+        _city_mask = df.apply(lambda r: _extract_city(r) == _city_filter, axis=1)
+        df = df[_city_mask]
+
+    # Tillämpa sortering
+    if not df.empty:
+        if _sort_by == "Nyast först" and "created_at" in df.columns:
+            df = df.sort_values("created_at", ascending=False)
+        elif _sort_by == "Äldst först" and "created_at" in df.columns:
+            df = df.sort_values("created_at", ascending=True)
+        elif _sort_by == "Stad A–Ö":
+            _sort_keys = df.apply(_extract_city, axis=1)
+            df = df.iloc[_sort_keys.argsort().values]
+        elif _sort_by == "Stad Ö–A":
+            _sort_keys = df.apply(_extract_city, axis=1)
+            df = df.iloc[_sort_keys.argsort().values[::-1]]
+
     df_reset = df.reset_index(drop=True)
 
-    # ── Leads med hover-thumbnail ──────────────────────────────────────────────
+    # ── Leads med hover-thumbnail och inline-bild ──────────────────────────────
     _leads_html_with_thumbs(df_reset)
 
     # ── Markera felaktiga leads (FP-editor) ────────────────────────────────────
@@ -2213,7 +2283,19 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
                         if c_row.get("maps_url"):
                             st.link_button("📍 Maps", c_row["maps_url"], use_container_width=True)
                     st.divider()
-                    col_s, col_fp = st.columns([2, 1])
+                    cur_note = c_row.get("david_note") or c_row.get("notes") or ""
+                    _note_key = f"note_{lid}"
+
+                    def _save_note_cb(_lid=lid, _note_key=_note_key) -> None:
+                        _new_val = st.session_state.get(_note_key, "")[:150]
+                        try:
+                            get_supabase().table("scout_leads").update(
+                                {"david_note": _new_val}
+                            ).eq("id", _lid).execute()
+                        except Exception as _ne:
+                            _log.error("david_note save failed lead_id=%s: %s", _lid, _ne)
+
+                    col_s, col_note, col_fp = st.columns([2, 3, 1])
                     with col_s:
                         cur_status = c_row.get("status") or "ej_kontaktad"
                         new_status = st.selectbox(
@@ -2224,7 +2306,18 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
                                   if cur_status in _LEAD_STATUSES else 0,
                             key=f"status_{lid}",
                         )
+                    with col_note:
+                        st.text_input(
+                            "Notering",
+                            value=cur_note,
+                            max_chars=150,
+                            placeholder="t.ex. intresserad av batteri, ringde ej svar...",
+                            key=_note_key,
+                            on_change=_save_note_cb,
+                            label_visibility="visible",
+                        )
                     with col_fp:
+                        st.write("")  # vertical alignment spacer
                         if st.button("❌ Inte solceller", key=f"fp_{lid}", use_container_width=True):
                             try:
                                 _sb.table("scout_leads").update({
@@ -2236,19 +2329,10 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
                                 pass
                             st.rerun()
 
-                    cur_note = c_row.get("david_note") or c_row.get("notes") or ""
-                    new_note = st.text_area(
-                        "Notering (synlig för Linus)",
-                        value=cur_note,
-                        placeholder="t.ex. grannhuset har sol, dåligt tak, intresserad av batteri...",
-                        key=f"note_{lid}",
-                        height=80,
-                    )
+                    new_note = st.session_state.get(_note_key, cur_note)
 
-                    if st.button("Spara", key=f"save_{lid}", type="primary"):
-                        update = {"status": new_status}
-                        if new_note != cur_note:
-                            update["david_note"] = new_note
+                    if st.button("Spara status", key=f"save_{lid}", type="primary"):
+                        update: dict = {"status": new_status}
                         try:
                             _sb.table("scout_leads").update(update).eq("id", lid).execute()
                         except Exception as _save_exc:
