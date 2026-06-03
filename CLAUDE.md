@@ -1,5 +1,24 @@
 # solar-scout
 
+## Arbetssätt — autonomt & målfokuserat
+
+**Håll alltid slutmålet i sikte.** Det aktuella slutmålet är:
+> Generera en poängsatt ringlista (leads.xlsx) med kontaktuppgifter för fastigheter med solpotential, baserad på energideklarationer (XLSM + PDF) matchade mot enspecta.tab.
+
+**Regler som gäller utan att fråga:**
+- Kör alltid parallella agenter för oberoende deluppgifter — minimera total väntetid.
+- Committa och pusha varje förändring direkt. Fråga aldrig om jag ska committa.
+- Vid oklarheter: välj det alternativ som snabbast för oss till leads.xlsx med maximal datakvalitet.
+- Rapportera alltid hur lång tid nästa steg tar och vad som väntar efter det — användaren ska alltid veta hur lång tid till resultat.
+- Behöver inget steg min godkännande om det är reversibelt (fil-edits, commits, test-körningar).
+- Steg som kräver bekräftelse: destruktiva git-operationer (force-push, reset --hard), externa API-anrop med kostnad, push till main.
+
+**Pipeline-status** (uppdatera när steg är klara):
+- [ ] extractEnergyPdf.py → pdf.json (kör på Windows)
+- [ ] batchXlsm.mjs → xlsm.json (kör på Windows)
+- [ ] mergeEnergy.py xlsm.json pdf.json → energy-data.json
+- [ ] makeLeads.py → leads.xlsx
+
 ## Modell & konfiguration
 
 Kör på **claude-opus-4-7** med adaptive thinking (konfigurerat i `.claude/settings.json`).
