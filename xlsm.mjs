@@ -127,16 +127,19 @@ function findValueByLabel(cells, labelRe) {
     const m = ref.match(/^([A-Z]+)(\d+)$/);
     if (!m) continue;
     const col = m[1], row = parseInt(m[2], 10);
-    // Try right (1..3 cols)
-    for (let d = 1; d <= 3; d++) {
+    // Try right (1..5 cols) — some merged-cell layouts skip columns
+    for (let d = 1; d <= 5; d++) {
       const cand = cells.get(nextColRef(col, d) + row);
       if (cand !== undefined && cand !== '' && (toNum(cand) !== 0 || typeof cand === 'string')) {
         return cand;
       }
     }
-    // Try below (same col)
+    // Try 1 row below (same col)
     const below = cells.get(col + (row + 1));
     if (below !== undefined && below !== '' && below !== 0) return below;
+    // Try 2 rows below (some Energivision layouts put value 2 rows below label)
+    const below2 = cells.get(col + (row + 2));
+    if (below2 !== undefined && below2 !== '' && below2 !== 0) return below2;
   }
   return null;
 }
@@ -221,9 +224,11 @@ export async function extractXlsmFields(filePath) {
     const str = (v) => (v != null && String(v).trim() !== '' ? String(v).trim() : null);
 
     const fastighetsbeteckning = str(
-      L(/^fastighetsbeteckning$/i) ??
+      L(/^fastighetsbeteckning:?$/i) ??
+      L(/^fastighetsbeteckning\s*\*+$/i) ??
       L(/beteckning\s*\(utan\s*kommun/i) ??
-      L(/^fastighet\s*beteckning/i)
+      L(/^fastighet\s*beteckning/i) ??
+      L(/^fastighetsbeteckning\b/i)
     );
 
     const adress = str(
@@ -390,6 +395,7 @@ export async function extractXlsmFields(filePath) {
     })();
 
     return {
+      source: 'xlsm',
       energideklarations_id,
       fastighetsbeteckning,
       adress,
