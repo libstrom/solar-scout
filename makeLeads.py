@@ -364,24 +364,27 @@ COLS = [
     ('Fastighetsbeteckning', 24),# 22
     ('Anteckningar',      35),   # 23
     ('CaseID',            12),   # 24
+    ('Energideklaration', 20),   # 25
 ]
 
 
 TOP_COLS = [
-    ('Score',       7),
-    ('Bar',        12),
-    ('Bucket',     20),
-    ('Namn',       26),
-    ('Telefon',    16),
-    ('Adress',     28),
-    ('Ort',        16),
-    ('Energiklass', 9),
-    ('Kontakttyp', 13),
-    ('Pitch-text', 60),
-    ('Anteckningar', 35),
+    ('Score',             7),
+    ('Bar',              12),
+    ('Bucket',           20),
+    ('Namn',             26),
+    ('Telefon',          16),
+    ('Adress',           28),
+    ('Ort',              16),
+    ('Energiklass',       9),
+    ('Besiktningsdatum', 14),
+    ('Kontakttyp',       13),
+    ('Pitch-text',       60),
+    ('Anteckningar',     35),
+    ('Energideklaration',20),
 ]
 # indices into main rows tuple matching TOP_COLS
-TOP_IDX = [0, None, 1, 5, 6, 8, 10, 13, 14, 18, 23]
+TOP_IDX = [0, None, 1, 5, 6, 8, 10, 13, 20, 14, 18, 23, 25]
 
 
 def _build_row(fastig, r, typ, int0, energy_index, token_index=None):
@@ -433,6 +436,7 @@ def _build_row(fastig, r, typ, int0, energy_index, token_index=None):
         tc(fastig),                                                  # 22 Fastighetsbeteckning
         '',                                                          # 23 Anteckningar
         r.get('case_id',''),                                         # 24 CaseID
+        (energy.get('source_file') or '') if energy else '',         # 25 Energideklaration
     ], energy is not None
 
 
@@ -729,6 +733,11 @@ def make_leads_sheet(wb, rows, title, banner_txt, hdr_hex, light_hex, table_name
                 c.alignment = _align_wrap
             elif ci == 20:  # Score-förklaring
                 c.font = _font_why
+            elif ci == 26:  # Energideklaration — hyperlänk om fil finns
+                if val:
+                    c.value = '📄 Öppna'
+                    c.hyperlink = val
+                    c.font = Fn(color='1565C0', underline='single', size=9)
 
         ws.row_dimensions[ri].height = 32 if hot else 20
 

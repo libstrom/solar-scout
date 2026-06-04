@@ -80,7 +80,7 @@ async function main() {
       if (existing && existing.deklaration_datum && data.deklaration_datum) {
         if (existing.deklaration_datum >= data.deklaration_datum) { ok++; continue; }
       }
-      index[key] = data;
+      index[key] = { ...data, source_file: f };
       ok++;
     } catch (e) {
       errors++;
