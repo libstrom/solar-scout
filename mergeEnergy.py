@@ -2,7 +2,12 @@
 """
 mergeEnergy.py — Slår ihop flera energy-JSON-filer till ett index.
 
-XLSM-data har företräde framför PDF-data (mer strukturerad).
+Fältvis merge: XLSM vinner per fält, PDF fyller luckor.
+Inga fält går förlorade — varje källa bidrar med det den är bäst på.
+
+XLSM är bäst på: adress, postnummer, ort, kommun, energi_per_kalla,
+                  uppvarmningssystem, atgardsforslag, energiklass (direkt ur cell)
+PDF är bäst på:  varav_el_kwh_m2, ibland deklaration_datum
 
 Usage:
   python mergeEnergy.py xlsm.json pdf.json [extra.json ...] energy-data.json
@@ -14,7 +19,41 @@ from pathlib import Path
 def norm(s: str) -> str:
     if not s:
         return ''
-    return str(s).lower().replace(r'\s+', ' ').strip()
+    return str(s).lower().strip()
+
+
+def is_empty(v) -> bool:
+    if v is None:
+        return True
+    if isinstance(v, str) and not v.strip():
+        return True
+    if isinstance(v, dict) and not any(v.values()):
+        return True
+    return False
+
+
+def merge_records(base: dict, overlay: dict) -> dict:
+    """overlay wins per field — but only if it has a non-empty value."""
+    result = dict(base)
+    for k, v in overlay.items():
+        if not is_empty(v):
+            result[k] = v
+    return result
+
+
+def priority_score(rec: dict) -> int:
+    score = 0
+    if rec.get('source') == 'xlsm':
+        score += 100
+    if not is_empty(rec.get('energiklass')):
+        score += 10
+    if not is_empty(rec.get('energi_per_kalla')):
+        score += 5
+    if not is_empty(rec.get('atgardsforslag')):
+        score += 3
+    if not is_empty(rec.get('adress')):
+        score += 2
+    return score
 
 
 def main():
@@ -25,32 +64,62 @@ def main():
 
     *inputs, output = args
 
-    # Load in order: last file wins unless later overridden by XLSM priority below.
-    # Strategy: PDF first, then XLSM merges on top (XLSM wins on conflict).
-    merged: dict = {}
-
+    all_data: list[dict] = []
     for path in inputs:
         p = Path(path)
         if not p.exists():
             print(f'Varning: {path} saknas — hoppar över')
             continue
         data = json.loads(p.read_text(encoding='utf-8'))
-        before = len(merged)
-        for key, val in data.items():
-            k = key.lower().strip()
-            if k not in merged:
-                merged[k] = val
-            else:
-                # XLSM source wins (has energiklass field from structured XML)
-                existing_has_ek = bool((merged[k].get('energiklass') or '').strip())
-                new_has_ek      = bool((val.get('energiklass') or '').strip())
-                if new_has_ek and not existing_has_ek:
-                    merged[k] = val   # replace PDF stub with XLSM record
-                # else keep existing (either both have it, or new lacks it)
-        print(f'{path}: {len(data)} poster  →  totalt {len(merged)} unika (+{len(merged)-before} nya)')
+        all_data.append(data)
+        print(f'{path}: {len(data)} poster')
 
-    Path(output).write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding='utf-8')
-    print(f'\nKlar: {len(merged)} fastigheter sparade till {output}')
+    if not all_data:
+        print('Inga filer laddades — avbryter')
+        sys.exit(1)
+
+    all_keys: set[str] = set()
+    for data in all_data:
+        for k in data:
+            all_keys.add(norm(k))
+
+    merged: dict[str, dict] = {}
+    for key in all_keys:
+        records = []
+        for data in all_data:
+            rec = data.get(key)
+            if rec:
+                records.append(rec)
+
+        if not records:
+            continue
+
+        records.sort(key=priority_score, reverse=True)
+
+        result = records[0]
+        for rec in records[1:]:
+            result = merge_records(rec, result)  # overlay=result (higher prio) wins
+
+        merged[key] = result
+
+    xlsm_count = sum(1 for r in merged.values() if r.get('source') == 'xlsm')
+    pdf_only   = sum(1 for r in merged.values() if r.get('source') != 'xlsm')
+    has_epk    = sum(1 for r in merged.values() if not is_empty(r.get('energi_per_kalla')))
+    has_adr    = sum(1 for r in merged.values() if not is_empty(r.get('adress')))
+    has_ek     = sum(1 for r in merged.values() if not is_empty(r.get('energiklass')))
+    has_atg    = sum(1 for r in merged.values() if not is_empty(r.get('atgardsforslag')))
+
+    Path(output).write_text(
+        json.dumps(merged, indent=2, ensure_ascii=False), encoding='utf-8'
+    )
+
+    print(f'\n=== Klar: {len(merged)} unika fastigheter → {output} ===')
+    print(f'  XLSM-poster (rik data):  {xlsm_count}')
+    print(f'  Bara PDF:                {pdf_only}')
+    print(f'  Har energiklass:         {has_ek}')
+    print(f'  Har energi_per_källa:    {has_epk}')
+    print(f'  Har adress:              {has_adr}')
+    print(f'  Har åtgärdsförslag:      {has_atg}')
 
 
 if __name__ == '__main__':
