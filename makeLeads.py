@@ -189,34 +189,47 @@ def score_color(score):
     return '555555'                    # grå
 
 
+def _is_dodsbo(namn: str) -> bool:
+    return bool(namn) and namn.split()[0].lower() == 'dödsbo'
+
+
 def pitch_text(namn, adress, ort, byggår_str, bucket_str, energy=None):
     """Färdig pitch-text för David att klistra in i mötesbok."""
     y = yr(byggår_str)
-    fornamn = namn.split()[0] if namn else 'du'
+    dodsbo  = _is_dodsbo(namn)
+    fornamn = namn.split()[0] if (namn and not dodsbo) else None
     har_sol = energy.get('har_solceller') if energy else False
     ek      = (energy.get('energiklass') or '').upper() if energy else ''
     epk     = (energy.get('energi_per_kalla') or {}) if energy else {}
     el_dir  = (epk.get('el_direkt') or 0) + (epk.get('el_vattenburen') or 0)
 
     if har_sol:
-        behov   = "du har redan solceller — nu är det rätt tid att lägga till batteri"
-        produkt = "batterilagring som gör att du kan spara och använda din egenproducerade el på kvällen"
+        behov   = "fastigheten har redan solceller — nu är det rätt tid att lägga till batteri"
+        produkt = "batterilagring som gör att ni kan spara och använda den egenproducerade elen på kvällen"
     elif ek in ('F', 'G'):
         behov   = f"fastigheten har energiklass {ek} — det finns stor besparingspotential"
-        produkt = "sol + batteri + möjlig VP — vi kan halvera er energikostnad"
+        produkt = "sol + batteri + möjlig VP — vi kan halvera energikostnaden"
     elif el_dir > 5000:
-        behov   = "huset värms med el — det är det dyraste uppvärmningssättet just nu"
-        produkt = "sol + batteri — du kan kapa elräkningen med upp till 70%"
+        behov   = "fastigheten värms med el — det är det dyraste uppvärmningssättet just nu"
+        produkt = "sol + batteri — ni kan kapa elräkningen med upp till 70%"
     elif y and y <= 1980:
         behov   = f"hus från {y}-talet har ofta höga elkostnader och stor potential"
-        produkt = "sol + batteri — du kan kapa elräkningen med upp till 70%"
+        produkt = "sol + batteri — ni kan kapa elräkningen med upp till 70%"
     elif y and y <= 1995:
         behov   = f"villaägare i {ort or 'ert område'} väljer allt oftare solceller"
-        produkt = "solceller med batteri — du lagrar överskottet och säljer resten"
+        produkt = "solceller med batteri — ni lagrar överskottet och säljer resten"
     else:
         behov   = "många väljer nu att komplettera med batteri för att maximera egenkonsumtion"
-        produkt = "batterilagring — perfekt om du redan har sol eller funderar på det"
+        produkt = "batterilagring — perfekt om ni redan har sol eller funderar på det"
 
+    if dodsbo:
+        return (
+            f"Hej! Jag heter [säljare] och ringer från Enspecta Ensolar. "
+            f"Jag söker den som förvaltar fastigheten på {adress or 'er adress'} i {ort or 'Sverige'}. "
+            f"Vi hjälper fastighetsägare att sänka sina energikostnader — {behov}. "
+            f"Vi erbjuder {produkt}. "
+            f"Får jag boka in ett kostnadsfritt hembesök så går vi igenom potentialen tillsammans?"
+        )
     return (
         f"Hej {fornamn}! Jag heter [säljare] och ringer från Enspecta Ensolar. "
         f"Vi hjälper villaägare i {ort or 'Sverige'} att sänka sina energikostnader — "
@@ -410,6 +423,7 @@ def _build_row(fastig, r, typ, int0, energy_index, token_index=None):
     bkt        = bucket(sc, bår, energy)
     pitch      = pitch_text(namn, adr_str, ort_str, bår, bkt, energy)
     ek_str     = (energy.get('energiklass') or '') if energy else ''
+    anteckn    = '⚠️ Dödsbo — fråga vem som förvaltar fastigheten' if _is_dodsbo(namn) else ''
     return [
         sc,                                                          # 0  Score
         bkt,                                                         # 1  Bucket
@@ -434,7 +448,7 @@ def _build_row(fastig, r, typ, int0, energy_index, token_index=None):
         besdat,                                                      # 20 Besiktningsdatum
         r.get('renovat',''),                                         # 21 Renoverat
         tc(fastig),                                                  # 22 Fastighetsbeteckning
-        '',                                                          # 23 Anteckningar
+        anteckn,                                                     # 23 Anteckningar
         r.get('case_id',''),                                         # 24 CaseID
         (energy.get('source_file') or '') if energy else '',         # 25 Energideklaration
     ], energy is not None
