@@ -15,8 +15,8 @@ Solar-scout har två parallella leadkällor som aldrig möts i koden just nu:
 | Visual scanner (app.py + scanner.py) | Fastigheter med sol (batteri-kandidater) | "Du har redan sol, lägg till batteri" | Supabase, Davids UI i appen |
 | Energideklarationer (makeLeads.py) | Fastigheter utan sol men med hög förbrukning/låg energiklass | "Installera sol, halvera elräkningen" | leads.xlsx, Excel-ringlista |
 
-Beslut: acceptera separata flöden kortsiktigt. På sikt importeras energi-leads
-till Supabase så David ser allt i ett ställe, men det är ett separat projekt.
+Öppen fråga: ska energy-leads på sikt in i Supabase/appen så David ser allt
+i ett ställe, eller är Excel-ringlistan en permanent separat kanal?
 
 ## Aktörer
 
