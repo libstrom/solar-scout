@@ -10,9 +10,12 @@ Tre klasser av filer hanteras:
               → provar lista med kandidatlösenord
 
 Usage:
-    python unlockXlsm.py scan <mapp>              # klassificera alla filer
-    python unlockXlsm.py unlock <mapp> <ut-mapp>  # patcha + dekryptera
-    python unlockXlsm.py unlock <fil.xlsm> <ut>   # enskild fil
+    python unlockXlsm.py scan <mapp>                       # klassificera alla filer
+    python unlockXlsm.py unlock <mapp> <ut-mapp>           # patcha + dekryptera
+    python unlockXlsm.py unlock <fil.xlsm> <ut>            # enskild fil
+    python unlockXlsm.py crack <mapp> <wordlist.txt>        # ordlisteattack på krypterade
+    python unlockXlsm.py crack <fil.xlsm> <wordlist.txt>   # enskild fil
+    python unlockXlsm.py john <mapp>                       # extrahera hashar → john/hashcat
 """
 
 import sys, os, io, zipfile, shutil, struct
@@ -30,15 +33,51 @@ CANDIDATE_PASSWORDS = [
     "Energivision",
     "ENERGIVISION",
     "energy",
+    "Energy",
     "1234",
     "12345",
+    "123456",
     "password",
+    "Password",
     "lösenord",
+    "Lösenord",
     "enspecta",
     "Enspecta",
+    "ENSPECTA",
     "energi",
+    "Energi",
     "deklaration",
     "energideklaration",
+    "Energideklaration",
+    "ev",
+    "EV",
+    "ev2023",
+    "ev2024",
+    "ev2025",
+    "energivision2023",
+    "energivision2024",
+    "Energivision2023",
+    "Energivision2024",
+    "villa",
+    "Villa",
+    "fastighet",
+    "Fastighet",
+    "brf",
+    "BRF",
+    "bygg",
+    "Bygg",
+    "sverige",
+    "Sverige",
+    "admin",
+    "Admin",
+    "test",
+    "Test",
+    "qwerty",
+    "abc123",
+    "secret",
+    "Secret",
+    "default",
+    "Default",
 ]
 
 
@@ -202,6 +241,99 @@ def cmd_unlock(src: Path, out_dir: Path):
     print()
 
 
+# ── Ordlisteattack (crack-läge) ───────────────────────────────────────────────
+
+def try_password(src: Path, pwd: str) -> bool:
+    try:
+        with open(src, "rb") as f:
+            office = msoffcrypto.OfficeFile(f)
+            office.load_key(password=pwd)
+            buf = io.BytesIO()
+            office.decrypt(buf)
+        return True
+    except Exception:
+        return False
+
+
+def cmd_crack(src: Path, wordlist_path: Path):
+    """Ordlisteattack mot krypterade filer. Hittar lösenordet — dekrypterar ej."""
+    files = [src] if src.is_file() else [
+        p for p in sorted(src.rglob("*.xlsm")) if classify(p) == "encrypted"
+    ]
+    if not files:
+        print("Inga krypterade filer hittades.")
+        return
+
+    try:
+        passwords = wordlist_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except FileNotFoundError:
+        sys.exit(f"Ordlista saknas: {wordlist_path}")
+
+    passwords = [p.strip() for p in passwords if p.strip()]
+    print(f"\nKnäcker {len(files)} krypterade filer med {len(passwords)} lösenord...\n")
+
+    sample = files[0]
+    print(f"Provar mot: {sample.name}")
+    for i, pwd in enumerate(passwords, 1):
+        if i % 100 == 0:
+            print(f"  {i}/{len(passwords)}: {pwd!r}", end="\r")
+        if try_password(sample, pwd):
+            print(f"\n\n  ✅ LÖSENORD HITTAT: {pwd!r}")
+            print(f"\n  Verifiera mot alla {len(files)} filer:")
+            found_all = sum(1 for f in files if try_password(f, pwd))
+            print(f"  Funkar på {found_all}/{len(files)} filer")
+            print(f"\n  Kör nu:")
+            print(f'  python unlockXlsm.py unlock <källa> unlocked_xlsm')
+            print(f'  (lägg till "{pwd}" i CANDIDATE_PASSWORDS i unlockXlsm.py)')
+            return
+
+    print(f"\n  ✗ Inget lösenord i ordlistan matchade. Prova hashcat (se nedan).")
+    print(f"\n  Extrahera hash: python unlockXlsm.py john {src}")
+
+
+# ── John/Hashcat hash-extraktion ──────────────────────────────────────────────
+
+def cmd_john(src: Path):
+    """Extraherar office2john-kompatibla hashar för hashcat/john."""
+    try:
+        import msoffcrypto.method.ecma376_agile as _  # noqa: check exists
+    except ImportError:
+        pass
+
+    files = [src] if src.is_file() else [
+        p for p in sorted(src.rglob("*.xlsm")) if classify(p) == "encrypted"
+    ]
+    if not files:
+        print("Inga krypterade filer hittades.")
+        return
+
+    print(f"\n  {len(files)} krypterade filer hittade.")
+    print(f"\n  Steg 1 — Extrahera hash (kräver office2john från John the Ripper):")
+    print(f"  Ladda ner: https://github.com/openwall/john/blob/bleeding-jumbo/run/office2john.py")
+    print()
+    sample = files[0]
+    print(f'  python office2john.py "{sample}" > hash.txt')
+    print(f'  # eller alla på en gång (PowerShell):')
+    print(f'  Get-ChildItem -Recurse -Filter "*.xlsm" | ForEach-Object {{')
+    print(f'    python office2john.py $_.FullName >> all_hashes.txt')
+    print(f'  }}')
+    print()
+    print(f"  Steg 2 — Knäck med hashcat (GPU, snabbast):")
+    print(f"  hashcat -m 9600 hash.txt wordlist.txt   # Office 2013+ AES-128")
+    print(f"  hashcat -m 9500 hash.txt wordlist.txt   # Office 2010")
+    print()
+    print(f"  Steg 3 — Eller John the Ripper (CPU):")
+    print(f"  john --wordlist=wordlist.txt hash.txt")
+    print()
+    print(f"  Ordlista tips:")
+    print(f"  - rockyou.txt (standard, finns i Kali/hashcat downloads)")
+    print(f"  - Sätt ihop egen: echo -e 'energivision\\nEnspecta\\nev2023' > ev_wordlist.txt")
+    print()
+    print(f"  Tips: Kolla om lösenordet finns i Energivision-installationen:")
+    print(f'  reg query HKLM\\SOFTWARE\\Energivision /s')
+    print(f'  dir "C:\\Program Files\\Energivision\\" /s /b | findstr /i "*.cfg *.ini *.xml"')
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main():
@@ -217,6 +349,12 @@ def main():
         if len(args) < 3:
             sys.exit("Usage: python unlockXlsm.py unlock <källa> <ut-mapp>")
         cmd_unlock(Path(args[1]), Path(args[2]))
+    elif cmd == "crack":
+        if len(args) < 3:
+            sys.exit("Usage: python unlockXlsm.py crack <källa> <wordlist.txt>")
+        cmd_crack(Path(args[1]), Path(args[2]))
+    elif cmd == "john":
+        cmd_john(Path(args[1]))
     else:
         print(__doc__)
         sys.exit(1)

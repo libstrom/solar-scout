@@ -145,24 +145,37 @@ function main() {
     const bucket = byFastig.get(key);
 
     if (!bucket) {
-      lead._contactType = 'none';
+      lead._contactType    = 'none';
+      lead.kontakt_email   = lead.kontakt_email   ?? '';
+      lead.kontakt_telefon = lead.kontakt_telefon ?? '';
+      lead.kontakt_källa   = 'none';
       stats.none++;
       continue;
     }
 
     const contact = bestContact(bucket);
     if (!contact) {
-      lead._contactType = 'none';
+      lead._contactType    = 'none';
+      lead.kontakt_email   = lead.kontakt_email   ?? '';
+      lead.kontakt_telefon = lead.kontakt_telefon ?? '';
+      lead.kontakt_källa   = 'none';
       stats.none++;
       continue;
     }
 
     const prevType = lead._contactType;
-    lead._contactType = contact.type;
-    lead.namn         = contact.name;
-    lead.telefon      = contact.phone;
-    lead.email        = contact.email;
-    stats[contact.type === 'Köpare' ? 'köpare' : contact.type === 'Intressent' ? 'intressent' : 'säljare']++;
+    const källaKey = contact.type === 'Köpare' ? 'köpare'
+                   : contact.type === 'Intressent' ? 'intressent'
+                   : 'säljare';
+    lead._contactType    = contact.type;
+    lead.namn            = contact.name;
+    lead.telefon         = contact.phone;
+    lead.email           = contact.email;
+    // Explicit kontakt_* fields with lowercase Swedish source label
+    lead.kontakt_email   = contact.email;
+    lead.kontakt_telefon = contact.phone;
+    lead.kontakt_källa   = källaKey;
+    stats[källaKey]++;
 
     if (prevType && prevType !== contact.type) stats.changed++;
     else if (prevType === contact.type) stats.same++;

@@ -6,6 +6,18 @@ Streamlit-app som skannar svenska villakvarter med Claude Vision och
 Lantmäteriets ortofoto för att hitta solcellstak och exporterar
 säljleads som Excel-fil.
 
+## Två lead-pipeline (ADR-beslut 2026-06-04)
+
+Solar-scout har två parallella leadkällor som aldrig möts i koden just nu:
+
+| Pipeline | Hittar | Pitch | Output |
+|----------|--------|-------|--------|
+| Visual scanner (app.py + scanner.py) | Fastigheter med sol (batteri-kandidater) | "Du har redan sol, lägg till batteri" | Supabase, Davids UI i appen |
+| Energideklarationer (makeLeads.py) | Fastigheter utan sol men med hög förbrukning/låg energiklass | "Installera sol, halvera elräkningen" | leads.xlsx, Excel-ringlista |
+
+Öppen fråga: ska energy-leads på sikt in i Supabase/appen så David ser allt
+i ett ställe, eller är Excel-ringlistan en permanent separat kanal?
+
 ## Aktörer
 
 | Roll | Namn | Ansvar |

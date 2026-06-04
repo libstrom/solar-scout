@@ -28,7 +28,11 @@ import { extractXlsmFields } from './xlsm.mjs';
 
 function norm(s) {
   if (!s) return '';
-  return String(s).toLowerCase().replace(/\s+/g, ' ').trim();
+  return String(s).toLowerCase()
+    .replace(/[_:]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/[\s_.\\-]+$/, '');
 }
 
 async function findXlsm(dir, results = []) {
@@ -76,7 +80,7 @@ async function main() {
       if (existing && existing.deklaration_datum && data.deklaration_datum) {
         if (existing.deklaration_datum >= data.deklaration_datum) { ok++; continue; }
       }
-      index[key] = data;
+      index[key] = { ...data, source_file: f };
       ok++;
     } catch (e) {
       errors++;

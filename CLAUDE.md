@@ -2,6 +2,25 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Arbetssätt — autonomt & målfokuserat
+
+**Håll alltid slutmålet i sikte.** Det aktuella slutmålet är:
+> Generera en poängsatt ringlista (leads.xlsx) med kontaktuppgifter för fastigheter med solpotential, baserad på energideklarationer (XLSM + PDF) matchade mot enspecta.tab.
+
+**Regler som gäller utan att fråga:**
+- Kör alltid parallella agenter för oberoende deluppgifter — minimera total väntetid.
+- Committa och pusha varje förändring direkt. Fråga aldrig om jag ska committa.
+- Vid oklarheter: välj det alternativ som snabbast för oss till leads.xlsx med maximal datakvalitet.
+- Rapportera alltid hur lång tid nästa steg tar och vad som väntar efter det — användaren ska alltid veta hur lång tid till resultat.
+- Behöver inget steg min godkännande om det är reversibelt (fil-edits, commits, test-körningar).
+- Steg som kräver bekräftelse: destruktiva git-operationer (force-push, reset --hard), externa API-anrop med kostnad, push till main.
+
+**Pipeline-status** (uppdatera när steg är klara):
+- [ ] extractEnergyPdf.py → pdf.json (kör på Windows)
+- [ ] batchXlsm.mjs → xlsm.json (kör på Windows)
+- [ ] mergeEnergy.py xlsm.json pdf.json → energy-data.json
+- [ ] makeLeads.py → leads.xlsx
+
 ## Modell & konfiguration
 
 Kör på **claude-opus-4-8** (konfigurerat i `.claude/settings.json`). Inställningarna följer med repot.
@@ -138,6 +157,38 @@ Kolumner som koden skriver/läser: `id`, `user_id`, `lat`, `lng`, `address`, `co
 **Linus** (admin): kör scans, granskar UNSURE-leads i Granska-fliken.
 
 **Primärt scanområde:** Nässjö, Eksjö, Vetlanda, Jönköping (Småland/SE3). Undvik Stockholm/Göteborg (timeout-risk) och ren glesbygd (för få OSM-byggnader).
+
+## File Delivery
+
+When delivering code files, write them directly to disk with the Write tool instead of pasting base64-encoded blocks in chat. Never use base64 paste delivery for file transfer.
+
+GitHub CDN aggressively caches raw files; after pushing an updated parser, bypass the cache (use commit-pinned URLs or cache-busting query params) rather than re-fetching the same path.
+
+## Deployment
+
+Vercel deployment requires a token that is NOT available in the sandbox. Do not attempt automated Vercel deploys; provide the deploy command for the user to run locally instead.
+
+## Parser / Pipeline
+
+The XLSM/PDF parser uses the export name `extractXlsmFields` (not `extractXlsm`). Verify export names match imports before running the pipeline.
+
+## Data Sources
+
+The enspecta.tab register has 30 columns and 47 249 rows structured as follows:
+
+- **Kolumner 0–23**: Huvudpost (CaseID, Status, datum, adress, postnr, ort, kommun, namn, fastighetsbeteckning, email, telefon, etc.)
+- **Kolumner 24–28**: Intressent-kontakt (förnamn, efternamn, email, telefon1, telefon2)
+- **Tomma col0-rader**: Intressent-rader kopplade till föregående CaseID via radposition
+
+**Intressent-statistik (verifierat 2026-05-25):**
+- 12 125 huvudposter har ≥1 intressent — varav 10 892 är Säljare-besiktningar
+- 10 761 intressenter har email, 10 294 har telefon
+- Kontaktdata FINNS — match.mjs extraherar den inte än
+
+**Rätt prioritetsordning för match.mjs** (implementeras i enrichLeads.mjs):
+1. Köpare (nuvarande ägare — bäst)
+2. Intressent från Säljare-besiktning (trolig köpare — bra)
+3. Säljare (har flyttat — sämst)
 
 ## Nyckelregler
 

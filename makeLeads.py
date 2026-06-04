@@ -8,11 +8,14 @@ Flikar:
   • Översikt    — statistik per kontakttyp, kommun, byggår
 
 Usage:
-    python makeLeads.py enspecta.tab [leads.xlsx] [--energy energy-data.json]
+    python makeLeads.py enspecta.tab [leads.xlsx] [--energy energy-data.json] [--energy-only]
 
-Med --energy används verklig energiklass + elförbrukning från XLSM-filerna
-(genereras av: node batchXlsm.mjs <mapp-med-xlsm> energy-data.json).
-Utan --energy används estimat baserat på byggår.
+  --energy <fil>   Verklig energiklass + kWh/m² från energideklarationer.
+                   Genereras av: python extractEnergyPdf.py <mapp> energy-data.json
+                             eller: node batchXlsm.mjs <mapp-med-xlsm> energy-data.json
+  --energy-only    Inkludera bara fastigheter som finns i energy-data.json.
+                   Ger en kompakt lista (~2 300 leads) med 100% riktig energiklass.
+                   Utan flaggan: hela enspecta.tab (16 000+) med estimat för resten.
 """
 import sys, re, functools, json
 from collections import Counter
@@ -40,7 +43,40 @@ def clean(s):
     return _CTRL.sub(' ', s).strip()
 
 def norm(s):
-    return clean(s).lower().replace('  ', ' ')
+    s = clean(s).lower()
+    s = s.replace('_', ' ').replace(':', ' ')
+    return re.sub(r'\s+', ' ', s).strip(' _-.')
+
+def _fastig_tokens(s):
+    """Split a normalised fastighetsbeteckning into (name_word, frozenset_of_numbers).
+    'härfågeln 1'      → ('härfågeln', frozenset({'1'}))
+    'öremölla 13 86'   → ('öremölla',  frozenset({'13', '86'}))
+    'brunneby 1 2'     → ('brunneby',  frozenset({'1', '2'}))
+    Returns None if the key has no recognisable name token.
+    """
+    parts = s.strip().split()
+    words  = [p for p in parts if not p.isdigit()]
+    nums   = frozenset(p for p in parts if p.isdigit())
+    name   = words[0] if words else None
+    return (name, nums) if name else None
+
+def build_token_index(energy_index):
+    """Return dict: (name_token, frozenset_of_numbers) → energy_key.
+    Collisions (same tokens, different keys) are skipped — too ambiguous.
+    """
+    token_index = {}
+    collisions  = set()
+    for key in energy_index:
+        tok = _fastig_tokens(key)
+        if tok is None:
+            continue
+        if tok in token_index:
+            collisions.add(tok)
+        else:
+            token_index[tok] = key
+    for tok in collisions:
+        del token_index[tok]
+    return token_index
 
 def tc(s):
     return clean(s).title() if s else ''
@@ -129,7 +165,7 @@ def score_lead(byggår_str, kontakttyp, besdat_str, telefon, email, energy=None)
     if telefon: points += 8; reasons.append('Har telefon (+8)')
     if email:   points += 4; reasons.append('Har e-post (+4)')
 
-    return min(max(points, 0), 100), ' | '.join(reasons)
+    return max(points, 0), ' | '.join(reasons)
 
 
 def bucket(score, byggår_str, energy=None):
@@ -153,34 +189,47 @@ def score_color(score):
     return '555555'                    # grå
 
 
+def _is_dodsbo(namn: str) -> bool:
+    return bool(namn) and namn.split()[0].lower() == 'dödsbo'
+
+
 def pitch_text(namn, adress, ort, byggår_str, bucket_str, energy=None):
     """Färdig pitch-text för David att klistra in i mötesbok."""
     y = yr(byggår_str)
-    fornamn = namn.split()[0] if namn else 'du'
+    dodsbo  = _is_dodsbo(namn)
+    fornamn = namn.split()[0] if (namn and not dodsbo) else None
     har_sol = energy.get('har_solceller') if energy else False
     ek      = (energy.get('energiklass') or '').upper() if energy else ''
     epk     = (energy.get('energi_per_kalla') or {}) if energy else {}
     el_dir  = (epk.get('el_direkt') or 0) + (epk.get('el_vattenburen') or 0)
 
     if har_sol:
-        behov   = "du har redan solceller — nu är det rätt tid att lägga till batteri"
-        produkt = "batterilagring som gör att du kan spara och använda din egenproducerade el på kvällen"
+        behov   = "fastigheten har redan solceller — nu är det rätt tid att lägga till batteri"
+        produkt = "batterilagring som gör att ni kan spara och använda den egenproducerade elen på kvällen"
     elif ek in ('F', 'G'):
         behov   = f"fastigheten har energiklass {ek} — det finns stor besparingspotential"
-        produkt = "sol + batteri + möjlig VP — vi kan halvera er energikostnad"
+        produkt = "sol + batteri + möjlig VP — vi kan halvera energikostnaden"
     elif el_dir > 5000:
-        behov   = "huset värms med el — det är det dyraste uppvärmningssättet just nu"
-        produkt = "sol + batteri — du kan kapa elräkningen med upp till 70%"
+        behov   = "fastigheten värms med el — det är det dyraste uppvärmningssättet just nu"
+        produkt = "sol + batteri — ni kan kapa elräkningen med upp till 70%"
     elif y and y <= 1980:
         behov   = f"hus från {y}-talet har ofta höga elkostnader och stor potential"
-        produkt = "sol + batteri — du kan kapa elräkningen med upp till 70%"
+        produkt = "sol + batteri — ni kan kapa elräkningen med upp till 70%"
     elif y and y <= 1995:
         behov   = f"villaägare i {ort or 'ert område'} väljer allt oftare solceller"
-        produkt = "solceller med batteri — du lagrar överskottet och säljer resten"
+        produkt = "solceller med batteri — ni lagrar överskottet och säljer resten"
     else:
         behov   = "många väljer nu att komplettera med batteri för att maximera egenkonsumtion"
-        produkt = "batterilagring — perfekt om du redan har sol eller funderar på det"
+        produkt = "batterilagring — perfekt om ni redan har sol eller funderar på det"
 
+    if dodsbo:
+        return (
+            f"Hej! Jag heter [säljare] och ringer från Enspecta Ensolar. "
+            f"Jag söker den som förvaltar fastigheten på {adress or 'er adress'} i {ort or 'Sverige'}. "
+            f"Vi hjälper fastighetsägare att sänka sina energikostnader — {behov}. "
+            f"Vi erbjuder {produkt}. "
+            f"Får jag boka in ett kostnadsfritt hembesök så går vi igenom potentialen tillsammans?"
+        )
     return (
         f"Hej {fornamn}! Jag heter [säljare] och ringer från Enspecta Ensolar. "
         f"Vi hjälper villaägare i {ort or 'Sverige'} att sänka sina energikostnader — "
@@ -328,27 +377,30 @@ COLS = [
     ('Fastighetsbeteckning', 24),# 22
     ('Anteckningar',      35),   # 23
     ('CaseID',            12),   # 24
+    ('Energideklaration', 20),   # 25
 ]
 
 
 TOP_COLS = [
-    ('Score',       7),
-    ('Bar',        12),
-    ('Bucket',     20),
-    ('Namn',       26),
-    ('Telefon',    16),
-    ('Adress',     28),
-    ('Ort',        16),
-    ('Energiklass', 9),
-    ('Kontakttyp', 13),
-    ('Pitch-text', 60),
-    ('Anteckningar', 35),
+    ('Score',             7),
+    ('Bar',              12),
+    ('Bucket',           20),
+    ('Namn',             26),
+    ('Telefon',          16),
+    ('Adress',           28),
+    ('Ort',              16),
+    ('Energiklass',       9),
+    ('Besiktningsdatum', 14),
+    ('Kontakttyp',       13),
+    ('Pitch-text',       60),
+    ('Anteckningar',     35),
+    ('Energideklaration',20),
 ]
 # indices into main rows tuple matching TOP_COLS
-TOP_IDX = [0, None, 1, 5, 6, 8, 10, 13, 14, 18, 23]
+TOP_IDX = [0, None, 1, 5, 6, 8, 10, 13, 20, 14, 18, 23, 25]
 
 
-def _build_row(fastig, r, typ, int0, energy_index):
+def _build_row(fastig, r, typ, int0, energy_index, token_index=None):
     """Build a data row list from a contact record."""
     int0    = int0 or {}
     bår     = r.get('byggår', '')
@@ -358,11 +410,20 @@ def _build_row(fastig, r, typ, int0, energy_index):
     ort_str = tc(r.get('ort',''))
     adr_str = r.get('adress','')
     namn    = r.get('namn','')
+    # Primary: exact normalised lookup
     energy  = energy_index.get(fastig)
+    # Fallback: token-based match when exact key misses
+    if energy is None and token_index is not None:
+        tok = _fastig_tokens(fastig)
+        if tok is not None:
+            matched_key = token_index.get(tok)
+            if matched_key is not None:
+                energy = energy_index.get(matched_key)
     sc, sc_why = score_lead(bår, typ, besdat, tel, epost, energy)
     bkt        = bucket(sc, bår, energy)
     pitch      = pitch_text(namn, adr_str, ort_str, bår, bkt, energy)
     ek_str     = (energy.get('energiklass') or '') if energy else ''
+    anteckn    = '⚠️ Dödsbo — fråga vem som förvaltar fastigheten' if _is_dodsbo(namn) else ''
     return [
         sc,                                                          # 0  Score
         bkt,                                                         # 1  Bucket
@@ -387,8 +448,9 @@ def _build_row(fastig, r, typ, int0, energy_index):
         besdat,                                                      # 20 Besiktningsdatum
         r.get('renovat',''),                                         # 21 Renoverat
         tc(fastig),                                                  # 22 Fastighetsbeteckning
-        '',                                                          # 23 Anteckningar
+        anteckn,                                                     # 23 Anteckningar
         r.get('case_id',''),                                         # 24 CaseID
+        (energy.get('source_file') or '') if energy else '',         # 25 Energideklaration
     ], energy is not None
 
 
@@ -685,6 +747,11 @@ def make_leads_sheet(wb, rows, title, banner_txt, hdr_hex, light_hex, table_name
                 c.alignment = _align_wrap
             elif ci == 20:  # Score-förklaring
                 c.font = _font_why
+            elif ci == 26:  # Energideklaration — hyperlänk om fil finns
+                if val:
+                    c.value = '📄 Öppna'
+                    c.hyperlink = val
+                    c.font = Fn(color='1565C0', underline='single', size=9)
 
         ws.row_dimensions[ri].height = 32 if hot else 20
 
@@ -873,17 +940,20 @@ def make_oversikt(wb, rows):
 def main():
     args = sys.argv[1:]
     # Parse flags
-    energy_path = None
-    positional  = []
+    energy_path  = None
+    energy_only  = False
+    positional   = []
     i = 0
     while i < len(args):
         if args[i] == '--energy' and i + 1 < len(args):
             energy_path = args[i + 1]; i += 2
+        elif args[i] == '--energy-only':
+            energy_only = True; i += 1
         else:
             positional.append(args[i]); i += 1
 
     if not positional:
-        print('Usage: python makeLeads.py enspecta.tab [leads.xlsx] [--energy energy-data.json]')
+        print('Usage: python makeLeads.py enspecta.tab [leads.xlsx] [--energy energy-data.json] [--energy-only]')
         sys.exit(1)
 
     tab_path = positional[0]
@@ -891,26 +961,45 @@ def main():
 
     # Load energy index (fastighetsbeteckning → energy record)
     energy_index = {}
+    token_index  = {}
     if energy_path:
         with open(energy_path, encoding='utf-8') as f:
-            energy_index = json.load(f)
-        print(f'Energidata: {len(energy_index)} fastigheter från {energy_path}')
+            raw_energy = json.load(f)
+        # Defensively re-normalise keys (handles underscore keys from old batchXlsm.mjs)
+        for k, v in raw_energy.items():
+            nk = norm(k)
+            if nk and nk not in energy_index:
+                energy_index[nk] = v
+        token_index = build_token_index(energy_index)
+        print(f'Energidata: {len(energy_index)} fastigheter från {energy_path} '
+              f'({len(token_index)} unika token-nycklar för fuzzy-fallback)')
     else:
         print('Obs: kör med --energy energy-data.json för exakt scoring (node batchXlsm.mjs ...)')
 
     print(f'Läser {tab_path} ...')
     by_fastig = parse_tab(tab_path)
-    print(f'  {len(by_fastig)} unika fastigheter')
+    print(f'  {len(by_fastig)} unika fastigheter i enspecta.tab')
+
+    if energy_only and not energy_index:
+        print('Fel: --energy-only kräver --energy <fil>'); sys.exit(1)
+
+    # Which fastigheter to iterate — energy-only filters to those with energy data
+    candidates = (
+        [(f, by_fastig[f]) for f in energy_index if f in by_fastig]
+        if energy_only else list(by_fastig.items())
+    )
+    if energy_only:
+        print(f'  --energy-only: {len(energy_index)} energidekl. → {len(candidates)} träffar i enspecta.tab')
 
     print('Scorar och bygger rader ...')
     int_rows = []; kop_rows = []; sal_rows = []
     energy_matched = 0
 
-    for fastig, b in by_fastig.items():
+    for fastig, b in candidates:
         typ, r, ints = best_contact(b)
         if r:
             int0 = ints[0] if ints and typ != 'Intressent' else {}
-            row, matched = _build_row(fastig, r, typ, int0, energy_index)
+            row, matched = _build_row(fastig, r, typ, int0, energy_index, token_index)
             if matched: energy_matched += 1
             if typ == 'Intressent': int_rows.append(row)
             else:                   kop_rows.append(row)
@@ -918,7 +1007,7 @@ def main():
             # Collect säljare with any contact info for separate sheet
             for s in b['saljare']:
                 if s.get('telefon') or s.get('email'):
-                    row, _ = _build_row(fastig, s, 'Säljare', {}, energy_index)
+                    row, _ = _build_row(fastig, s, 'Säljare', {}, energy_index, token_index)
                     sal_rows.append(row)
 
     int_rows.sort(key=lambda r: -r[0])

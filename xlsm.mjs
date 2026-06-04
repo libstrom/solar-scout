@@ -1,16 +1,10 @@
 /**
  * xlsm.mjs  —  Energivision XLSM-parser (no extra dependencies)
- * Unzips the XLSM, parses xl/sharedStrings.xml + worksheets,
- * finds fields by label-search, returns the same shape as pdf.mjs.
+ * Reads ZIP entries directly in memory — zero disk writes, no temp dirs.
+ * Finds fields by label-search, returns the same shape as pdf.mjs.
  */
-import { readFile, mkdir, rm, readdir } from 'node:fs/promises';
-import { join }                          from 'node:path';
-import { tmpdir }                        from 'node:os';
-import { randomBytes }                   from 'node:crypto';
-import { execFile }                      from 'node:child_process';
-import { promisify }                     from 'node:util';
-
-const exec = promisify(execFile);
+import { readFile }      from 'node:fs/promises';
+import { inflateRawSync } from 'node:zlib';
 
 // ── tiny utilities ───────────────────────────────────────────────────────────
 
@@ -87,18 +81,62 @@ function parseSheet(xml, sharedStrings) {
   return cells;
 }
 
-// ── unzip ────────────────────────────────────────────────────────────────────
+// ── in-memory ZIP reader ─────────────────────────────────────────────────────
+// Pure Node.js, zero disk writes. Handles standard ZIP (not ZIP64).
 
-async function unzip(xlsmPath, dir) {
-  // Try unzip (Linux/Mac) first, fall back to Python's zipfile
-  try {
-    await exec('unzip', ['-q', '-o', xlsmPath, '-d', dir]);
-  } catch {
-    await exec('python', [
-      '-c',
-      'import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])',
-      xlsmPath, dir,
-    ]);
+class ZipReader {
+  constructor(buf) {
+    this.buf = buf;
+    this.entries = this._readCentralDir();
+  }
+
+  _readCentralDir() {
+    const b = this.buf;
+    // Find End of Central Directory (EOCD) signature PK\x05\x06
+    let eocd = -1;
+    for (let i = b.length - 22; i >= 0; i--) {
+      if (b[i] === 0x50 && b[i+1] === 0x4b && b[i+2] === 0x05 && b[i+3] === 0x06) {
+        eocd = i; break;
+      }
+    }
+    if (eocd === -1) throw new Error('not a ZIP');
+    const count    = b.readUInt16LE(eocd + 10);
+    const cdOffset = b.readUInt32LE(eocd + 16);
+    const entries  = new Map();
+    let off = cdOffset;
+    for (let i = 0; i < count; i++) {
+      if (b.readUInt32LE(off) !== 0x02014b50) break;
+      const method   = b.readUInt16LE(off + 10);
+      const compSz   = b.readUInt32LE(off + 20);
+      const uncompSz = b.readUInt32LE(off + 24);
+      const nameLen  = b.readUInt16LE(off + 28);
+      const extraLen = b.readUInt16LE(off + 30);
+      const commLen  = b.readUInt16LE(off + 32);
+      const locOff   = b.readUInt32LE(off + 42);
+      const name     = b.toString('utf8', off + 46, off + 46 + nameLen);
+      entries.set(name, { method, compSz, uncompSz, locOff });
+      off += 46 + nameLen + extraLen + commLen;
+    }
+    return entries;
+  }
+
+  read(name) {
+    const e = this.entries.get(name);
+    if (!e) return null;
+    const b = this.buf;
+    if (b.readUInt32LE(e.locOff) !== 0x04034b50) return null;
+    const nameLen  = b.readUInt16LE(e.locOff + 26);
+    const extraLen = b.readUInt16LE(e.locOff + 28);
+    const dataOff  = e.locOff + 30 + nameLen + extraLen;
+    const data     = b.subarray(dataOff, dataOff + e.compSz);
+    if (e.method === 0) return data.toString('utf8');
+    if (e.method === 8) return inflateRawSync(data).toString('utf8');
+    return null;
+  }
+
+  // All entry names that start with prefix
+  list(prefix = '') {
+    return [...this.entries.keys()].filter(k => k.startsWith(prefix));
   }
 }
 
@@ -127,16 +165,19 @@ function findValueByLabel(cells, labelRe) {
     const m = ref.match(/^([A-Z]+)(\d+)$/);
     if (!m) continue;
     const col = m[1], row = parseInt(m[2], 10);
-    // Try right (1..3 cols)
-    for (let d = 1; d <= 3; d++) {
+    // Try right (1..5 cols) — some merged-cell layouts skip columns
+    for (let d = 1; d <= 5; d++) {
       const cand = cells.get(nextColRef(col, d) + row);
       if (cand !== undefined && cand !== '' && (toNum(cand) !== 0 || typeof cand === 'string')) {
         return cand;
       }
     }
-    // Try below (same col)
+    // Try 1 row below (same col)
     const below = cells.get(col + (row + 1));
     if (below !== undefined && below !== '' && below !== 0) return below;
+    // Try 2 rows below (some Energivision layouts put value 2 rows below label)
+    const below2 = cells.get(col + (row + 2));
+    if (below2 !== undefined && below2 !== '' && below2 !== 0) return below2;
   }
   return null;
 }
@@ -144,75 +185,70 @@ function findValueByLabel(cells, labelRe) {
 // ── main export ──────────────────────────────────────────────────────────────
 
 export async function extractXlsmFields(filePath) {
-  const dir = join(tmpdir(), 'edek_' + randomBytes(6).toString('hex'));
-  await mkdir(dir, { recursive: true });
+  let zip;
   try {
-    try {
-      await unzip(filePath, dir);
-    } catch {
-      return null; // password-protected or corrupt — fall back to PDF
-    }
+    const buf = await readFile(filePath);
+    zip = new ZipReader(buf);
+  } catch {
+    return null; // password-protected (can't read as buffer) or missing
+  }
 
-    // 1. Shared strings
-    let sharedStrings = [];
-    try {
-      const ss = await readFile(join(dir, 'xl', 'sharedStrings.xml'), 'utf8');
-      sharedStrings = parseSharedStrings(ss);
-    } catch { /* none */ }
+  // 1. Shared strings
+  let sharedStrings = [];
+  try {
+    const ss = zip.read('xl/sharedStrings.xml');
+    if (ss) sharedStrings = parseSharedStrings(ss);
+  } catch { /* none */ }
 
-    // 2. Sheet → rId map from workbook.xml
-    const sheetFiles = [];  // [{name, file}]
-    try {
-      const wb  = await readFile(join(dir, 'xl', 'workbook.xml'),  'utf8');
-      const rel = await readFile(join(dir, 'xl', '_rels', 'workbook.xml.rels'), 'utf8');
-
-      // rId → target path
+  // 2. Sheet list from workbook + rels
+  const sheetEntries = []; // [{name, zipKey}]
+  try {
+    const wb  = zip.read('xl/workbook.xml');
+    const rel = zip.read('xl/_rels/workbook.xml.rels');
+    if (wb && rel) {
       const relMap = new Map();
       const relRe = /<Relationship[^>]+Id="([^"]+)"[^>]+Target="([^"]+)"/g;
       let rM;
       while ((rM = relRe.exec(rel)) !== null) relMap.set(rM[1], rM[2]);
 
-      // sheet name + rId
       const sheetRe = /<sheet\s[^>]*name="([^"]+)"[^>]*r:id="([^"]+)"/g;
       let sM;
       while ((sM = sheetRe.exec(wb)) !== null) {
         const target = relMap.get(sM[2]) || '';
-        const wsFile = target.startsWith('worksheets/')
-          ? join(dir, 'xl', target)
-          : join(dir, 'xl', 'worksheets', target);
-        sheetFiles.push({ name: sM[1].toLowerCase(), file: wsFile });
+        const key = target.startsWith('worksheets/')
+          ? 'xl/' + target
+          : 'xl/worksheets/' + target;
+        sheetEntries.push({ name: sM[1].toLowerCase(), zipKey: key });
       }
-    } catch { /* fallback below */ }
-
-    // Fallback: enumerate xl/worksheets/*.xml
-    if (sheetFiles.length === 0) {
-      try {
-        const wsDir = join(dir, 'xl', 'worksheets');
-        const files = await readdir(wsDir);
-        for (const f of files.filter(f => f.endsWith('.xml'))) {
-          sheetFiles.push({ name: f.replace('.xml', ''), file: join(wsDir, f) });
-        }
-      } catch { /* no worksheets */ }
     }
+  } catch { /* fallback below */ }
 
-    if (sheetFiles.length === 0) return null;
-
-    // 3. Sort: certifikat / indata first; load all sheets
-    const PRIO = ['certifikat', 'indata', 'rapport', 'deklaration', 'data'];
-    sheetFiles.sort((a, b) => {
-      const pa = PRIO.findIndex(p => a.name.includes(p));
-      const pb = PRIO.findIndex(p => b.name.includes(p));
-      return (pa === -1 ? 99 : pa) - (pb === -1 ? 99 : pb);
-    });
-
-    // Merge all cells; first (highest-priority) sheet wins
-    const merged = new Map();
-    for (const { file } of [...sheetFiles].reverse()) {
-      try {
-        const xml = await readFile(file, 'utf8');
-        for (const [k, v] of parseSheet(xml, sharedStrings)) merged.set(k, v);
-      } catch { /* skip */ }
+  // Fallback: enumerate xl/worksheets/*.xml from ZIP
+  if (sheetEntries.length === 0) {
+    for (const k of zip.list('xl/worksheets/')) {
+      if (k.endsWith('.xml')) {
+        sheetEntries.push({ name: k.replace(/.*\//, '').replace('.xml', ''), zipKey: k });
+      }
     }
+  }
+
+  if (sheetEntries.length === 0) return null;
+
+  // 3. Sort: certifikat / indata first; merge all cells
+  const PRIO = ['inmatning', 'certifikat', 'indata', 'rapport', 'deklaration', 'data'];
+  sheetEntries.sort((a, b) => {
+    const pa = PRIO.findIndex(p => a.name.includes(p));
+    const pb = PRIO.findIndex(p => b.name.includes(p));
+    return (pa === -1 ? 99 : pa) - (pb === -1 ? 99 : pb);
+  });
+
+  const merged = new Map();
+  for (const { zipKey } of [...sheetEntries].reverse()) {
+    try {
+      const xml = zip.read(zipKey);
+      if (xml) for (const [k, v] of parseSheet(xml, sharedStrings)) merged.set(k, v);
+    } catch { /* skip */ }
+  }
 
     if (merged.size === 0) return null;
 
@@ -221,9 +257,11 @@ export async function extractXlsmFields(filePath) {
     const str = (v) => (v != null && String(v).trim() !== '' ? String(v).trim() : null);
 
     const fastighetsbeteckning = str(
-      L(/^fastighetsbeteckning$/i) ??
+      L(/^fastighetsbeteckning:?$/i) ??
+      L(/^fastighetsbeteckning\s*\*+$/i) ??
       L(/beteckning\s*\(utan\s*kommun/i) ??
-      L(/^fastighet\s*beteckning/i)
+      L(/^fastighet\s*beteckning/i) ??
+      L(/^fastighetsbeteckning\b/i)
     );
 
     const adress = str(
@@ -390,6 +428,7 @@ export async function extractXlsmFields(filePath) {
     })();
 
     return {
+      source: 'xlsm',
       energideklarations_id,
       fastighetsbeteckning,
       adress,
@@ -420,7 +459,4 @@ export async function extractXlsmFields(filePath) {
       giltig_till,
       atgardsforslag,
     };
-  } finally {
-    await rm(dir, { recursive: true, force: true }).catch(() => {});
-  }
 }
