@@ -941,7 +941,12 @@ def main():
     token_index  = {}
     if energy_path:
         with open(energy_path, encoding='utf-8') as f:
-            energy_index = json.load(f)
+            raw_energy = json.load(f)
+        # Defensively re-normalise keys (handles underscore keys from old batchXlsm.mjs)
+        for k, v in raw_energy.items():
+            nk = norm(k)
+            if nk and nk not in energy_index:
+                energy_index[nk] = v
         token_index = build_token_index(energy_index)
         print(f'Energidata: {len(energy_index)} fastigheter från {energy_path} '
               f'({len(token_index)} unika token-nycklar för fuzzy-fallback)')

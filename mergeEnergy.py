@@ -80,16 +80,25 @@ def main():
         print('Inga filer laddades — avbryter')
         sys.exit(1)
 
-    all_keys: set[str] = set()
+    # Re-index each source with normed keys (raw keys may have _ or : from batchXlsm)
+    normed_data: list[dict] = []
     for data in all_data:
-        for k in data:
-            all_keys.add(norm(k))
+        nd = {}
+        for k, v in data.items():
+            nk = norm(k)
+            if nk and nk not in nd:
+                nd[nk] = v
+        normed_data.append(nd)
+
+    all_keys: set[str] = set()
+    for nd in normed_data:
+        all_keys.update(nd.keys())
 
     merged: dict[str, dict] = {}
     for key in all_keys:
         records = []
-        for data in all_data:
-            rec = data.get(key)
+        for nd in normed_data:
+            rec = nd.get(key)
             if rec:
                 records.append(rec)
 
