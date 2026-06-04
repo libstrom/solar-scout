@@ -58,6 +58,9 @@ def build_rows(data: dict) -> list[dict]:
             'Kommun':               tc(rec.get('kommun') or ''),
             'Deklarationsdatum':    rec.get('deklaration_datum') or '',
             'El direkt kWh':        epk_el(epk) or '',
+            'Kontakt namn':         rec.get('kontakt_namn') or '',
+            'Kontakt telefon':      rec.get('kontakt_telefon') or '',
+            'Kontakt email':        rec.get('kontakt_email') or '',
             'Källa':                rec.get('source') or '',
             'Source-fil':           rec.get('source_file') or '',
         })
