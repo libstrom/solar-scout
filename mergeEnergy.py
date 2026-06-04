@@ -12,16 +12,36 @@ PDF är bäst på:  varav_el_kwh_m2, ibland deklaration_datum
 Usage:
   python mergeEnergy.py xlsm.json pdf.json [extra.json ...] energy-data.json
 """
-import sys, json
+import sys, json, re
 from pathlib import Path
 
 
 def norm(s: str) -> str:
     if not s:
         return ''
-    import re
     s = str(s).lower().replace('_', ' ').replace(':', ' ')
     return re.sub(r'\s+', ' ', s).strip(' _-.')
+
+
+_JUNK_PREFIX = re.compile(
+    r'^(faktura|area|unik\s+identifikation|sustend|underhållsplan|'
+    r'fastighetsbeteckning|energideklaration|brf\s|ab\s)',
+    re.I
+)
+_ONLY_DIGITS = re.compile(r'^\d+$')
+_HAS_LETTER  = re.compile(r'[a-zåäö]', re.I)
+
+def is_valid_fastig(key: str) -> bool:
+    """Reject garbage keys: pure numbers, label text, invoice prefixes etc."""
+    if not key or len(key) < 3:
+        return False
+    if _ONLY_DIGITS.match(key):
+        return False
+    if not _HAS_LETTER.search(key):
+        return False
+    if _JUNK_PREFIX.match(key):
+        return False
+    return True
 
 
 def is_empty(v) -> bool:
@@ -86,7 +106,7 @@ def main():
         nd = {}
         for k, v in data.items():
             nk = norm(k)
-            if nk and nk not in nd:
+            if nk and is_valid_fastig(nk) and nk not in nd:
                 nd[nk] = v
         normed_data.append(nd)
 
