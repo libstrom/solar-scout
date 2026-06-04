@@ -43,7 +43,9 @@ def clean(s):
     return _CTRL.sub(' ', s).strip()
 
 def norm(s):
-    return clean(s).lower().replace('  ', ' ')
+    s = clean(s).lower()
+    s = s.replace('_', ' ').replace(':', ' ')
+    return re.sub(r'\s+', ' ', s).strip(' _-.')
 
 def tc(s):
     return clean(s).title() if s else ''

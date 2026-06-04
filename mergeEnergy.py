@@ -19,7 +19,9 @@ from pathlib import Path
 def norm(s: str) -> str:
     if not s:
         return ''
-    return str(s).lower().strip()
+    import re
+    s = str(s).lower().replace('_', ' ').replace(':', ' ')
+    return re.sub(r'\s+', ' ', s).strip(' _-.')
 
 
 def is_empty(v) -> bool:
