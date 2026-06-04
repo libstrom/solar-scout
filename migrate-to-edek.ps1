@@ -48,15 +48,18 @@ $files = @(
     "debugMatch.py",
     "generateOneDriveLinks.ps1",
     "kor.ps1",
-    "setup.ps1"
+    "setup.ps1",
+    "HANDOFF-edek-parser.md"
 )
 
 foreach ($f in $files) {
     $src = Join-Path $SolarDir $f
-    $dst = Join-Path $EdekDir  $f
+    # HANDOFF-edek-parser.md byter namn till HANDOFF.md i maldrepot
+    $dstName = if ($f -eq "HANDOFF-edek-parser.md") { "HANDOFF.md" } else { $f }
+    $dst = Join-Path $EdekDir $dstName
     if (Test-Path $src) {
         Copy-Item $src $dst -Force
-        INF "Kopierade $f"
+        INF "Kopierade $f -> $dstName"
     } else {
         Write-Host "VARNING: $f hittades inte i solar-scout" -ForegroundColor Yellow
     }
