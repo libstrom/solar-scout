@@ -47,6 +47,37 @@ def norm(s):
     s = s.replace('_', ' ').replace(':', ' ')
     return re.sub(r'\s+', ' ', s).strip(' _-.')
 
+def _fastig_tokens(s):
+    """Split a normalised fastighetsbeteckning into (name_word, frozenset_of_numbers).
+    'härfågeln 1'      → ('härfågeln', frozenset({'1'}))
+    'öremölla 13 86'   → ('öremölla',  frozenset({'13', '86'}))
+    'brunneby 1 2'     → ('brunneby',  frozenset({'1', '2'}))
+    Returns None if the key has no recognisable name token.
+    """
+    parts = s.strip().split()
+    words  = [p for p in parts if not p.isdigit()]
+    nums   = frozenset(p for p in parts if p.isdigit())
+    name   = words[0] if words else None
+    return (name, nums) if name else None
+
+def build_token_index(energy_index):
+    """Return dict: (name_token, frozenset_of_numbers) → energy_key.
+    Collisions (same tokens, different keys) are skipped — too ambiguous.
+    """
+    token_index = {}
+    collisions  = set()
+    for key in energy_index:
+        tok = _fastig_tokens(key)
+        if tok is None:
+            continue
+        if tok in token_index:
+            collisions.add(tok)
+        else:
+            token_index[tok] = key
+    for tok in collisions:
+        del token_index[tok]
+    return token_index
+
 def tc(s):
     return clean(s).title() if s else ''
 
@@ -353,7 +384,7 @@ TOP_COLS = [
 TOP_IDX = [0, None, 1, 5, 6, 8, 10, 13, 14, 18, 23]
 
 
-def _build_row(fastig, r, typ, int0, energy_index):
+def _build_row(fastig, r, typ, int0, energy_index, token_index=None):
     """Build a data row list from a contact record."""
     int0    = int0 or {}
     bår     = r.get('byggår', '')
@@ -363,7 +394,15 @@ def _build_row(fastig, r, typ, int0, energy_index):
     ort_str = tc(r.get('ort',''))
     adr_str = r.get('adress','')
     namn    = r.get('namn','')
+    # Primary: exact normalised lookup
     energy  = energy_index.get(fastig)
+    # Fallback: token-based match when exact key misses
+    if energy is None and token_index is not None:
+        tok = _fastig_tokens(fastig)
+        if tok is not None:
+            matched_key = token_index.get(tok)
+            if matched_key is not None:
+                energy = energy_index.get(matched_key)
     sc, sc_why = score_lead(bår, typ, besdat, tel, epost, energy)
     bkt        = bucket(sc, bår, energy)
     pitch      = pitch_text(namn, adr_str, ort_str, bår, bkt, energy)
@@ -899,10 +938,13 @@ def main():
 
     # Load energy index (fastighetsbeteckning → energy record)
     energy_index = {}
+    token_index  = {}
     if energy_path:
         with open(energy_path, encoding='utf-8') as f:
             energy_index = json.load(f)
-        print(f'Energidata: {len(energy_index)} fastigheter från {energy_path}')
+        token_index = build_token_index(energy_index)
+        print(f'Energidata: {len(energy_index)} fastigheter från {energy_path} '
+              f'({len(token_index)} unika token-nycklar för fuzzy-fallback)')
     else:
         print('Obs: kör med --energy energy-data.json för exakt scoring (node batchXlsm.mjs ...)')
 
@@ -929,7 +971,7 @@ def main():
         typ, r, ints = best_contact(b)
         if r:
             int0 = ints[0] if ints and typ != 'Intressent' else {}
-            row, matched = _build_row(fastig, r, typ, int0, energy_index)
+            row, matched = _build_row(fastig, r, typ, int0, energy_index, token_index)
             if matched: energy_matched += 1
             if typ == 'Intressent': int_rows.append(row)
             else:                   kop_rows.append(row)
@@ -937,7 +979,7 @@ def main():
             # Collect säljare with any contact info for separate sheet
             for s in b['saljare']:
                 if s.get('telefon') or s.get('email'):
-                    row, _ = _build_row(fastig, s, 'Säljare', {}, energy_index)
+                    row, _ = _build_row(fastig, s, 'Säljare', {}, energy_index, token_index)
                     sal_rows.append(row)
 
     int_rows.sort(key=lambda r: -r[0])
