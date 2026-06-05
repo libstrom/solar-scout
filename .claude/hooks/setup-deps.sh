@@ -10,6 +10,16 @@
 LOG="${TMPDIR:-/tmp}/solar-scout-setup-deps.log"
 REPO="$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)"
 
+# Auto-install Claude plugins if missing — idempotent, silent on success.
+# Plugins live in ~/.claude/ which resets on container restart.
+if command -v claude >/dev/null 2>&1; then
+  for plugin in superpowers code-review commit-commands; do
+    claude plugin list 2>/dev/null | grep -q "^  > ${plugin}@" \
+      || claude plugin install "${plugin}@claude-plugins-official" --scope user >/dev/null 2>&1 \
+      || true
+  done
+fi
+
 {
   date
   # Fast path: if the heavy deps already import, the container is warm — skip.
