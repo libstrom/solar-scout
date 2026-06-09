@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-# ── Stub heavy dependencies (same pattern as test_acceptance.py) ──────────────────
+# ── Stub heavy dependencies (same pattern as test_acceptance.py) ─────────────────
 
 _st = types.ModuleType("streamlit")
 for _attr in [
@@ -38,7 +38,7 @@ for _mod in [
     sys.modules.setdefault(_mod, MagicMock())
 
 
-# ── AST helpers ───────────────────────────────────────────────────────────────────────
+# ── AST helpers ───────────────────────────────────────────────────────────────────────────
 
 APP_SRC = Path(__file__).parent.parent / "app.py"
 _tree = ast.parse(APP_SRC.read_text())
@@ -77,7 +77,7 @@ def _extract_widget_keys(tree: ast.AST) -> list[str]:
     return keys
 
 
-# ── Supersearch mode detection (mirrors app.py logic) ──────────────────────────
+# ── Supersearch mode detection (mirrors app.py logic) ─────────────────────────────────
 
 def _detect_mode(sq: str) -> str:
     if re.match(r"^-?\d{1,3}\.?\d*\s*,\s*-?\d{1,3}\.?\d*$", sq):
@@ -144,7 +144,7 @@ class TestCoordBbox:
         assert abs((west + east) / 2 - lng) < 1e-9
 
 
-# ── Structural tests via AST ─────────────────────────────────────────────────
+# ── Structural tests via AST ────────────────────────────────────────────────────────────────
 
 class TestTabStructure:
     def test_main_tabs_count_is_4(self):

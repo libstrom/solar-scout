@@ -11,7 +11,6 @@ NOTE: Must be run from repo root (where app.py lives).
 """
 import argparse, os, subprocess, sys, time, urllib.request
 
-
 def wait_for_port(port: int, timeout: int = 30) -> bool:
     for _ in range(timeout):
         try:
