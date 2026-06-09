@@ -1066,6 +1066,7 @@ def _analyze_building(
     street_view_bytes: bytes | None = None,
     budget: "BudgetTracker | None" = None,
     already_enhanced: bool = False,
+    model: str = "claude-sonnet-4-6",
 ) -> tuple[bool, bool, bool, str]:
     """
     Returns (is_residential_house, has_solar_panels, is_unsure, reasoning).
@@ -1180,7 +1181,7 @@ def _analyze_building(
                 final_content.append({"type": "image", "source": {"type": "base64", "media_type": sv_media, "data": sv_b64}})
             msgs = [{"role": "user", "content": final_content}]
         msg = client.messages.create(
-            model="claude-opus-4-8",
+            model=model,
             max_tokens=220,
             system=system_blocks,
             messages=msgs,
@@ -1314,7 +1315,7 @@ def _process_building(
             _log.debug("_process_building: UNSURE → Street View second pass lat=%s lng=%s", lat, lng)
             is_house, has_solar, is_unsure, reasoning = _analyze_building(
                 anthropic_client, img, few_shot=few_shot, street_view_bytes=sv_bytes,
-                budget=budget, already_enhanced=True
+                budget=budget, already_enhanced=True, model="claude-opus-4-8"
             )
             if not is_house:
                 return None
