@@ -5,6 +5,7 @@ Linus Bergström
 
 import io
 import os
+import re
 import time
 import logging
 import urllib.parse
@@ -783,6 +784,86 @@ def _lead_to_sb_row(lead) -> dict:
     }
 
 
+def _render_api_health():
+    """Compact API status + session cost panel — shown in Scanner sidebar."""
+    _STATUS_TTL = 120  # seconds between pings
+
+    now = time.time()
+    cache = st.session_state.setdefault("_api_health_cache", {
+        "ts": 0,
+        "lm": None,
+        "anthropic": None,
+        "google": None,
+    })
+
+    if now - cache["ts"] > _STATUS_TTL:
+        # LM minkarta WMS — free, no key; just need a valid tile response
+        try:
+            from scanner import lm_wms_url as _lm_url  # noqa: PLC0415
+            _test_url = _lm_url(57.655, 14.700, size_m=20, width=32, height=32)
+            _r = httpx.get(_test_url, timeout=5)
+            cache["lm"] = "ok" if _r.status_code == 200 else f"HTTP {_r.status_code}"
+        except Exception as _e:
+            cache["lm"] = f"fel"
+
+        # Anthropic — key presence + last known API error
+        if not ANTHROPIC_API_KEY:
+            cache["anthropic"] = "ingen nyckel"
+        elif st.session_state.get("_anthropic_quota_hit"):
+            cache["anthropic"] = "kvota slut"
+        else:
+            cache["anthropic"] = "ok"
+
+        # Google Maps — lightweight geocode ping
+        if not GOOGLE_API_KEY:
+            cache["google"] = "ingen nyckel"
+        else:
+            try:
+                _gr = httpx.get(
+                    "https://maps.googleapis.com/maps/api/geocode/json",
+                    params={"address": "Nässjö", "key": GOOGLE_API_KEY},
+                    timeout=5,
+                )
+                cache["google"] = "ok" if _gr.status_code == 200 else f"HTTP {_gr.status_code}"
+            except Exception:
+                cache["google"] = "fel"
+
+        cache["ts"] = now
+
+    def _badge(label: str, status: str) -> None:
+        _ok = status == "ok"
+        _col = "#22c55e" if _ok else ("#f59e0b" if status == "ingen nyckel" else "#ef4444")
+        st.markdown(
+            f'<span style="background:{_col}18;color:{_col};border:1px solid {_col}40;'
+            f'border-radius:4px;padding:2px 8px;font-size:11px;margin-right:4px">'
+            f'<b>{label}</b> {status}</span>',
+            unsafe_allow_html=True,
+        )
+
+    with st.expander("🟢 API-status & kostnad", expanded=False):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            _badge("LM", cache["lm"] or "–")
+        with c2:
+            _badge("Anthropic", cache["anthropic"] or "–")
+        with c3:
+            _badge("Google", cache["google"] or "–")
+
+        # Session scan cost from BudgetTracker
+        _bt = st.session_state.get("_budget_tracker")
+        if _bt is not None:
+            try:
+                _sek = _bt.total_sek
+                st.metric("Sessionskostnad", f"{_sek:.2f} kr",
+                          delta=None, help="Ackumulerad AI-kostnad sedan sidan laddades")
+            except Exception:
+                pass
+
+        if st.button("↻ Uppdatera", key="api_health_refresh", use_container_width=False):
+            cache["ts"] = 0
+            st.rerun()
+
+
 def _bulk_scan_section(user, profile, ai_available):
     """Storskalig scanning av regioner — hundratals/tusentals leads."""
 
@@ -1014,6 +1095,8 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
 
     south = west = north = east = None
     city_name = ""
+    _sq = ""
+    _search_mode = "city"
 
     ai_available = bool(ANTHROPIC_API_KEY)
 
@@ -1031,15 +1114,34 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
     except Exception:
         _map_rows = []
 
+    _render_api_health()
+
     # ── Two-column layout: controls | map ──────────────────────────────────
     col_ctrl, col_map = st.columns([1, 2], gap="large")
 
     with col_ctrl:
-        city_name = st.text_input(
-            "Ort eller stad",
-            placeholder="t.ex. Malmö, Nässjö, Lund, Huskvarna",
-            help="Ange ort ELLER rita ett rektangel på kartan. Ritad yta har förtur.",
+        search_query = st.text_input(
+            "Sök",
+            placeholder="Stad, adress, koordinater, postnummer…",
+            help="Ange ort, adress, koordinater (57.65,14.69) eller postnummer — "
+                 "ELLER rita ett rektangel på kartan. Ritad yta har förtur.",
         )
+        _sq = (search_query or "").strip()
+        if re.match(r"^-?\d{1,3}\.?\d*\s*,\s*-?\d{1,3}\.?\d*$", _sq):
+            _search_mode = "coords"
+            st.caption("📍 Koordinater — skannar ~2 km² runt punkten")
+        elif re.match(r"^\d{3}\s?\d{2}$", _sq):
+            _search_mode = "postal"
+            st.caption("📮 Postnummer")
+        elif re.search(r"\d", _sq) and len(_sq) > 3:
+            _search_mode = "address"
+            st.caption("🏠 Adress — skannar ~0.5 km² runt adressen")
+        elif _sq:
+            _search_mode = "city"
+            st.caption("🏙️ Stad / område")
+        else:
+            _search_mode = "city"
+        city_name = _sq
 
         if not ai_available:
             st.warning("ANTHROPIC_API_KEY saknas — kör i OSM-läge.")
@@ -1089,7 +1191,14 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                 center = [55.8, 13.3]   # Skåne
                 zoom = 9
 
-            m = folium.Map(location=center, zoom_start=zoom, tiles="OpenStreetMap")
+            m = folium.Map(location=center, zoom_start=zoom, tiles=None)
+            folium.TileLayer(
+                tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+                attr="Esri",
+                name="Satellit",
+            ).add_to(m)
+            folium.TileLayer("CartoDB positron", name="Karta").add_to(m)
+            folium.LayerControl(position="topright").add_to(m)
 
             # Rectangle draw only — polygon/circle/marker add complexity without value
             Draw(
@@ -1163,6 +1272,19 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
 
         except ImportError:
             st.warning("streamlit-folium saknas — rita-läge otillgängligt. Ange ort i fältet till vänster.")
+
+    # Coordinate mode: derive small bbox (~2 km²) from parsed lat,lng
+    if _search_mode == "coords" and south is None:
+        _parts = [p.strip() for p in _sq.split(",")]
+        try:
+            _clat, _clng = float(_parts[0]), float(_parts[1])
+            _delta = 0.009   # ~1 km radius
+            south, north = _clat - _delta, _clat + _delta
+            west,  east  = _clng - _delta, _clng + _delta
+            city_name = ""
+        except (ValueError, IndexError):
+            pass
+    # address/postal/city modes: city_name=_sq is passed to scan_city which geocodes internally
 
     use_bbox = south is not None
 
@@ -1336,6 +1458,7 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
         anthr_key = ANTHROPIC_API_KEY if ai_available else None
         _log.info("scan start mode=%s ai=%s max_leads=%s", "bbox" if use_bbox else "city", bool(anthr_key), max_leads)
         _scan_budget = _BudgetTracker(budget_sek=_BUDGET_SEK)
+        st.session_state["_budget_tracker"] = _scan_budget
         leads = None
         scan_crashed = False
         try:
@@ -1365,6 +1488,8 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
             from scanner import APIQuotaExceededError as _QuotaErr  # noqa: PLC0415
             if isinstance(e, _QuotaErr):
                 _log.error("API quota exceeded: %s", e)
+                if "anthropic" in str(e.api).lower():
+                    st.session_state["_anthropic_quota_hit"] = True
                 _send_quota_alert(e.api, e.detail)
                 _emsg = (
                     f"**{e.api} har nått sin kvot eller saknar pengar på kontot.**\n\n"
@@ -1575,15 +1700,19 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
         st.rerun()
 
     st.divider()
+    with st.expander("🏠 Scouta enskild adress"):
+        _page_scout_inline(user)
+
     _bulk_scan_section(user, profile, ai_available)
 
 
-def page_scout(user):
-    st.subheader("Scouta Tak")
+def _page_scout_inline(user):
+    """Single-address satellite lookup — embedded inside Scanner."""
 
     search_query = st.text_input(
-        "Adress eller koordinater:",
+        "Adress eller koordinater",
         placeholder="t.ex. Storgatan 14, Helsingborg",
+        key="scout_inline_query",
     )
 
     if not search_query:
@@ -1652,7 +1781,7 @@ def page_scout(user):
         lc1.link_button("Google", google_search_url)
         lc2.link_button("Hitta.se", hitta_url)
 
-        if st.button("💾 Spara lead", type="primary", use_container_width=True):
+        if st.button("💾 Spara lead", type="primary", use_container_width=True, key="scout_save_btn"):
             save_lead(str(user.id), {
                 "address":           address,
                 "has_solar":         has_solar,
@@ -2606,13 +2735,11 @@ def page_app(user, profile, lead_count: int = 0):
 
     review_label = f"👁 Granska ({review_count})" if review_count else "👁 Granska"
     if is_admin(profile):
-        tab_scanner, tab_scout, tab_leads, tab_review, tab_account = st.tabs(
-            ["🔍 AI Scanner", "🏠 Scouta Tak", "📋 Leads", review_label, "⚙ Konto"]
+        tab_scanner, tab_leads, tab_review, tab_account = st.tabs(
+            ["🔍 Scanner", "📋 Leads", review_label, "⚙ Konto"]
         )
         with tab_scanner:
             page_scanner(user, profile, lead_count)
-        with tab_scout:
-            page_scout(user)
         with tab_leads:
             page_leads(user)
         with tab_review:

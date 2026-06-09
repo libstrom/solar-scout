@@ -7,7 +7,8 @@ on:
     branches: [main]
 
 jobs:
-  test:
+  # ── Tier 1 — Unit + acceptance (< 2 min, no API keys) ──────────────────────
+  unit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,12 +27,61 @@ jobs:
           python -c "import ast; ast.parse(open('app.py').read()); print('app.py OK')"
 
       - name: Unit tests (no API key required)
-        run: python -m pytest tests/ -x -q --ignore=tests/test_f1_baseline.py
+        run: python -m pytest tests/ -x -q --ignore=tests/test_f1_baseline.py --ignore=tests/e2e/
 
-      - name: F1 regression (kräver ANTHROPIC_API_KEY)
-        if: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+  # ── Tier 2 — F1 regression (requires ANTHROPIC_API_KEY) ────────────────────
+  f1-regression:
+    runs-on: ubuntu-latest
+    if: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: F1 regression
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           LANTMATERIET_TOKEN: ${{ secrets.LANTMATERIET_TOKEN }}
-        run: |
-          python -m pytest tests/test_f1_baseline.py -v --tb=short
+        run: python -m pytest tests/test_f1_baseline.py -v --tb=short
+
+  # ── Tier 3 — E2E browser smoke (Playwright, no auth required) ──────────────
+  e2e:
+    runs-on: ubuntu-latest
+    # Don't block merge — still finding flaky baselines. Remove continue-on-error once stable.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright browsers
+        run: playwright install chromium --with-deps
+
+      - name: E2E smoke tests
+        env:
+          SUPABASE_URL: "https://fake.supabase.co"
+          SUPABASE_ANON_KEY: "fake-anon-key"
+          # Optional: set these secrets to also run the authenticated tab test
+          E2E_TEST_EMAIL: ${{ secrets.E2E_TEST_EMAIL }}
+          E2E_TEST_PASSWORD: ${{ secrets.E2E_TEST_PASSWORD }}
+        run: python -m pytest tests/e2e/ -v --timeout=60 -m e2e
+
+      - name: Upload Playwright traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: test-results/
+          retention-days: 7
