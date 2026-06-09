@@ -1661,6 +1661,19 @@ def scan_city(
     center = geom["location"]
     _log.info("scan_city geocoded bbox=(%s,%s,%s,%s)", south, west, north, east)
 
+    import math as _math
+    _bbox_area_km2 = (
+        (north - south) * (east - west)
+        * (111.32 ** 2)
+        * _math.cos(_math.radians((north + south) / 2))
+    )
+    _log.info("scan_city bbox_area=%.0f km²", _bbox_area_km2)
+    if _bbox_area_km2 > 500:
+        raise ValueError(
+            f"'{city_name}' täcker ~{_bbox_area_km2:.0f} km² — för stort för en automatisk scan. "
+            f"Rita ett område på kartan (t.ex. ett villakvarter) för att scanna en specifik del."
+        )
+
     # OSM solar tags cover the full city viewport (free, instant)
     osm_leads = scan_area_osm(south, west, north, east)
     _log.info("scan_city osm_leads=%d", len(osm_leads))
@@ -1692,10 +1705,10 @@ def scan_city(
     _log.info("scan_city residential_areas=%d", len(residential_areas))
 
     if residential_areas:
-        # Scan all areas — inner loop breaks early when max_leads is reached.
-        # The old max_leads//5 cap caused 0 leads in large cities (e.g. Lund:
-        # 465 areas but only 2 were scanned, missing all villa suburbs).
-        max_areas = len(residential_areas)
+        # Cap areas to avoid multi-hour scans on cities with hundreds of
+        # residential polygons. 100 areas × ~20 buildings × 8% solar ≈ 160
+        # leads, sufficient for any reasonable max_leads value.
+        max_areas = min(len(residential_areas), 100)
         _log.info("scan_city scanning %d/%d areas", max_areas, len(residential_areas))
         for area in residential_areas[:max_areas]:
             # Remaining lead budget for AI scan
@@ -1748,7 +1761,12 @@ def scan_city(
         # Glesbygd-pass: scan hela viewport utan landuse-filter.
         # Hus utanför residential-polygoner (landsbygd, ~20-30% av villor) missas
         # annars helt. Deduplicera via seen_building_ids.
-        if not budget.stopped_over_budget and len(osm_leads) + len(all_ai_leads) < (max_leads or 9999):
+        # Skip for large city viewports (>150 km²) — the full-viewport Overpass
+        # query would time out and silently kill the WebSocket connection.
+        _glesbygd_ok = _bbox_area_km2 <= 150
+        if not _glesbygd_ok:
+            _log.info("scan_city skipping glesbygd-pass (bbox %.0f km² > 150)", _bbox_area_km2)
+        if _glesbygd_ok and not budget.stopped_over_budget and len(osm_leads) + len(all_ai_leads) < (max_leads or 9999):
             remaining = None
             if max_leads is not None:
                 remaining = max_leads - len(osm_leads) - len(all_ai_leads)
