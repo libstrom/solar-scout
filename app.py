@@ -233,10 +233,10 @@ with tab_dashboard:
 
     s = stats()
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total scanned", s["total"])
-    c2.metric("Pending", s["pending"])
-    c3.metric("Confirmed", s["confirmed"])
-    c4.metric("Rejected", s["rejected"])
+    c1.metric("Skannade totalt", s["total"])
+    c2.metric("Att granska", s["pending"])
+    c3.metric("Bekräftade", s["confirmed"])
+    c4.metric("Avvisade", s["rejected"])
 
     if s["total"]:
         df = pd.DataFrame({
@@ -253,7 +253,7 @@ with tab_dashboard:
 with tab_verify:
     pending = list_pending()
     if not pending:
-        st.success("No pending leads. Either all done -- or nothing harvested yet.")
+        st.success("Inga leads att granska — antingen klart, eller inget skördat ännu.")
     else:
         graded = sum(1 for r in pending if r["ai_score"] is not None)
         if graded < len(pending):
@@ -268,7 +268,7 @@ with tab_verify:
 
         left, right = st.columns([2, 1])
         with left:
-            st.subheader(f"Lead {idx + 1} of {len(pending)} pending")
+            st.subheader(f"Lead {idx + 1} av {len(pending)} att granska")
             if row["ai_score"] is not None:
                 if row["ai_has_panels"]:
                     st.error(f"AI: SOLCELLER FINNS REDAN — {row['ai_reason'] or ''}")
@@ -285,38 +285,39 @@ with tab_verify:
 
         with right:
             st.markdown("### Metadata")
-            st.write(f"**Address:** {row['address'] or '—'}")
-            st.write(f"**Coordinates:** `{row['coordinates']}`")
-            st.write(f"**Roof area:** {row['roof_area_m2'] or '?'} m²")
-            st.write(f"**Solar confidence:** `{row['solar_confidence']}`")
+            st.write(f"**Adress:** {row['address'] or '—'}")
+            st.write(f"**Koordinater:** `{row['coordinates']}`")
+            roof = f"{row['roof_area_m2']:.0f}" if row["roof_area_m2"] else "?"
+            st.write(f"**Takyta:** {roof} m²")
+            st.write(f"**Bildkvalitet:** `{row['solar_confidence']}`")
             st.write(f"**Plus Code:** `{plus_code(row['lat'], row['lng'])}`")
-            st.write(f"**Estimated fuse (heuristic):** {estimate_fuse(row['roof_area_m2']) or '—'}")
+            st.write(f"**Uppskattad huvudsäkring (heuristik):** {estimate_fuse(row['roof_area_m2']) or '—'}")
             st.write(f"**place_id:** `{row['place_id']}`")
 
             st.divider()
             g, r = st.columns(2)
             with g:
-                if st.button("CONFIRM (Green)", type="primary", use_container_width=True):
+                if st.button("BEKRÄFTA (Grön)", type="primary", use_container_width=True):
                     set_status(row["id"], "confirmed")
                     st.session_state["verify_idx"] = idx
                     st.rerun()
             with r:
-                if st.button("REJECT (Red)", use_container_width=True):
+                if st.button("AVVISA (Röd)", use_container_width=True):
                     set_status(row["id"], "rejected")
                     st.session_state["verify_idx"] = idx
                     st.rerun()
 
             n1, n2, n3 = st.columns(3)
             with n1:
-                if st.button("Prev"):
+                if st.button("Föregående"):
                     st.session_state["verify_idx"] = max(0, idx - 1)
                     st.rerun()
             with n2:
-                if st.button("Skip"):
+                if st.button("Hoppa över"):
                     st.session_state["verify_idx"] = min(len(pending) - 1, idx + 1)
                     st.rerun()
             with n3:
-                if st.button("Next"):
+                if st.button("Nästa"):
                     st.session_state["verify_idx"] = min(len(pending) - 1, idx + 1)
                     st.rerun()
 
@@ -328,8 +329,9 @@ with tab_calls:
     if not confirmed:
         st.info("Inga bekräftade leads ännu. Bekräfta tak i Verification Lab först.")
     else:
+        lead_word = "bekräftat lead" if len(confirmed) == 1 else "bekräftade leads"
         st.write(
-            f"**{len(confirmed)}** bekräftade leads. Slå upp ägare/telefon via "
+            f"**{len(confirmed)}** {lead_word}. Slå upp ägare/telefon via "
             "MrKoll-länken, fyll i och spara — statusen följer med i exporten."
         )
         keys = confirmed[0].keys()
@@ -358,6 +360,9 @@ with tab_calls:
             key="ringlista_editor",
         )
 
+        if st.session_state.pop("ringlista_saved", False):
+            st.success("Ringlistan sparad.")
+
         if st.button("Spara ringlistan", type="primary"):
             for _, rrow in edited.iterrows():
                 save_call_fields(
@@ -367,7 +372,7 @@ with tab_calls:
                     str(rrow["Status"]).strip(),
                     str(rrow["Anteckningar"]).strip(),
                 )
-            st.success("Sparat.")
+            st.session_state["ringlista_saved"] = True
             st.rerun()
 
         booked = sum(1 for _, x in edited.iterrows() if x["Status"] == "Bokad")
@@ -381,7 +386,8 @@ with tab_calls:
 
 with tab_export:
     confirmed = list_confirmed()
-    st.write(f"**{len(confirmed)}** confirmed leads ready for export.")
+    word = "bekräftat lead redo" if len(confirmed) == 1 else "bekräftade leads redo"
+    st.write(f"**{len(confirmed)}** {word} för export.")
     if confirmed:
         keys = confirmed[0].keys()
         preview = pd.DataFrame([{
@@ -405,4 +411,4 @@ with tab_export:
             type="primary",
         )
     else:
-        st.info("Confirm some leads in the Verification Lab to enable export.")
+        st.info("Bekräfta leads i Verification Lab för att aktivera exporten.")
