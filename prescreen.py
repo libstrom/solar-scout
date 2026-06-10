@@ -6,10 +6,13 @@ The Verification Lab then shows the best roofs first and flags the ones
 that already have panels, so the human pass goes much faster.
 
 Backends (auto-picked):
-    api  -- Anthropic API. Used when ANTHROPIC_API_KEY is set (.env or env).
-            Model from VISION_MODEL (default claude-sonnet-4-6). Fast.
-    cli  -- Claude Code CLI (`claude -p`). Used when no API key is set;
-            runs on your existing Claude subscription. Slower but free.
+    pioneer -- Pioneer AI (OpenAI-kompatibelt API med Claude-modeller).
+               Used when PIONEER_API_KEY is set. Model from PIONEER_MODEL
+               (default claude-opus-4-7). Fast.
+    api     -- Anthropic API. Used when ANTHROPIC_API_KEY is set (.env or env).
+               Model from VISION_MODEL (default claude-sonnet-4-6). Fast.
+    cli     -- Claude Code CLI (`claude -p`). Used when no API key is set;
+               runs on your existing Claude subscription. Slower but free.
 
 Run:
     python prescreen.py                  # grade all ungraded pending leads
@@ -44,6 +47,9 @@ if hasattr(sys.stdout, "reconfigure"):
 
 VISION_MODEL = os.getenv("VISION_MODEL", "claude-sonnet-4-6").strip() or "claude-sonnet-4-6"
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
+PIONEER_API_KEY = os.getenv("PIONEER_API_KEY", "").strip()
+PIONEER_MODEL = os.getenv("PIONEER_MODEL", "claude-opus-4-7").strip() or "claude-opus-4-7"
+PIONEER_BASE_URL = os.getenv("PIONEER_BASE_URL", "https://api.pioneer.ai/v1").strip().rstrip("/")
 
 PROMPT = """\
 Du är takgranskare åt ett svenskt solcellsföretag. Bilden är en satellitbild \
@@ -109,6 +115,32 @@ def grade_api(image_path: Path) -> Optional[dict]:
     return parse_verdict(text)
 
 
+def grade_pioneer(image_path: Path) -> Optional[dict]:
+    import requests
+
+    img_b64 = base64.standard_b64encode(image_path.read_bytes()).decode()
+    r = requests.post(
+        f"{PIONEER_BASE_URL}/chat/completions",
+        headers={"Authorization": f"Bearer {PIONEER_API_KEY}"},
+        json={
+            "model": PIONEER_MODEL,
+            "max_tokens": 300,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "image_url",
+                     "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+                    {"type": "text", "text": PROMPT},
+                ],
+            }],
+        },
+        timeout=120,
+    )
+    r.raise_for_status()
+    text = r.json()["choices"][0]["message"]["content"] or ""
+    return parse_verdict(text)
+
+
 def grade_cli(image_path: Path) -> Optional[dict]:
     claude = shutil.which("claude")
     if not claude:
@@ -138,6 +170,8 @@ def grade_cli(image_path: Path) -> Optional[dict]:
 def pick_backend(forced: Optional[str]) -> str:
     if forced:
         return forced
+    if PIONEER_API_KEY:
+        return "pioneer"
     return "api" if ANTHROPIC_API_KEY else "cli"
 
 
@@ -162,7 +196,7 @@ def save_verdict(lead_id: int, v: dict) -> None:
 
 def main() -> int:
     p = argparse.ArgumentParser(description="AI-prescreen av skördade tak")
-    p.add_argument("--backend", choices=["api", "cli"], default=None)
+    p.add_argument("--backend", choices=["pioneer", "api", "cli"], default=None)
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--redo", action="store_true", help="Betygsätt om redan bedömda")
     args = p.parse_args()
@@ -172,14 +206,18 @@ def main() -> int:
     if backend == "api" and not ANTHROPIC_API_KEY:
         print("ERROR: --backend api kräver ANTHROPIC_API_KEY i .env", file=sys.stderr)
         return 2
+    if backend == "pioneer" and not PIONEER_API_KEY:
+        print("ERROR: --backend pioneer kräver PIONEER_API_KEY i .env", file=sys.stderr)
+        return 2
 
     targets = fetch_targets(args.redo, args.limit)
     if not targets:
         print("Inget att bedöma -- alla pending leads är redan AI-graderade.")
         return 0
 
-    grade = grade_api if backend == "api" else grade_cli
-    print(f"Prescreen: {len(targets)} tak, backend={backend}, modell={VISION_MODEL if backend == 'api' else 'claude CLI'}")
+    grade = {"pioneer": grade_pioneer, "api": grade_api, "cli": grade_cli}[backend]
+    model_label = {"pioneer": PIONEER_MODEL, "api": VISION_MODEL, "cli": "claude CLI"}[backend]
+    print(f"Prescreen: {len(targets)} tak, backend={backend}, modell={model_label}")
 
     done, failed = 0, 0
     t_start = time.monotonic()

@@ -330,10 +330,21 @@ class TestPickBackend:
         monkeypatch.setattr(prescreen, "ANTHROPIC_API_KEY", "sk-ant-xyz")
         assert prescreen.pick_backend("cli") == "cli"
 
+    def test_forced_pioneer(self, monkeypatch):
+        monkeypatch.setattr(prescreen, "PIONEER_API_KEY", "")
+        assert prescreen.pick_backend("pioneer") == "pioneer"
+
+    def test_auto_pioneer_when_key_set(self, monkeypatch):
+        monkeypatch.setattr(prescreen, "PIONEER_API_KEY", "pio_sk_xyz")
+        monkeypatch.setattr(prescreen, "ANTHROPIC_API_KEY", "sk-ant-xyz")
+        assert prescreen.pick_backend(None) == "pioneer"
+
     def test_auto_api_when_key_set(self, monkeypatch):
+        monkeypatch.setattr(prescreen, "PIONEER_API_KEY", "")
         monkeypatch.setattr(prescreen, "ANTHROPIC_API_KEY", "sk-ant-xyz")
         assert prescreen.pick_backend(None) == "api"
 
     def test_auto_cli_when_no_key(self, monkeypatch):
+        monkeypatch.setattr(prescreen, "PIONEER_API_KEY", "")
         monkeypatch.setattr(prescreen, "ANTHROPIC_API_KEY", "")
         assert prescreen.pick_backend(None) == "cli"

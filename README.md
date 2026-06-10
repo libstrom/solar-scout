@@ -29,9 +29,9 @@ copy .env.example .env
 #    syns i appens Dashboard medan skörden pågår.
 python harvester.py
 
-# 4. AI-gradera taken. Utan ANTHROPIC_API_KEY används Claude Code CLI
-#    (din befintliga prenumeration, ~20 s/tak). Med nyckel i .env går
-#    det via API:t i stället (snabbare).
+# 4. AI-gradera taken. Backend väljs automatiskt: PIONEER_API_KEY i .env
+#    -> Pioneer AI (~6 s/tak), annars ANTHROPIC_API_KEY -> Anthropic API,
+#    annars Claude Code CLI (din prenumeration, ~20 s/tak).
 python prescreen.py
 
 # 5. Verifiera, ring och exportera i webbläsaren.
@@ -44,7 +44,7 @@ streamlit run app.py
 
 `prescreen.py`-flaggor:
 - `--limit N` — gradera bara N tak
-- `--backend api|cli` — tvinga backend (default: api om nyckel finns, annars cli)
+- `--backend pioneer|api|cli` — tvinga backend (default: pioneer > api > cli efter vilka nycklar som finns)
 - `--redo` — gradera om redan bedömda
 
 Båda är resume-säkra: redan skördade/graderade rader hoppas över vid omkörning.
