@@ -43,10 +43,10 @@ def _conn() -> sqlite3.Connection:
 
 def stats() -> dict:
     if not DB_PATH.exists():
-        return {"total": 0, "pending": 0, "confirmed": 0, "rejected": 0}
+        return {"total": 0, "pending": 0, "confirmed": 0, "rejected": 0, "auto_rejected": 0}
     with _conn() as c:
         out = {"total": c.execute("SELECT COUNT(*) FROM leads").fetchone()[0]}
-        for s in ("pending", "confirmed", "rejected"):
+        for s in ("pending", "confirmed", "rejected", "auto_rejected"):
             out[s] = c.execute(
                 "SELECT COUNT(*) FROM leads WHERE status = ?", (s,)
             ).fetchone()[0]
@@ -232,16 +232,17 @@ with tab_dashboard:
     st.divider()
 
     s = stats()
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Skannade totalt", s["total"])
     c2.metric("Att granska", s["pending"])
     c3.metric("Bekräftade", s["confirmed"])
     c4.metric("Avvisade", s["rejected"])
+    c5.metric("Auto-avvisade", s["auto_rejected"])
 
     if s["total"]:
         df = pd.DataFrame({
-            "Status": ["Pending", "Confirmed", "Rejected"],
-            "Count":  [s["pending"], s["confirmed"], s["rejected"]],
+            "Status": ["Pending", "Confirmed", "Rejected", "Auto-rejected"],
+            "Count":  [s["pending"], s["confirmed"], s["rejected"], s["auto_rejected"]],
         })
         st.bar_chart(df.set_index("Status"))
     else:

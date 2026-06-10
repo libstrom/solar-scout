@@ -68,6 +68,29 @@ Svara med ENDAST detta JSON-objekt, ingen annan text:
 {"has_panels": true/false, "score": 0-100, "reason": "..."}"""
 
 
+def augment_prompt(base: str, calibration: Optional[dict]) -> str:
+    """Lägg till few-shot-rader från train.py:s kalibrering, om de finns."""
+    lines = (calibration or {}).get("few_shot") or []
+    if not lines:
+        return base
+    return (
+        base
+        + "\n\nKalibrering från säljarens tidigare manuella valideringar "
+        + "(väg in detta i din bedömning):\n"
+        + "\n".join(lines)
+    )
+
+
+def load_calibration() -> Optional[dict]:
+    path = shared_db.DATA_DIR / "calibration.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
 # ---- Verdict parsing ---------------------------------------------------------
 
 def parse_verdict(text: str) -> Optional[dict]:
@@ -215,9 +238,16 @@ def main() -> int:
         print("Inget att bedöma -- alla pending leads är redan AI-graderade.")
         return 0
 
+    calibration = load_calibration()
+    global PROMPT
+    PROMPT = augment_prompt(PROMPT, calibration)
+
     grade = {"pioneer": grade_pioneer, "api": grade_api, "cli": grade_cli}[backend]
     model_label = {"pioneer": PIONEER_MODEL, "api": VISION_MODEL, "cli": "claude CLI"}[backend]
-    print(f"Prescreen: {len(targets)} tak, backend={backend}, modell={model_label}")
+    calib_note = ""
+    if calibration and calibration.get("few_shot"):
+        calib_note = f", kalibrerad på {calibration['n_confirmed']}+{calibration['n_rejected']} valideringar"
+    print(f"Prescreen: {len(targets)} tak, backend={backend}, modell={model_label}{calib_note}")
 
     done, failed = 0, 0
     t_start = time.monotonic()
