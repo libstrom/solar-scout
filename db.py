@@ -1,4 +1,4 @@
-"""Enspecta Solar Lead Machine -- shared DB layer.
+﻿"""Solar Scout -- shared DB layer.
 
 Single SQLite file (data/leads.db) used by harvester.py, prescreen.py
 and app.py. Owns the schema, lightweight column migrations, and the

@@ -1,4 +1,4 @@
-"""Enspecta Solar Lead Machine -- Streamlit UI.
+﻿"""Solar Scout -- Streamlit UI.
 
 Tabs:
   Dashboard         -- counts, status chart, live scan progress + ETA.
@@ -179,8 +179,8 @@ def build_excel_bytes(rows: list[sqlite3.Row]) -> bytes:
 
 # ---- UI --------------------------------------------------------------------
 
-st.set_page_config(page_title="Enspecta Solar Lead Machine", layout="wide")
-st.title("Enspecta Solar Lead Machine")
+st.set_page_config(page_title="Solar Scout", layout="wide")
+st.title("Solar Scout")
 
 if not DB_PATH.exists():
     st.warning(

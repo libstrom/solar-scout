@@ -1,4 +1,4 @@
-"""Enspecta Solar Lead Machine -- AI prescreen.
+﻿"""Solar Scout -- AI prescreen.
 
 Grades every harvested rooftop crop with a vision model and writes the
 verdict to the leads table (ai_score 0-100, ai_has_panels, ai_reason).

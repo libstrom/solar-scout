@@ -1,4 +1,4 @@
-"""Enspecta Solar Lead Machine -- gratis-harvester (Lantmäteriet + OSM).
+﻿"""Solar Scout -- gratis-harvester (Lantmäteriet + OSM).
 
 Noll-kostnadsalternativet till harvester.py. I stället för att grid-scanna
 Google Solar API ($0.01/punkt) hämtas allt från öppna källor:
@@ -241,7 +241,7 @@ def harvest_lm(town: str, max_buildings: int, min_area: float, max_area: float,
     bbox = BBOXES[town]
 
     print("=" * 60)
-    print("Enspecta Solar Lead Machine -- gratis-harvester (LM + OSM)")
+    print("Solar Scout -- gratis-harvester (LM + OSM)")
     print(f"Area: {town}  bbox={bbox}")
     print("Hämtar byggnadspolygoner från Overpass...")
     buildings = fetch_buildings_overpass(bbox)

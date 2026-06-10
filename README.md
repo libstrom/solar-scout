@@ -1,4 +1,4 @@
-# Enspecta Solar Lead Machine
+# Solar Scout
 
 End-to-end leadmaskin för solcellsförsäljning:
 

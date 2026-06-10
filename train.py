@@ -1,4 +1,4 @@
-"""Enspecta Solar Lead Machine -- självträning från manuella valideringar.
+﻿"""Solar Scout -- självträning från manuella valideringar.
 
 Varje gång du bekräftar/avvisar ett lead i Verification Lab skapas en
 träningsetikett. Det här skriptet läser etiketterna och gör pipelinen
