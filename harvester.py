@@ -412,7 +412,7 @@ def cost_preview(grid_pts: int, max_buildings: int) -> None:
     print(f"  TOTAL (worst case):   ~${s+m+g:.2f}")
 
 
-def harvest(town: str, max_buildings: int) -> None:
+def harvest(town: str, max_buildings: int, max_points: Optional[int] = None) -> None:
     if not GOOGLE_MAPS_API_KEY:
         print("ERROR: GOOGLE_MAPS_API_KEY missing in .env", file=sys.stderr)
         sys.exit(2)
@@ -437,6 +437,9 @@ def harvest(town: str, max_buildings: int) -> None:
         for lat, lng in grid_points(bbox, GRID_SPACING_M):
             if progress.found >= max_buildings:
                 progress.log(f"Hit --max-buildings={max_buildings}; stopping.")
+                break
+            if max_points is not None and progress.done >= max_points:
+                progress.log(f"Hit --max-points={max_points}; stopping.")
                 break
             try:
                 progress.add_cost(COST_SOLAR_API)
@@ -513,9 +516,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--town", default="Kågeröd", choices=list(BBOXES.keys()))
     p.add_argument("--max-buildings", type=int, default=DEFAULT_MAX_BUILDINGS,
                    help=f"Cap NEW buildings per run (default {DEFAULT_MAX_BUILDINGS})")
+    p.add_argument("--max-points", type=int, default=None,
+                   help="Hard cap on grid points this run (kostnadstak: ~$0.01/punkt)")
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    harvest(args.town, args.max_buildings)
+    harvest(args.town, args.max_buildings, args.max_points)
