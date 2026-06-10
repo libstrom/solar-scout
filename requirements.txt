@@ -1,0 +1,9 @@
+requests>=2.32.0
+python-dotenv>=1.0.0
+streamlit>=1.40.0
+pandas>=2.2.0
+openpyxl>=3.1.0
+Pillow>=10.4.0
+openlocationcode>=1.0.1
+anthropic>=0.40.0      # prescreen.py --backend api (valfri; cli-backend klarar sig utan)
+pytest>=8.0.0          # tester
