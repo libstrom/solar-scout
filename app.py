@@ -7,6 +7,7 @@ import io
 import os
 import re
 import time
+import threading
 import logging
 import urllib.parse
 import httpx
@@ -1374,6 +1375,7 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
         progress_bar   = st.progress(0.0, text="Startar...")
         status_text    = st.empty()
         found_leads: list[Lead] = []
+        _found_leads_lock = threading.Lock()
         live_leads_ph  = st.empty()
         scan_debug: list[str] = []
         scan_errors: list[str] = []
@@ -1410,34 +1412,47 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                                 st.caption(f"_{_live_lead.ai_reasoning}_")
 
         def on_progress(done: int, total: int, result):
-            cumulative_done[0] += 1
-            n = cumulative_done[0]
-            # Capture the lead first — progress_bar.progress() must not prevent
-            # this even if it raises (e.g. on a second scan in the same session).
-            if result:
-                found_leads.append(result)
-                current_address[0] = result.address or ""
-                # Progressive save — persists each AI lead immediately so a crash never loses data
-                if result.source == "ai":
+            try:
+                cumulative_done[0] += 1
+                n = cumulative_done[0]
+                if result:
+                    with _found_leads_lock:
+                        found_leads.append(result)
+                    current_address[0] = result.address or ""
+                    # Progressive save — persists each AI lead immediately so a crash never loses data
+                    if result.source == "ai":
+                        try:
+                            row = {**_lead_to_sb_row(result), "user_id": str(user.id)}
+                            get_supabase().table("scout_leads").insert(row).execute()
+                        except Exception as _ins_exc:
+                            _log.warning("progressive lead insert failed: %s", _ins_exc)
+                            scan_errors.append(f"DB-sparning misslyckades ({result.address}): {_ins_exc}")
+                            # Surface DB failures so user knows leads may be missing
+                            st.session_state["_scanner_last_error"] = (
+                                f"Varning: ett lead kunde inte sparas till databasen ({result.address}). "
+                                f"Fel: {_ins_exc}"
+                            )
                     try:
-                        row = {**_lead_to_sb_row(result), "user_id": str(user.id)}
-                        get_supabase().table("scout_leads").insert(row).execute()
-                    except Exception as _ins_exc:
-                        _log.warning("progressive lead insert failed: %s", _ins_exc)
-                        scan_errors.append(f"DB-sparning misslyckades ({result.address}): {_ins_exc}")
-                _render_live_leads()
-            known_total = total_buildings_est[0]
-            if known_total > 0:
-                frac = min(n / known_total, 0.97)
-            else:
-                # Unknown total — asymptotic: moves fast early, slows near 95 %
-                frac = min(0.02 + 0.93 * (1 - 1 / (1 + n / 15)), 0.97)
-            frac = max(frac, progress_floor[0])
-            progress_floor[0] = frac
-            pct = int(frac * 100)
-            addr_str = f" — {current_address[0]}" if current_address[0] else ""
-            total_str = f" av {known_total}" if known_total > 0 else ""
-            progress_bar.progress(frac, text=f"🔍 {pct}% · Byggnad {n}{total_str}{addr_str}")
+                        _render_live_leads()
+                    except Exception as _render_exc:
+                        _log.debug("_render_live_leads error (non-fatal): %s", _render_exc)
+                known_total = total_buildings_est[0]
+                if known_total > 0:
+                    frac = min(n / known_total, 0.97)
+                else:
+                    # Unknown total — asymptotic: moves fast early, slows near 95 %
+                    frac = min(0.02 + 0.93 * (1 - 1 / (1 + n / 15)), 0.97)
+                frac = max(frac, progress_floor[0])
+                progress_floor[0] = frac
+                pct = int(frac * 100)
+                addr_str = f" — {current_address[0]}" if current_address[0] else ""
+                total_str = f" av {known_total}" if known_total > 0 else ""
+                try:
+                    progress_bar.progress(frac, text=f"🔍 {pct}% · Byggnad {n}{total_str}{addr_str}")
+                except Exception as _pb_exc:
+                    _log.debug("progress_bar update error (non-fatal): %s", _pb_exc)
+            except Exception as _cb_exc:
+                _log.warning("on_progress unhandled error (non-fatal): %s", _cb_exc)
 
         def on_phase(phase: str, count: int):
             if phase == "osm_leads":
@@ -1482,6 +1497,7 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
             _log.error("scan ValueError: %s", e)
             _emsg = str(e)
             st.session_state["_scanner_last_error"] = _emsg
+            progress_bar.progress(1.0, text="Avbruten")
             st.error(_emsg)
             return
         except Exception as e:

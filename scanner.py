@@ -178,7 +178,9 @@ def _overpass(query: str, timeout: int = 90) -> list[dict]:
                 _log.warning("Overpass attempt %d failed: %s", attempt + 1, exc)
                 if attempt < 3:
                     time.sleep(_BACKOFF[min(attempt, len(_BACKOFF) - 1)])
-        _log.error("Overpass failed after 4 attempts")
+        _log.error("Overpass failed after 4 attempts — returning empty result")
+        # Return sentinel so callers can detect failure via empty list + log.
+        # Do NOT raise here: callers have fallback paths and partial results.
         return []
     finally:
         if acquired:
@@ -1465,7 +1467,11 @@ def scan_buildings_ai(
                 result = None
             except APIQuotaExceededError:
                 raise
-            except Exception:
+            except Exception as _exc:
+                _log.error(
+                    "_process_building raised unhandled exception (building=%s): %s",
+                    futures[future].get("osm_id", "?"), _exc, exc_info=True,
+                )
                 result = None
             if result is not None:
                 leads.append(result)
