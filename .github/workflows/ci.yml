@@ -30,9 +30,13 @@ jobs:
         run: python -m pytest tests/ -x -q --ignore=tests/test_f1_baseline.py --ignore=tests/e2e/
 
   # ── Tier 2 — F1 regression (requires ANTHROPIC_API_KEY) ────────────────────
+  # The `secrets` context is NOT allowed in a job-level `if:` — doing so makes
+  # GitHub fail the whole workflow at compile time (0 jobs, conclusion=failure).
+  # Expose the presence of the secret as a job-level env, then gate the steps.
   f1-regression:
     runs-on: ubuntu-latest
-    if: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+    env:
+      HAS_ANTHROPIC: ${{ secrets.ANTHROPIC_API_KEY != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -42,9 +46,11 @@ jobs:
           cache: pip
 
       - name: Install dependencies
+        if: env.HAS_ANTHROPIC == 'true'
         run: pip install -r requirements.txt
 
       - name: F1 regression
+        if: env.HAS_ANTHROPIC == 'true'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           LANTMATERIET_TOKEN: ${{ secrets.LANTMATERIET_TOKEN }}
