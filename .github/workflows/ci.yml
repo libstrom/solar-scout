@@ -43,7 +43,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
+          # No `cache: pip` here — the install step is skipped when the secret
+          # is absent, and setup-python's cache post-step then fails because
+          # nothing was installed ("cache folder doesn't exist on disk").
 
       - name: Install dependencies
         if: env.HAS_ANTHROPIC == 'true'
