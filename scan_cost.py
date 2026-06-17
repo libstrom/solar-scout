@@ -178,8 +178,10 @@ class BudgetTracker:
     budget_sek: float = DEFAULT_BUDGET_SEK
     pricing: ModelPricing = field(default=OPUS_4_8)
     stopped_over_budget: bool = False
+    stopped_cancelled: bool = False
     _cost_usd: float = 0.0
     _buildings: int = 0
+    _cancelled: bool = False
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def add_usage(
@@ -211,6 +213,16 @@ class BudgetTracker:
     def mark_building(self) -> None:
         with self._lock:
             self._buildings += 1
+
+    def request_cancel(self) -> None:
+        """Signalera att en pågående scan ska avbrytas (från UI:t). Trådsäkert."""
+        with self._lock:
+            self._cancelled = True
+
+    @property
+    def cancelled(self) -> bool:
+        with self._lock:
+            return self._cancelled
 
     @property
     def spent_sek(self) -> float:

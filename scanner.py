@@ -1496,6 +1496,13 @@ def scan_buildings_ai(
                 for f in futures:
                     f.cancel()
                 break
+            # Mjuk avbrytning från UI:t — behåll redan hittade leads.
+            if getattr(budget, "cancelled", False):
+                budget.stopped_cancelled = True
+                _log.info("scan cancelled by user — keeping %d partial leads", len(leads))
+                for f in futures:
+                    f.cancel()
+                break
             # Short-circuit if we've hit the lead cap
             if max_leads is not None and len(leads) >= max_leads:
                 # Cancel remaining futures that haven't started yet
