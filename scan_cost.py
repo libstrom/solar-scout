@@ -60,30 +60,53 @@ OUTPUT_TOKENS = 220               # max_tokens i _analyze_building
 # Verifiera mot Google Maps Platform Console vid prisändringar.
 GOOGLE_STATIC_MAPS_USD_PER_REQUEST = 0.002  # 2 USD / 1 000 requests
 
-# Andel byggnader som blir UNSURE och drar ett extra Street View-anrop.
+# Andel byggnader som blir UNSURE och drar ett extra Street View-anrop
+# (av de byggnader som når Opus — se PREFILTER_PASS_RATE_* nedan).
 # Lågt/förväntat/högt — ger ett spann i estimatet.
 UNSURE_FRACTION_LOW = 0.05
 UNSURE_FRACTION_EXPECTED = 0.15
 UNSURE_FRACTION_HIGH = 0.35
+
+# Andel byggnader som klarar Haiku-prefiltret och når (dyra) Opus 4.8.
+# _prefilter_building() dokumenterar "saves ~60% of Opus calls" — dvs ~40% når fram.
+# HIGH = 1.0 (inget prefilter alls) används medvetet som säkerhetstak för
+# budget-grinden (requires_approval/exceeds_budget) — se estimate_scan_cost().
+PREFILTER_PASS_RATE_LOW = 0.30
+PREFILTER_PASS_RATE_EXPECTED = 0.40
+PREFILTER_PASS_RATE_HIGH = 1.0
+
+# Haiku-prefiltret körs på ALLA byggnader (samma satellitbild, kort ja/nej-svar).
+HAIKU_PREFILTER_OUTPUT_TOKENS = 10  # max_tokens i _prefilter_building
 
 
 def _cost_usd(tokens: int, rate_per_mtok: float) -> float:
     return tokens / 1_000_000 * rate_per_mtok
 
 
-def _per_building_usd(unsure_fraction: float, pricing: ModelPricing = OPUS_4_8) -> float:
-    """Förväntad kostnad (USD) för en byggnad i steady state (cachen redan varm)."""
+def _per_building_usd(
+    unsure_fraction: float,
+    prefilter_pass_rate: float = PREFILTER_PASS_RATE_HIGH,
+    pricing: ModelPricing = OPUS_4_8,
+) -> float:
+    """Förväntad kostnad (USD) för en byggnad i steady state (cachen redan varm).
+
+    Haiku-prefiltret körs på alla byggnader; bara prefilter_pass_rate andel
+    av dem går vidare till (mycket dyrare) Opus 4.8.
+    """
+    haiku_cost = _cost_usd(SATELLITE_IMG_TOKENS, HAIKU_4_5.input) + _cost_usd(
+        HAIKU_PREFILTER_OUTPUT_TOKENS, HAIKU_4_5.output
+    )
     cache_read = _cost_usd(CACHED_CONTEXT_TOKENS, pricing.cache_read)
     fresh_input = _cost_usd(SATELLITE_IMG_TOKENS, pricing.input)
     output = _cost_usd(OUTPUT_TOKENS, pricing.output)
     base = cache_read + fresh_input + output
-    # extra Street View-anrop för en andel av byggnaderna (ny input-bild + output)
+    # extra Street View-anrop för en andel av de Opus-analyserade byggnaderna
     sv_extra = unsure_fraction * (
         _cost_usd(STREETVIEW_IMG_TOKENS, pricing.input)
         + _cost_usd(CACHED_CONTEXT_TOKENS, pricing.cache_read)
         + _cost_usd(OUTPUT_TOKENS, pricing.output)
     )
-    return base + sv_extra
+    return haiku_cost + prefilter_pass_rate * (base + sv_extra)
 
 
 @dataclass
@@ -122,20 +145,37 @@ def estimate_scan_cost(
     n = max(0, int(n_buildings))
     # Engångskostnad för att värma cachen (skrivs en gång per scan).
     cache_write_usd = _cost_usd(CACHED_CONTEXT_TOKENS, OPUS_4_8.cache_write)
-    # Google Maps Static API: en bild per byggnad + en per UNSURE-fall (street view).
-    maps_low = n * (1 + UNSURE_FRACTION_LOW) * GOOGLE_STATIC_MAPS_USD_PER_REQUEST
-    maps_expected = n * (1 + UNSURE_FRACTION_EXPECTED) * GOOGLE_STATIC_MAPS_USD_PER_REQUEST
-    maps_high = n * (1 + UNSURE_FRACTION_HIGH) * GOOGLE_STATIC_MAPS_USD_PER_REQUEST
+    # Google Maps Static API: en bild per byggnad (alla, för Haiku-prefiltret)
+    # + en per UNSURE-fall bland de som nådde Opus (street view).
+    maps_low = n * (
+        1 + PREFILTER_PASS_RATE_LOW * UNSURE_FRACTION_LOW
+    ) * GOOGLE_STATIC_MAPS_USD_PER_REQUEST
+    maps_expected = n * (
+        1 + PREFILTER_PASS_RATE_EXPECTED * UNSURE_FRACTION_EXPECTED
+    ) * GOOGLE_STATIC_MAPS_USD_PER_REQUEST
+    maps_high = n * (
+        1 + PREFILTER_PASS_RATE_HIGH * UNSURE_FRACTION_HIGH
+    ) * GOOGLE_STATIC_MAPS_USD_PER_REQUEST
 
-    low = cache_write_usd + n * _per_building_usd(UNSURE_FRACTION_LOW) + maps_low
-    expected = cache_write_usd + n * _per_building_usd(UNSURE_FRACTION_EXPECTED) + maps_expected
-    high = cache_write_usd + n * _per_building_usd(UNSURE_FRACTION_HIGH) + maps_high
+    low = cache_write_usd + n * _per_building_usd(
+        UNSURE_FRACTION_LOW, PREFILTER_PASS_RATE_LOW
+    ) + maps_low
+    expected = cache_write_usd + n * _per_building_usd(
+        UNSURE_FRACTION_EXPECTED, PREFILTER_PASS_RATE_EXPECTED
+    ) + maps_expected
+    # HIGH = säkerhetstak: antar att prefiltret INTE hjälper alls (pass_rate=1.0).
+    # Detta är vad requires_approval/exceeds_budget grindar mot — medvetet
+    # konservativt så budgetspärren aldrig underskattar en skenande scan.
+    high = cache_write_usd + n * _per_building_usd(
+        UNSURE_FRACTION_HIGH, PREFILTER_PASS_RATE_HIGH
+    ) + maps_high
 
     low_sek = low * USD_TO_SEK
     expected_sek = expected * USD_TO_SEK
     high_sek = high * USD_TO_SEK
     per_building_sek = (
-        _per_building_usd(UNSURE_FRACTION_EXPECTED) * USD_TO_SEK
+        _per_building_usd(UNSURE_FRACTION_EXPECTED, PREFILTER_PASS_RATE_EXPECTED)
+        * USD_TO_SEK
     )
 
     return CostEstimate(

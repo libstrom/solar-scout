@@ -103,7 +103,7 @@ HAIKU_4_5  = ModelPricing(input=1.00, output=5.00,  cache_write=1.25, cache_read
 USD_TO_SEK = 10.50
 ```
 
-`estimate_scan_cost(n)` räknar på **värsta-fall** (utan Haiku-prefilter). Verklig kostnad är ~2.5× lägre tack vare att Haiku filtrerar 60% av byggnader. Siffran som visas i UI är konservativ med avsikt.
+`estimate_scan_cost(n)` returnerar tre nivåer. `low`/`expected` räknar med att Haiku-prefiltret fungerar som avsett (~40% av byggnaderna når dyra Opus 4.8 — Haiku filtrerar bort resten för en bråkdel av kostnaden). `high` är ett medvetet pessimistiskt säkerhetstak som antar att prefiltret INTE hjälper alls (100% når Opus) — det är `high` som `requires_approval`/`exceeds_budget` grindar mot, så budgetspärren blir aldrig mer optimistisk än förut. Siffran UI:t visar som "förväntat" är alltså den realistiska kostnaden, inte värsta fallet.
 
 Gates: **CONFIRM_THRESHOLD_SEK = 200 kr** (checkbox krävs) · **DEFAULT_BUDGET_SEK = 5000 kr** (hård stop).
 

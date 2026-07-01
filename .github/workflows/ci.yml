@@ -9,6 +9,12 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # `secrets` i ett `if:`-uttryck gör att hela workflow-filen underkänns vid
+    # tolkning (0 jobb körs, conclusion=failure) — samma orsak som gjorde att
+    # main varit röd i veckor. Exponera secreten som job-env och grinda steget
+    # på env istället (se f1333872 för samma fix på en annan ci.yml-variant).
+    env:
+      HAS_ANTHROPIC: ${{ secrets.ANTHROPIC_API_KEY != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -29,7 +35,7 @@ jobs:
         run: python -m pytest tests/ -x -q --ignore=tests/test_f1_baseline.py
 
       - name: F1 regression (kräver ANTHROPIC_API_KEY)
-        if: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+        if: env.HAS_ANTHROPIC == 'true'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           LANTMATERIET_TOKEN: ${{ secrets.LANTMATERIET_TOKEN }}

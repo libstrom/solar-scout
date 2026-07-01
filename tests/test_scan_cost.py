@@ -184,3 +184,22 @@ def test_estimate_small_scan_does_not_exceed_budget():
     est = estimate_scan_cost(600)
     assert not est.exceeds_budget
     assert est.high_sek < DEFAULT_BUDGET_SEK
+
+
+# ── Haiku-prefilter ska synas i estimatet (inte bara i höga säkerhetstaket) ──
+
+def test_expected_reflects_haiku_prefilter_savings():
+    """`förväntat` ska vara klart billigare än `high` tack vare att Haiku-
+    prefiltret filtrerar bort ~60% av byggnaderna innan de når Opus. `high`
+    förblir ett medvetet pessimistiskt säkerhetstak (inget prefilter alls) —
+    det är detta requires_approval/exceeds_budget grindar mot."""
+    est = estimate_scan_cost(2800)  # ungefär den storlek som tidigare visade ~700 kr
+    assert est.expected_sek < est.high_sek * 0.6
+
+
+def test_high_sek_unaffected_by_prefilter_assumption():
+    """`high` ska motsvara "inget prefilter hjälper" — samma säkerhetsmarginal
+    som tidigare, så budgetspärren aldrig blir mer optimistisk än förut."""
+    est = estimate_scan_cost(20_000)
+    assert est.requires_approval
+    assert est.exceeds_budget
