@@ -872,18 +872,30 @@ def _bulk_scan_section(user, profile, ai_available):
                 key="bulk_max_total",
             )
 
-        COST_PER_BUILDING_SEK = 0.025
-        SOLAR_RATE = 0.08
-        est_builds = int(bulk_max * len(selected) / SOLAR_RATE)
-        est_sek = est_builds * COST_PER_BUILDING_SEK
+        from scan_cost import estimate_scan_cost as _bulk_est, DEFAULT_BUDGET_SEK as _BULK_BUDGET_SEK
+        _BULK_SOLAR_RATE = 0.08
+        _bulk_target_leads = min(bulk_max * len(selected), max_total)
+        _bulk_est_builds = int(_bulk_target_leads / _BULK_SOLAR_RATE)
+        _bulk_cost = _bulk_est(_bulk_est_builds, budget_sek=_BULK_BUDGET_SEK)
         st.caption(
-            f"{len(selected)} orter × ~{bulk_max} leads "
-            f"≈ {est_builds:,} hus att analysera · beräknad kostnad ~{est_sek:.0f} kr"
+            f"{len(selected)} orter × ~{bulk_max} leads (tak {max_total} totalt) "
+            f"≈ {_bulk_est_builds:,} hus att analysera"
         )
+        _bulk_warn_fn = st.warning if _bulk_cost.requires_confirm else st.info
+        _bulk_warn_fn(
+            f"Beräknad kostnad: **{_bulk_cost.low_sek:.0f}–{_bulk_cost.high_sek:.0f} kr** "
+            f"(förväntat ~{_bulk_cost.expected_sek:.0f} kr) · "
+            f"budgettak {_BULK_BUDGET_SEK:.0f} kr för HELA körningen (delas mellan alla orter)."
+        )
+        if _bulk_cost.exceeds_budget:
+            st.error(
+                f"Värsta-fall-kostnaden ({_bulk_cost.high_sek:.0f} kr) överstiger budgettaket. "
+                f"Minska antal orter eller max leads."
+            )
 
         if st.button(
             "▶ Starta storskalig scanning",
-            disabled=not selected or not ai_available,
+            disabled=not selected or not ai_available or _bulk_cost.exceeds_budget,
             key="bulk_start",
             type="primary",
         ):
@@ -907,13 +919,19 @@ def _bulk_scan_section(user, profile, ai_available):
             total_leads = 0
             overall_bar = st.progress(0.0)
             status_ph = st.empty()
+            bulk_img_ph = st.empty()
             log_ph = st.empty()
             city_log: list[str] = []
 
             from scanner import scan_municipality  # noqa: PLC0415
+            from scan_cost import BudgetTracker as _BulkBudgetTracker  # noqa: PLC0415
 
             def _noop_progress(done, total, lead):
                 pass
+
+            def _bulk_on_image(img_bytes: bytes):
+                with bulk_img_ph.container():
+                    st.image(img_bytes, width=140, caption="🔍 Analyserar just nu")
 
             def _on_city_done(city, n_leads, stats):
                 nonlocal total_leads
@@ -930,6 +948,7 @@ def _bulk_scan_section(user, profile, ai_available):
 
             status_ph.info(f"⏳ Scannar **{len(selected)} orter** i {region_name}…")
 
+            _bulk_budget = _BulkBudgetTracker(budget_sek=_BULK_BUDGET_SEK)
             try:
                 all_leads, final_stats = scan_municipality(
                     selected,
@@ -942,10 +961,21 @@ def _bulk_scan_section(user, profile, ai_available):
                     max_leads_total=int(max_total),
                     skip_tile_keys=skip_keys,
                     user_id=str(user.id),
+                    budget=_bulk_budget,
+                    image_callback=_bulk_on_image,
                 )
             except Exception as exc:
                 status_ph.error(f"Bulk-scan avbröts: {exc}")
                 all_leads, final_stats = [], ScanStats()
+
+            bulk_img_ph.empty()
+
+            if _bulk_budget.stopped_over_budget:
+                st.warning(
+                    f"⚠️ **Budgettaket på {_BULK_BUDGET_SEK:.0f} kr nåddes** — bulk-scanningen "
+                    f"stoppades automatiskt. Faktisk kostnad: ~{_bulk_budget.spent_sek:.0f} kr. "
+                    f"Leads som redan hittats är sparade."
+                )
 
             # Save OSM leads (AI leads already saved progressively)
             for lead in all_leads:
@@ -989,7 +1019,8 @@ def _bulk_scan_section(user, profile, ai_available):
             status_ph.success(
                 f"🎉 Klar! **{total_leads} leads** sparade · "
                 f"☀️ {final_stats.yes} YES · ⚠️ {final_stats.unsure} UNSURE · "
-                f"❌ {final_stats.no} NO"
+                f"❌ {final_stats.no} NO · "
+                f"faktisk kostnad ~{_bulk_budget.spent_sek:.0f} kr"
             )
             st.balloons()
 
@@ -1251,6 +1282,7 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
 
         progress_bar   = st.progress(0.0, text="Startar...")
         status_text    = st.empty()
+        current_img_ph = st.empty()
         found_leads: list[Lead] = []
         live_leads_ph  = st.empty()
         scan_debug: list[str] = []
@@ -1260,6 +1292,10 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
         progress_floor = [0.0]  # never let the bar go backwards
 
         current_address = [""]
+
+        def on_image(img_bytes: bytes):
+            with current_img_ph.container():
+                st.image(img_bytes, width=140, caption="🔍 Analyserar just nu")
 
         def _render_live_leads():
             with live_leads_ph.container():
@@ -1346,6 +1382,7 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                     mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads,
                     phase_callback=on_phase, skip_tile_keys=_skip_tile_keys,
                     user_id=str(user.id), budget=_scan_budget,
+                    image_callback=on_image,
                 )
             else:
                 status_text.info("Hämtar byggnadsdata från OSM (kan ta 20–60 s)...")
@@ -1354,6 +1391,7 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                     mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads,
                     phase_callback=on_phase, skip_tile_keys=_skip_tile_keys,
                     user_id=str(user.id), budget=_scan_budget,
+                    image_callback=on_image,
                 )
         except ValueError as e:
             _log.error("scan ValueError: %s", e)
@@ -1380,6 +1418,7 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
 
         progress_bar.progress(1.0, text="Klar!")
         status_text.empty()
+        current_img_ph.empty()
         live_leads_ph.empty()  # Full results UI renders below — no duplicate
 
         if _scan_budget.stopped_over_budget:
@@ -1908,8 +1947,45 @@ def page_review(user):
             st.rerun()
 
 
+# Hover-to-enlarge thumbnail preview, pure CSS (:hover). Streamlit's HTML
+# sanitizer strips inline event-handler attributes (onmouseenter etc.) from
+# st.markdown(unsafe_allow_html=True) — a JS cursor-follow tooltip silently
+# never fires. :hover + an absolutely-positioned sibling has no such
+# dependency. Shared by _leads_html_with_thumbs and _hover_thumb_html so both
+# thumbnail spots on the leads page (table + "Granska AI-detekterade tak")
+# behave the same way.
+_HOVER_CSS = (
+    "<style>"
+    ".lth-wrap{position:relative;display:inline-block;cursor:pointer}"
+    ".lth-big{display:none;position:absolute;top:0;left:100%;margin-left:8px;"
+    "z-index:9999;width:230px;height:175px;object-fit:cover;border:2px solid #6b7280;"
+    "border-radius:6px;box-shadow:0 4px 20px rgba(0,0,0,.45);background:#1a1a1a}"
+    ".lth-wrap:hover .lth-big{display:block}"
+    "</style>"
+)
+
+
+def _hover_thumb_html(img_url: str, maps_href: str, size: int = 84) -> str:
+    """Small clickable thumbnail that enlarges on hover (pure CSS — see
+    _HOVER_CSS) instead of a full-width st.image(). Caller must also render
+    _HOVER_CSS once on the page (_leads_html_with_thumbs does this)."""
+    import html as _html  # noqa: PLC0415
+
+    safe_img_url = _html.escape(img_url, quote=True)
+    safe_maps_href = _html.escape(maps_href or img_url, quote=True)
+    return (
+        f'<a href="{safe_maps_href}" target="_blank" rel="noopener noreferrer"'
+        f' title="Öppna i Google Maps satellit" class="lth-wrap">'
+        f'<img src="{safe_img_url}" loading="lazy"'
+        f' style="max-width:{size}px;width:{size}px;height:{size}px;object-fit:cover;'
+        f'border-radius:4px;display:block" />'
+        f'<img class="lth-big" src="{safe_img_url}" loading="lazy" />'
+        f'</a>'
+    )
+
+
 def _leads_html_with_thumbs(df_full: "pd.DataFrame") -> None:
-    """Render leads as an HTML table with cursor-following thumbnail previews."""
+    """Render leads as an HTML table with hover-to-enlarge thumbnail previews."""
     import html as _html  # noqa: PLC0415
     from urllib.parse import urlparse as _urlparse  # noqa: PLC0415
 
@@ -1926,23 +2002,6 @@ def _leads_html_with_thumbs(df_full: "pd.DataFrame") -> None:
         _has_lm = True
     except Exception:
         _has_lm = False
-
-    # JS helpers (inline, no <script> tag — those are stripped by Streamlit's innerHTML)
-    # onmousemove: follow cursor, flip left when near right viewport edge
-    _js_move = (
-        "var p=document.getElementById('stp');"
-        "var x=event.clientX+14,y=event.clientY-88;"
-        "if(x+230>window.innerWidth)x=event.clientX-244;"
-        "if(y<4)y=4;"
-        "p.style.left=x+'px';p.style.top=y+'px';"
-    )
-    _js_enter = (
-        "var p=document.getElementById('stp');"
-        "document.getElementById('sti').src=this.dataset.src;"
-        "p.style.display='block';"
-        + _js_move
-    )
-    _js_leave = "document.getElementById('stp').style.display='none';"
 
     rows_html: list[str] = []
     for _, row in df_full.iterrows():
@@ -1961,7 +2020,6 @@ def _leads_html_with_thumbs(df_full: "pd.DataFrame") -> None:
             img_url = _safe_url(row.get("image_url"))
 
         if img_url:
-            safe_img_url = _html.escape(img_url, quote=True)
             lat_v, lng_v = row.get("lat"), row.get("lng")
             try:
                 maps_href = (
@@ -1970,23 +2028,7 @@ def _leads_html_with_thumbs(df_full: "pd.DataFrame") -> None:
                 )
             except Exception:
                 maps_href = img_url
-            safe_maps_href = _html.escape(maps_href, quote=True)
-            # Inline 96×96 thumbnail — always visible, lazy loaded
-            inline_img = (
-                f'<a href="{safe_maps_href}" target="_blank" rel="noopener noreferrer"'
-                f' title="Öppna i Google Maps satellit">'
-                f'<img src="{safe_img_url}" loading="lazy"'
-                f' style="max-width:96px;width:96px;height:96px;object-fit:cover;'
-                f'border-radius:4px;display:block" /></a>'
-            )
-            thumb_cell = (
-                f'<span class="lth" data-src="{safe_img_url}"'
-                f' onmouseenter="{_js_enter}"'
-                f' onmousemove="{_js_move}"'
-                f' onmouseleave="{_js_leave}">'
-                + inline_img
-                + '</span>'
-            )
+            thumb_cell = _hover_thumb_html(img_url, maps_href, size=96)
         else:
             thumb_cell = '<span style="color:#aaa">–</span>'
 
@@ -1998,17 +2040,8 @@ def _leads_html_with_thumbs(df_full: "pd.DataFrame") -> None:
             f"</tr>"
         )
 
-    # Floating preview div — one instance, reused for all rows
-    floating_div = (
-        '<div id="stp" style="display:none;position:fixed;z-index:9999;'
-        'width:230px;height:175px;border:2px solid #6b7280;border-radius:6px;'
-        'box-shadow:0 4px 20px rgba(0,0,0,.45);background:#1a1a1a;pointer-events:none;overflow:hidden">'
-        '<img id="sti" src="" style="width:100%;height:100%;object-fit:cover" loading="lazy" />'
-        '</div>'
-    )
-
     html = (
-        floating_div
+        _HOVER_CSS
         + "<style>"
         ".lt-t{width:100%;border-collapse:collapse;font-size:13px;font-family:sans-serif}"
         ".lt-t th{background:#f0f2f6;padding:7px 12px;text-align:left;border-bottom:2px solid #d1d5db}"
@@ -2016,7 +2049,6 @@ def _leads_html_with_thumbs(df_full: "pd.DataFrame") -> None:
         ".lt-t td.lc{text-align:center;width:56px}"
         ".lt-t td.li{width:108px;padding:4px 6px;vertical-align:middle}"
         ".lt-t td.la{max-width:280px;word-break:break-word}"
-        ".lth{display:inline-block;cursor:pointer}"
         "</style>"
         '<div style="overflow-x:auto">'
         '<table class="lt-t"><thead><tr>'
@@ -2385,38 +2417,37 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
         return
 
     st.caption(f"{len(unreviewed)} leads väntar på granskning — stämmer AI:ns bedömning?")
+    st.markdown(_HOVER_CSS, unsafe_allow_html=True)
 
     for _, row in unreviewed.iterrows():
         st.divider()
         col_img, col_info = st.columns([1, 1])
 
         with col_img:
-            img_shown = False
-            stored_url = row.get("image_url", "")
-            if stored_url:
+            # Kompakt hover-thumbnail istället för full-bredds st.image — samma
+            # mönster som leadslistan ovan (förstoras i den delade #stp-rutan).
+            lat, lng = row.get("lat"), row.get("lng")
+            img_url = row.get("image_url") or ""
+            if not img_url and lat and lng:
                 try:
-                    st.image(stored_url, use_container_width=True)
-                    img_shown = True
+                    from scanner import lm_wms_url as _lm_url_fn
+                    img_url = _lm_url_fn(float(lat), float(lng), size_m=80, width=240, height=180)
                 except Exception:
-                    pass
-            if not img_shown:
-                lat, lng = row.get("lat"), row.get("lng")
-                if lat and lng and MAPBOX_TOKEN:
-                    st.image(
-                        f"https://api.mapbox.com/styles/v1/mapbox/satellite-v9/static"
-                        f"/{lng},{lat},20/400x300?access_token={MAPBOX_TOKEN}",
-                        use_container_width=True,
-                    )
-                elif lat and lng:
-                    try:
-                        from scanner import _fetch_lm_wms
-                        img_bytes = _fetch_lm_wms(lat, lng)
-                        if img_bytes:
-                            st.image(img_bytes, use_container_width=True)
-                        else:
-                            st.caption("(Bild ej tillgänglig)")
-                    except Exception:
-                        st.caption("(Bild ej tillgänglig)")
+                    img_url = ""
+            if not img_url and lat and lng and MAPBOX_TOKEN:
+                img_url = (
+                    f"https://api.mapbox.com/styles/v1/mapbox/satellite-v9/static"
+                    f"/{lng},{lat},20/400x300?access_token={MAPBOX_TOKEN}"
+                )
+            if img_url:
+                maps_href = (
+                    f"https://www.google.com/maps/@{lat},{lng},60m/data=!3m1!1e3"
+                    if lat and lng else img_url
+                )
+                st.markdown(_hover_thumb_html(img_url, maps_href, size=110), unsafe_allow_html=True)
+                st.caption("Hovra för förstoring · klicka för Google Maps")
+            else:
+                st.caption("(Bild ej tillgänglig)")
 
         with col_info:
             st.markdown(f"**{row.get('address', '–')}**")

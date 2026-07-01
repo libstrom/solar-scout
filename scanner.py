@@ -1272,6 +1272,7 @@ def _process_building(
     few_shot: list[tuple[str, str]] | None = None,
     skip_tile_keys: frozenset[str] = frozenset(),
     budget: "BudgetTracker | None" = None,
+    on_image: Callable[[bytes], None] | None = None,
 ) -> Lead | None:
     lat, lng = building["lat"], building["lng"]
     zoom = building.get("zoom", ZOOM_BUILDING)
@@ -1291,6 +1292,11 @@ def _process_building(
     # out by the prefilter before Opus is ever consulted (root cause of the
     # silent 0-leads bug — see CONTEXT.md).
     img = _enhance_contrast(img)
+    if on_image:
+        try:
+            on_image(img)
+        except Exception:
+            pass
     if not _prefilter_building(img, anthropic_client, budget=budget):
         _log.debug("_process_building haiku_prefilter=NO osm_id=%s", building.get("osm_id"))
         return None
@@ -1312,6 +1318,11 @@ def _process_building(
             sv_bytes = None
         if sv_bytes:
             _log.debug("_process_building: UNSURE → Street View second pass lat=%s lng=%s", lat, lng)
+            if on_image:
+                try:
+                    on_image(sv_bytes)
+                except Exception:
+                    pass
             is_house, has_solar, is_unsure, reasoning = _analyze_building(
                 anthropic_client, img, few_shot=few_shot, street_view_bytes=sv_bytes,
                 budget=budget, already_enhanced=True
@@ -1402,6 +1413,7 @@ def scan_buildings_ai(
     few_shot: list[tuple[str, str]] | None = None,
     skip_tile_keys: frozenset[str] = frozenset(),
     budget: "BudgetTracker | None" = None,
+    image_callback: Callable[[bytes], None] | None = None,
 ) -> tuple[list[Lead], ScanStats]:
     """Run Claude Vision on each OSM building centroid.
 
@@ -1410,6 +1422,9 @@ def scan_buildings_ai(
                    None means no limit.
         budget: BudgetTracker som ackumulerar faktisk API-kostnad. Scanen
                 avbryts mjukt (redan hittade leads behålls) när taket nås.
+        image_callback: Anropas med rå bildbytes (satellit eller Street View)
+                        för VARJE analyserad byggnad — låter UI:t visa live
+                        vad AI:n tittar på just nu. Best-effort; fel sväljs.
                 None → en tracker med DEFAULT_BUDGET_SEK skapas internt.
         few_shot: Pre-loaded few-shot examples as (b64_jpeg, verdict_text) pairs.
                   If None, examples are loaded from LM WMS on first call.
@@ -1451,7 +1466,10 @@ def scan_buildings_ai(
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
-            pool.submit(_process_building, b, google_key, client, mapbox_key, lm_key, lm_layer, few_shot, skip_tile_keys, budget): b
+            pool.submit(
+                _process_building, b, google_key, client, mapbox_key, lm_key, lm_layer,
+                few_shot, skip_tile_keys, budget, image_callback,
+            ): b
             for b in buildings
         }
         done = 0
@@ -1631,6 +1649,7 @@ def scan_city(
     skip_tile_keys: frozenset[str] = frozenset(),
     user_id: str | None = None,
     budget: "BudgetTracker | None" = None,
+    image_callback: Callable[[bytes], None] | None = None,
 ) -> tuple[list[Lead], ScanStats]:
     """Scan a city for buildings with solar panels.
 
@@ -1639,6 +1658,7 @@ def scan_city(
                    None means no limit.
         budget: Optional shared BudgetTracker. If None, a default 5000 kr tracker
                 is created. Callers can inspect budget.stopped_over_budget after.
+        image_callback: Se scan_buildings_ai — live-förhandsvisning av bilder.
 
     Returns:
         A tuple of (leads, stats) where stats aggregates yes/unsure/no counts.
@@ -1732,7 +1752,7 @@ def scan_city(
                 mapbox_key=mapbox_key, lm_key=lm_key,
                 max_leads=remaining, few_shot=few_shot,
                 skip_tile_keys=skip_tile_keys,
-                budget=budget,
+                budget=budget, image_callback=image_callback,
             )
             _log.info("scan_city area_leads=%d", len(area_leads))
             all_ai_leads.extend(area_leads)
@@ -1766,7 +1786,7 @@ def scan_city(
                         mapbox_key=mapbox_key, lm_key=lm_key,
                         max_leads=remaining, few_shot=few_shot,
                         skip_tile_keys=skip_tile_keys,
-                        budget=budget,
+                        budget=budget, image_callback=image_callback,
                     )
                     _log.info("scan_city glesbygd_leads=%d", len(glesbygd_leads))
                     all_ai_leads.extend(glesbygd_leads)
@@ -1792,7 +1812,7 @@ def scan_city(
             mapbox_key=mapbox_key, lm_key=lm_key,
             max_leads=remaining, few_shot=few_shot,
             skip_tile_keys=skip_tile_keys,
-            budget=budget,
+            budget=budget, image_callback=image_callback,
         )
 
     merged = merge_leads(osm_leads, all_ai_leads)
@@ -1817,6 +1837,8 @@ def scan_municipality(
     max_leads_total: int | None = None,
     skip_tile_keys: frozenset[str] = frozenset(),
     user_id: str | None = None,
+    budget: "BudgetTracker | None" = None,
+    image_callback: Callable[[bytes], None] | None = None,
 ) -> tuple[list[Lead], ScanStats]:
     """Scan multiple cities/municipalities sequentially to generate large lead batches.
 
@@ -1830,15 +1852,25 @@ def scan_municipality(
         max_leads_per_city: Lead cap per city (None = unlimited).
         max_leads_total: Stop scanning new cities once this total is reached.
         skip_tile_keys: Tile keys already in the database — skip these buildings.
+        budget: Delad BudgetTracker för HELA bulk-scanen. Om None skapas en
+                intern tracker med DEFAULT_BUDGET_SEK. Utan detta fick varje
+                stad sin EGEN 5000 kr-budget i scan_city — en bulk-scan av
+                10 orter kunde då kosta upp till 50 000 kr innan spärren slog
+                till. Med en delad tracker gäller taket för hela körningen.
 
     Returns:
         Tuple of (all_leads, merged_stats).
     """
+    if budget is None:
+        budget = BudgetTracker(budget_sek=DEFAULT_BUDGET_SEK)
     all_leads: list[Lead] = []
     merged_stats = ScanStats()
     seen_tile_keys: set[str] = set(skip_tile_keys)
 
     for city in cities:
+        if budget.stopped_over_budget:
+            _log.info("scan_municipality budget exhausted — stopping before city=%s", city)
+            break
         if max_leads_total is not None and len(all_leads) >= max_leads_total:
             _log.info("scan_municipality max_leads_total=%d reached after %d leads", max_leads_total, len(all_leads))
             break
@@ -1859,6 +1891,7 @@ def scan_municipality(
                 max_leads=per_city_cap,
                 skip_tile_keys=frozenset(seen_tile_keys),
                 user_id=user_id,
+                budget=budget, image_callback=image_callback,
             )
         except Exception as exc:
             _log.warning("scan_municipality city=%s failed: %s", city, exc)
@@ -1895,12 +1928,14 @@ def scan_bbox(
     skip_tile_keys: frozenset[str] = frozenset(),
     user_id: str | None = None,
     budget: "BudgetTracker | None" = None,
+    image_callback: Callable[[bytes], None] | None = None,
 ) -> tuple[list[Lead], ScanStats]:
     """Scan a bounding box for buildings with solar panels.
 
     Args:
         budget: Optional shared BudgetTracker. If None, a default 5000 kr tracker
                 is created. Callers can inspect budget.stopped_over_budget after.
+        image_callback: Se scan_buildings_ai — live-förhandsvisning av bilder.
 
     Returns:
         A tuple of (leads, stats) where stats aggregates yes/unsure/no counts.
@@ -1971,7 +2006,7 @@ def scan_bbox(
                     mapbox_key=mapbox_key, lm_key=lm_key,
                     max_leads=remaining, few_shot=few_shot,
                     skip_tile_keys=skip_tile_keys,
-                    budget=budget,
+                    budget=budget, image_callback=image_callback,
                 )
                 all_ai_leads.extend(area_leads)
                 merged_stats.yes    += area_stats.yes
@@ -1995,7 +2030,7 @@ def scan_bbox(
                 mapbox_key=mapbox_key, lm_key=lm_key,
                 max_leads=remaining, few_shot=few_shot,
                 skip_tile_keys=skip_tile_keys,
-                budget=budget,
+                budget=budget, image_callback=image_callback,
             )
     else:
         # Small bbox (≤ ~2 km²): direct scan, no chunking needed
@@ -2010,7 +2045,7 @@ def scan_bbox(
             mapbox_key=mapbox_key, lm_key=lm_key,
             max_leads=remaining, few_shot=few_shot,
             skip_tile_keys=skip_tile_keys,
-            budget=budget,
+            budget=budget, image_callback=image_callback,
         )
 
     if phase_callback:

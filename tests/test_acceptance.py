@@ -256,6 +256,41 @@ def test_budget_stops_ai_scan_loop():
     assert isinstance(leads, list)
 
 
+@pytest.mark.acceptance
+def test_scan_municipality_shares_budget_across_cities():
+    """scan_municipality ska dela EN BudgetTracker mellan alla orter.
+
+    Utan detta fick varje scan_city-anrop sin egen 5000 kr-budget (eftersom
+    scan_city skapar en ny tracker när budget=None) — en bulk-scan av N orter
+    kunde då kosta upp till N × 5000 kr innan spärren slog till. Med en delad
+    tracker ska scan_city #2 aldrig anropas när budgeten redan är slut efter
+    ort #1.
+    """
+    budget = BudgetTracker(budget_sek=10.0)
+    call_count = {"n": 0}
+
+    def fake_scan_city(city, *args, **kwargs):
+        call_count["n"] += 1
+        bgt = kwargs.get("budget")
+        # Simulera att första ortens scan ensam spräcker den DELADE budgeten.
+        bgt.add_usage(input_tokens=1_000_000)  # ~52 kr >> 10 kr tak
+        bgt.stopped_over_budget = True
+        return [], _sc.ScanStats()
+
+    with patch.object(_sc, "scan_city", side_effect=fake_scan_city):
+        leads, stats = _sc.scan_municipality(
+            ["Nässjö", "Eksjö", "Vetlanda", "Jönköping"],
+            google_key="fake-key",
+            anthropic_key="fake-ak",
+            budget=budget,
+        )
+
+    # Bara första orten ska ha scannats — resten hoppas över när den DELADE
+    # budgeten redan är slut.
+    assert call_count["n"] == 1
+    assert budget.spent_sek > 10.0
+
+
 # ── 4. DB-fel-väg ─────────────────────────────────────────────────────────────
 
 @pytest.mark.acceptance
