@@ -5,7 +5,9 @@ Linus Bergström
 
 import io
 import os
+import re
 import time
+import threading
 import logging
 import urllib.parse
 import httpx
@@ -13,6 +15,7 @@ import stripe
 import pandas as pd
 import streamlit as st
 from datetime import datetime, timedelta
+from dataclasses import dataclass, field
 from supabase import create_client, Client
 
 try:
@@ -783,6 +786,102 @@ def _lead_to_sb_row(lead) -> dict:
     }
 
 
+def _render_api_health():
+    """Compact API status + session cost panel — shown in Scanner sidebar."""
+    _STATUS_TTL = 120  # seconds between pings
+
+    now = time.time()
+    cache = st.session_state.setdefault("_api_health_cache", {
+        "ts": 0,
+        "lm": None,
+        "anthropic": None,
+        "google": None,
+    })
+
+    if now - cache["ts"] > _STATUS_TTL:
+        # The two network probes below block the Streamlit script thread. Run
+        # them concurrently with a short timeout so the worst case is ~3 s (both
+        # time out in parallel) instead of ~10 s serial. The 120 s TTL means this
+        # happens at most once every two minutes per session.
+        def _probe_lm() -> str:
+            try:
+                from scanner import lm_wms_url as _lm_url  # noqa: PLC0415
+                _test_url = _lm_url(57.655, 14.700, size_m=20, width=32, height=32)
+                _r = httpx.get(_test_url, timeout=3)
+                return "ok" if _r.status_code == 200 else f"HTTP {_r.status_code}"
+            except Exception:
+                return "fel"
+
+        def _probe_google() -> str:
+            if not GOOGLE_API_KEY:
+                return "ingen nyckel"
+            try:
+                _gr = httpx.get(
+                    "https://maps.googleapis.com/maps/api/geocode/json",
+                    params={"address": "Nässjö", "key": GOOGLE_API_KEY},
+                    timeout=3,
+                )
+                return "ok" if _gr.status_code == 200 else f"HTTP {_gr.status_code}"
+            except Exception:
+                return "fel"
+
+        import concurrent.futures  # noqa: PLC0415
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as _ex:
+            _lm_fut = _ex.submit(_probe_lm)
+            _google_fut = _ex.submit(_probe_google)
+            try:
+                cache["lm"] = _lm_fut.result(timeout=4)
+            except Exception:
+                cache["lm"] = "fel"
+            try:
+                cache["google"] = _google_fut.result(timeout=4)
+            except Exception:
+                cache["google"] = "fel"
+
+        # Anthropic — key presence + last known API error (no network call)
+        if not ANTHROPIC_API_KEY:
+            cache["anthropic"] = "ingen nyckel"
+        elif st.session_state.get("_anthropic_quota_hit"):
+            cache["anthropic"] = "kvota slut"
+        else:
+            cache["anthropic"] = "ok"
+
+        cache["ts"] = now
+
+    def _badge(label: str, status: str) -> None:
+        _ok = status == "ok"
+        _col = "#22c55e" if _ok else ("#f59e0b" if status == "ingen nyckel" else "#ef4444")
+        st.markdown(
+            f'<span style="background:{_col}18;color:{_col};border:1px solid {_col}40;'
+            f'border-radius:4px;padding:2px 8px;font-size:11px;margin-right:4px">'
+            f'<b>{label}</b> {status}</span>',
+            unsafe_allow_html=True,
+        )
+
+    with st.expander("🟢 API-status & kostnad", expanded=False):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            _badge("LM", cache["lm"] or "–")
+        with c2:
+            _badge("Anthropic", cache["anthropic"] or "–")
+        with c3:
+            _badge("Google", cache["google"] or "–")
+
+        # Session scan cost from BudgetTracker
+        _bt = st.session_state.get("_budget_tracker")
+        if _bt is not None:
+            try:
+                _sek = _bt.total_sek
+                st.metric("Sessionskostnad", f"{_sek:.2f} kr",
+                          delta=None, help="Ackumulerad AI-kostnad sedan sidan laddades")
+            except Exception:
+                pass
+
+        if st.button("↻ Uppdatera", key="api_health_refresh", use_container_width=False):
+            cache["ts"] = 0
+            st.rerun()
+
+
 def _bulk_scan_section(user, profile, ai_available):
     """Storskalig scanning av regioner — hundratals/tusentals leads."""
 
@@ -994,6 +1093,287 @@ def _bulk_scan_section(user, profile, ai_available):
             st.balloons()
 
 
+# ── Background scan engine ────────────────────────────────────────────────────
+#
+# A long scan (5–30 min) run synchronously on Streamlit's script thread starves
+# the WebSocket keepalive → the browser silently goes blank with no error (the
+# weeks-long "tyst fail"). We run the scan in a daemon thread that mutates a
+# thread-safe _ScanState, and poll it from the UI via @st.fragment(run_every=2).
+# The worker NEVER touches st.* or session_state — it only mutates _ScanState
+# (under a lock), writes leads through a Supabase client captured on the main
+# thread, and logs through Python logging (mirrored into the live dev console).
+
+@dataclass
+class _ScanState:
+    leads_live: list = field(default_factory=list)    # appended progressively (live count)
+    result_leads: list = field(default_factory=list)  # final merged list (set on finish)
+    logs: list = field(default_factory=list)          # (ts, level, msg) for the dev console
+    scan_debug: list = field(default_factory=list)
+    scan_errors: list = field(default_factory=list)
+    done: int = 0
+    total: int = 0
+    current_addr: str = ""
+    finished: bool = False
+    error_kind: str = ""        # "" | "value" | "quota" | "crash"
+    error_msg: str = ""
+    quota_api: str = ""
+    quota_detail: str = ""
+    stats: object = None
+    budget: object = None
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+
+class _StateLogHandler(logging.Handler):
+    """Mirror solar_scout log records into _ScanState.logs for the live dev console."""
+
+    def __init__(self, state: "_ScanState"):
+        super().__init__()
+        self._state = state
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = record.getMessage()
+            with self._state.lock:
+                self._state.logs.append(
+                    (time.strftime("%H:%M:%S"), record.levelname[:3], msg)
+                )
+                if len(self._state.logs) > 800:
+                    del self._state.logs[:-800]
+        except Exception:
+            pass
+
+
+def _run_scan_worker(state, *, use_bbox, city_name, south, west, north, east,
+                     google_key, anthr_key, mapbox_key, max_leads,
+                     skip_tile_keys, user_id, sb_client):
+    """Runs the actual scan off the Streamlit thread. Mutates `state` in place."""
+    handler = _StateLogHandler(state)
+    handler.setLevel(logging.DEBUG)
+    scout_log = logging.getLogger("solar_scout")
+    prev_level = scout_log.level
+    scout_log.setLevel(logging.DEBUG)
+    scout_log.addHandler(handler)
+
+    def on_progress(done, total, result):
+        try:
+            with state.lock:
+                state.done += 1
+                if result is not None:
+                    state.leads_live.append(result)
+                    state.current_addr = result.address or ""
+            # Progressive save — each AI lead persisted immediately so a crash
+            # never loses data. Single-threaded (called from this one worker).
+            if result is not None and result.source == "ai":
+                try:
+                    sb_client.table("scout_leads").insert(
+                        {**_lead_to_sb_row(result), "user_id": user_id}
+                    ).execute()
+                except Exception as ins_exc:
+                    _log.warning("progressive lead insert failed: %s", ins_exc)
+                    with state.lock:
+                        state.scan_errors.append(
+                            f"DB-sparning misslyckades ({result.address}): {ins_exc}"
+                        )
+        except Exception as cb_exc:
+            _log.warning("on_progress error (non-fatal): %s", cb_exc)
+
+    def on_phase(phase, count):
+        with state.lock:
+            if phase in ("buildings_found", "area_buildings"):
+                state.total += count
+            state.scan_debug.append(f"{phase}: {count}")
+
+    try:
+        from scanner import scan_city, scan_bbox, APIQuotaExceededError
+        _log.info("background scan start mode=%s ai=%s max_leads=%s",
+                  "bbox" if use_bbox else "city", bool(anthr_key), max_leads)
+        if not use_bbox:
+            leads, stats = scan_city(
+                city_name, google_key, anthr_key, on_progress,
+                mapbox_key=mapbox_key, max_leads=max_leads,
+                phase_callback=on_phase, skip_tile_keys=skip_tile_keys,
+                user_id=user_id, budget=state.budget,
+            )
+        else:
+            leads, stats = scan_bbox(
+                south, west, north, east, google_key, anthr_key, on_progress,
+                mapbox_key=mapbox_key, max_leads=max_leads,
+                phase_callback=on_phase, skip_tile_keys=skip_tile_keys,
+                user_id=user_id, budget=state.budget,
+            )
+        with state.lock:
+            state.result_leads = leads
+            state.stats = stats
+        _log.info("background scan done: %d leads", len(leads))
+    except ValueError as exc:
+        with state.lock:
+            state.error_kind = "value"
+            state.error_msg = str(exc)
+        _log.error("background scan ValueError: %s", exc)
+    except APIQuotaExceededError as exc:
+        with state.lock:
+            state.error_kind = "quota"
+            state.quota_api = exc.api
+            state.quota_detail = exc.detail
+        _log.error("background scan quota: %s", exc)
+    except Exception as exc:
+        with state.lock:
+            state.error_kind = "crash"
+            state.error_msg = str(exc)
+            state.scan_errors.append(f"Scanning avbröts oväntat: {exc}")
+        _log.error("background scan crash: %s", exc, exc_info=True)
+    finally:
+        with state.lock:
+            state.finished = True
+        scout_log.removeHandler(handler)
+        scout_log.setLevel(prev_level)
+
+
+def _scan_progress_fragment():
+    """Polls the running scan every 2 s and renders progress + live dev console."""
+    state = st.session_state.get("_scan_state")
+    if state is None:
+        return
+    with state.lock:
+        done, total = state.done, state.total
+        leads_n = len(state.leads_live)
+        finished = state.finished
+        addr = state.current_addr
+        logs = list(state.logs[-80:])
+        budget = state.budget
+    if finished:
+        frac = 1.0
+    elif total > 0:
+        frac = min(done / total, 0.97)
+    else:
+        frac = min(0.02 + 0.93 * (1 - 1 / (1 + done / 15)), 0.97)
+    addr_str = f" — {addr}" if addr else ""
+    total_str = f" av {total}" if total else ""
+    st.progress(frac, text=f"🔍 {int(frac * 100)}% · Byggnad {done}{total_str}{addr_str}")
+    cost_str = (
+        f" · ~{budget.spent_sek:.0f} kr (konservativt tak)" if budget is not None else ""
+    )
+    st.caption(f"☀️ {leads_n} solcellstak hittade hittills{cost_str}")
+    with st.expander("🛠 Dev-konsol — realtidslogg", expanded=False):
+        if logs:
+            st.code(
+                "\n".join(f"{ts} [{lvl}] {msg}" for ts, lvl, msg in logs),
+                language="text",
+            )
+        else:
+            st.caption("Väntar på loggdata…")
+    if finished:
+        # scope="app" promotes the fragment rerun to a full-app rerun so the
+        # finalize path runs. Requires Streamlit >= 1.37 (we pin 1.57).
+        st.rerun(scope="app")
+
+
+# Decorate with st.fragment when available (real Streamlit runtime). Keeping the
+# bare function as fallback lets app.py import under the minimal test stub, which
+# provides a streamlit module without .fragment.
+if hasattr(st, "fragment"):
+    _scan_progress_fragment = st.fragment(run_every=2)(_scan_progress_fragment)
+
+
+def _finalize_background_scan(state, user) -> None:
+    """Runs on the Streamlit thread once the worker finished. Persists results."""
+    st.session_state.pop("_scan_state", None)
+    budget = state.budget
+
+    if budget is not None and getattr(budget, "stopped_over_budget", False):
+        st.warning(
+            f"⚠️ **Budgettaket nåddes** — scanning stoppades automatiskt. "
+            f"Faktisk kostnad: ~{budget.spent_sek:.0f} kr · "
+            f"{budget.buildings_done} byggnader analyserade. "
+            f"Leads som hittades innan stoppet visas nedan."
+        )
+    if budget is not None and getattr(budget, "stopped_cancelled", False):
+        st.info("⏹ Scanning stoppad av användaren — redan hittade leads är sparade.")
+
+    if state.error_kind == "value":
+        st.session_state["_scanner_last_error"] = state.error_msg
+        st.error(state.error_msg)
+        return
+    if state.error_kind == "quota":
+        if "anthropic" in str(state.quota_api).lower():
+            st.session_state["_anthropic_quota_hit"] = True
+        _send_quota_alert(state.quota_api, state.quota_detail)
+        _emsg = (
+            f"**{state.quota_api} har nått sin kvot eller saknar pengar på kontot.**\n\n"
+            f"Scanning är stoppad. Ägaren har fått ett akut mail. "
+            f"Försök igen om en stund eller kontakta Linus."
+        )
+        st.session_state["_scanner_last_error"] = _emsg
+        st.error(_emsg)
+        return
+
+    leads = state.result_leads or state.leads_live
+    if state.error_kind == "crash" and not leads:
+        st.error("Scanning kraschade och inga leads hittades. Se felloggen nedan.")
+        with st.expander("Fellogg"):
+            for err in state.scan_errors:
+                st.caption(f"• {err}")
+        return
+    if state.error_kind == "crash":
+        st.warning(
+            f"⚠️ Scanning avbröts men {len(leads)} leads är redan sparade i Leads-fliken."
+        )
+
+    if not leads:
+        st.warning("Inga solcellstak hittades i det valda området.")
+        with st.expander("🔍 Vad hände under scanningen?"):
+            if state.scan_debug:
+                for line in state.scan_debug:
+                    st.caption(f"• {line}")
+            else:
+                st.caption(
+                    "Möjliga orsaker: AI-nyckel saknas, Overpass-timeout, "
+                    "eller alla byggnader filtrerades."
+                )
+        return
+
+    display_rows = [_lead_to_display_row(l) for l in leads]
+    sb_rows = [_lead_to_sb_row(l) for l in leads]
+
+    # AI leads were saved progressively; persist OSM leads now.
+    sb_client = get_supabase()
+    for lead in leads:
+        if lead.source != "ai":
+            try:
+                sb_client.table("scout_leads").insert(
+                    {**_lead_to_sb_row(lead), "user_id": str(user.id)}
+                ).execute()
+            except Exception as exc:
+                _log.warning("osm lead insert failed: %s", exc)
+
+    st.session_state["scanner_sb_rows"] = sb_rows
+    st.session_state["scanner_display_rows"] = display_rows
+    st.session_state["scanner_saved"] = True
+    if state.stats is not None:
+        st.session_state["scanner_stats"] = state.stats
+
+    try:
+        _resp = get_supabase().table("scout_leads").select(
+            "id, address, scan_source, image_url, lat, lng, user_confirmed"
+        ).eq("user_id", str(user.id)).in_(
+            "address", [r["address"] for r in sb_rows]
+        ).execute()
+        st.session_state["scanner_leads_with_ids"] = _resp.data or []
+    except Exception as _fetch_exc:
+        _log.warning("fetch leads with ids failed: %s", _fetch_exc)
+        st.session_state["scanner_leads_with_ids"] = []
+
+    if "scan_reviewed" not in st.session_state:
+        st.session_state["scan_reviewed"] = set()
+
+    if state.scan_errors:
+        with st.expander(
+            f"⚠️ {len(state.scan_errors)} fel under scanning (leads sparades ändå)"
+        ):
+            for err in state.scan_errors:
+                st.caption(f"• {err}")
+
+
 def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
     st.subheader("AI Scanner — Hitta solcellstak automatiskt")
 
@@ -1012,8 +1392,28 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
     if _prev_err:
         st.error(_prev_err)
 
+    # ── Background scan: poll live progress, or finalize when done ──────────────
+    _active_scan = st.session_state.get("_scan_state")
+    if _active_scan is not None:
+        if _active_scan.finished:
+            _finalize_background_scan(_active_scan, user)
+            # fall through → render controls + persisted results below
+        else:
+            st.info(
+                "Scanning pågår i bakgrunden — uppdateras automatiskt var 2:a sekund. "
+                "Du kan byta flik utan att avbryta."
+            )
+            if st.button("⏹ Stoppa scanning", key="_stop_scan", use_container_width=True):
+                if _active_scan.budget is not None:
+                    _active_scan.budget.request_cancel()
+                st.toast("Stoppar — redan hittade leads sparas.")
+            _scan_progress_fragment()
+            return
+
     south = west = north = east = None
     city_name = ""
+    _sq = ""
+    _search_mode = "city"
 
     ai_available = bool(ANTHROPIC_API_KEY)
 
@@ -1031,15 +1431,34 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
     except Exception:
         _map_rows = []
 
+    _render_api_health()
+
     # ── Two-column layout: controls | map ──────────────────────────────────
     col_ctrl, col_map = st.columns([1, 2], gap="large")
 
     with col_ctrl:
-        city_name = st.text_input(
-            "Ort eller stad",
-            placeholder="t.ex. Malmö, Nässjö, Lund, Huskvarna",
-            help="Ange ort ELLER rita ett rektangel på kartan. Ritad yta har förtur.",
+        search_query = st.text_input(
+            "Sök",
+            placeholder="Stad, adress, koordinater, postnummer…",
+            help="Ange ort, adress, koordinater (57.65,14.69) eller postnummer — "
+                 "ELLER rita ett rektangel på kartan. Ritad yta har förtur.",
         )
+        _sq = (search_query or "").strip()
+        if re.match(r"^-?\d{1,3}\.?\d*\s*,\s*-?\d{1,3}\.?\d*$", _sq):
+            _search_mode = "coords"
+            st.caption("📍 Koordinater — skannar ~2 km² runt punkten")
+        elif re.match(r"^\d{3}\s?\d{2}$", _sq):
+            _search_mode = "postal"
+            st.caption("📮 Postnummer")
+        elif re.search(r"\d", _sq) and len(_sq) > 3:
+            _search_mode = "address"
+            st.caption("🏠 Adress — skannar ~0.5 km² runt adressen")
+        elif _sq:
+            _search_mode = "city"
+            st.caption("🏙️ Stad / område")
+        else:
+            _search_mode = "city"
+        city_name = _sq
 
         if not ai_available:
             st.warning("ANTHROPIC_API_KEY saknas — kör i OSM-läge.")
@@ -1089,7 +1508,14 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                 center = [55.8, 13.3]   # Skåne
                 zoom = 9
 
-            m = folium.Map(location=center, zoom_start=zoom, tiles="OpenStreetMap")
+            m = folium.Map(location=center, zoom_start=zoom, tiles=None)
+            folium.TileLayer(
+                tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+                attr="Esri",
+                name="Satellit",
+            ).add_to(m)
+            folium.TileLayer("CartoDB positron", name="Karta").add_to(m)
+            folium.LayerControl(position="topright").add_to(m)
 
             # Rectangle draw only — polygon/circle/marker add complexity without value
             Draw(
@@ -1164,6 +1590,19 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
         except ImportError:
             st.warning("streamlit-folium saknas — rita-läge otillgängligt. Ange ort i fältet till vänster.")
 
+    # Coordinate mode: derive small bbox (~2 km²) from parsed lat,lng
+    if _search_mode == "coords" and south is None:
+        _parts = [p.strip() for p in _sq.split(",")]
+        try:
+            _clat, _clng = float(_parts[0]), float(_parts[1])
+            _delta = 0.009   # ~1 km radius
+            south, north = _clat - _delta, _clat + _delta
+            west,  east  = _clng - _delta, _clng + _delta
+            city_name = ""
+        except (ValueError, IndexError):
+            pass
+    # address/postal/city modes: city_name=_sq is passed to scan_city which geocodes internally
+
     use_bbox = south is not None
 
     # ── Cost estimate + confirmation ───────────────────────────────────────
@@ -1234,8 +1673,6 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
         st.session_state.pop("scanner_leads_with_ids", None)
         st.session_state.pop("scan_reviewed", None)
 
-        from scanner import scan_city, scan_bbox, Lead
-
         # Fetch already-scanned tile_keys for this user to skip duplicates
         try:
             _existing = get_supabase().table("scout_leads").select("tile_key").eq(
@@ -1249,215 +1686,30 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
             _log.warning("scan dedup fetch failed: %s", _e)
             _skip_tile_keys = frozenset()
 
-        progress_bar   = st.progress(0.0, text="Startar...")
-        status_text    = st.empty()
-        found_leads: list[Lead] = []
-        live_leads_ph  = st.empty()
-        scan_debug: list[str] = []
-        scan_errors: list[str] = []
-        total_buildings_est = [0]
-        cumulative_done = [0]
-        progress_floor = [0.0]  # never let the bar go backwards
-
-        current_address = [""]
-
-        def _render_live_leads():
-            with live_leads_ph.container():
-                st.caption(f"☀️ **{len(found_leads)} solcellstak hittade hittills** — ✅/❌ granskning möjlig efter scan")
-                for _i, _live_lead in enumerate(found_leads):
-                    with st.container(border=True):
-                        _col_link, _col_info = st.columns([1, 2])
-                        with _col_link:
-                            _url = _live_lead.image_url or (
-                                f"https://minkarta.lantmateriet.se/map/ortofoto"
-                                f"#zoom=19&lat={_live_lead.lat}&lon={_live_lead.lng}"
-                                if _live_lead.lat and _live_lead.lng else None
-                            )
-                            if _url:
-                                st.link_button("🛰 Visa tak", _url, use_container_width=True,
-                                               key=f"_live_tak_{_i}")
-                            else:
-                                st.caption("(ingen bild)")
-                        with _col_info:
-                            _badge = "🗺 OSM" if _live_lead.source == "osm" else "🤖 AI"
-                            st.markdown(f"**{_live_lead.address or '–'}**  {_badge}")
-                            _conf = f"{_live_lead.confidence:.0%}"
-                            _unsure = " ⚠️ Osäker" if _live_lead.needs_review else ""
-                            st.caption(f"Konfidens: {_conf}{_unsure}")
-                            if _live_lead.ai_reasoning:
-                                st.caption(f"_{_live_lead.ai_reasoning}_")
-
-        def on_progress(done: int, total: int, result):
-            cumulative_done[0] += 1
-            n = cumulative_done[0]
-            # Capture the lead first — progress_bar.progress() must not prevent
-            # this even if it raises (e.g. on a second scan in the same session).
-            if result:
-                found_leads.append(result)
-                current_address[0] = result.address or ""
-                # Progressive save — persists each AI lead immediately so a crash never loses data
-                if result.source == "ai":
-                    try:
-                        row = {**_lead_to_sb_row(result), "user_id": str(user.id)}
-                        get_supabase().table("scout_leads").insert(row).execute()
-                    except Exception as _ins_exc:
-                        _log.warning("progressive lead insert failed: %s", _ins_exc)
-                        scan_errors.append(f"DB-sparning misslyckades ({result.address}): {_ins_exc}")
-                _render_live_leads()
-            known_total = total_buildings_est[0]
-            if known_total > 0:
-                frac = min(n / known_total, 0.97)
-            else:
-                # Unknown total — asymptotic: moves fast early, slows near 95 %
-                frac = min(0.02 + 0.93 * (1 - 1 / (1 + n / 15)), 0.97)
-            frac = max(frac, progress_floor[0])
-            progress_floor[0] = frac
-            pct = int(frac * 100)
-            addr_str = f" — {current_address[0]}" if current_address[0] else ""
-            total_str = f" av {known_total}" if known_total > 0 else ""
-            progress_bar.progress(frac, text=f"🔍 {pct}% · Byggnad {n}{total_str}{addr_str}")
-
-        def on_phase(phase: str, count: int):
-            if phase == "osm_leads":
-                scan_debug.append(f"OSM solar-taggade: {count}")
-            elif phase in ("buildings_found", "area_buildings"):
-                total_buildings_est[0] += count
-                scan_debug.append(f"Byggnader att AI-analysera: {total_buildings_est[0]}")
-                if count == 0:
-                    status_text.warning("Inga villabyggnader hittades i OSM för detta område.")
-                else:
-                    status_text.info(
-                        f"Hittade {total_buildings_est[0]} byggnader — AI-analyserar nu (kan ta flera min)..."
-                    )
-            elif phase == "ai_done":
-                scan_debug.append(f"AI bekräftade solceller: {count}")
-
+        # ── Launch the scan in a background thread (keeps WebSocket alive) ──
         from scan_cost import BudgetTracker as _BudgetTracker, DEFAULT_BUDGET_SEK as _BUDGET_SEK
-        anthr_key = ANTHROPIC_API_KEY if ai_available else None
-        _log.info("scan start mode=%s ai=%s max_leads=%s", "bbox" if use_bbox else "city", bool(anthr_key), max_leads)
+        _anthr_key = ANTHROPIC_API_KEY if ai_available else None
         _scan_budget = _BudgetTracker(budget_sek=_BUDGET_SEK)
-        leads = None
-        scan_crashed = False
-        try:
-            if not use_bbox:
-                status_text.info("Söker upp ort och hämtar byggnadsdata från OSM (kan ta 20–60 s)...")
-                leads, scan_stats = scan_city(
-                    city_name, GOOGLE_API_KEY or "", anthr_key, on_progress,
-                    mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads,
-                    phase_callback=on_phase, skip_tile_keys=_skip_tile_keys,
-                    user_id=str(user.id), budget=_scan_budget,
-                )
-            else:
-                status_text.info("Hämtar byggnadsdata från OSM (kan ta 20–60 s)...")
-                leads, scan_stats = scan_bbox(
-                    south, west, north, east, GOOGLE_API_KEY or "", anthr_key, on_progress,
-                    mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads,
-                    phase_callback=on_phase, skip_tile_keys=_skip_tile_keys,
-                    user_id=str(user.id), budget=_scan_budget,
-                )
-        except ValueError as e:
-            _log.error("scan ValueError: %s", e)
-            _emsg = str(e)
-            st.session_state["_scanner_last_error"] = _emsg
-            st.error(_emsg)
-            return
-        except Exception as e:
-            from scanner import APIQuotaExceededError as _QuotaErr  # noqa: PLC0415
-            if isinstance(e, _QuotaErr):
-                _log.error("API quota exceeded: %s", e)
-                _send_quota_alert(e.api, e.detail)
-                _emsg = (
-                    f"**{e.api} har nått sin kvot eller saknar pengar på kontot.**\n\n"
-                    f"Scanning är stoppad. Ägaren har fått ett akut mail. "
-                    f"Försök igen om en stund eller kontakta Linus."
-                )
-                st.session_state["_scanner_last_error"] = _emsg
-                st.error(_emsg)
-                return
-            _log.error("scan Exception: %s", e, exc_info=True)
-            scan_crashed = True
-            scan_errors.append(f"Scanning avbröts oväntat: {e}")
+        st.session_state["_budget_tracker"] = _scan_budget
 
-        progress_bar.progress(1.0, text="Klar!")
-        status_text.empty()
-        live_leads_ph.empty()  # Full results UI renders below — no duplicate
-
-        if _scan_budget.stopped_over_budget:
-            st.warning(
-                f"⚠️ **Budgettaket på {_BUDGET_SEK:.0f} kr nåddes** — scanning stoppades automatiskt. "
-                f"Faktisk kostnad: ~{_scan_budget.spent_sek:.0f} kr · "
-                f"{_scan_budget.buildings_done} byggnader analyserade. "
-                f"Leads som hittades innan stoppet visas nedan."
-            )
-
-        # On crash: fall back to the AI leads already saved progressively
-        if scan_crashed:
-            if not found_leads:
-                st.error("Scanning kraschade och inga leads hittades. Se felloggen nedan.")
-                with st.expander("Felllogg"):
-                    for err in scan_errors:
-                        st.caption(f"• {err}")
-                return
-            leads = found_leads
-            st.warning(f"⚠️ Scanning avbröts men {len(found_leads)} AI-leads är redan sparade i Leads-fliken.")
-
-        if not leads:
-            st.warning("Inga solcellstak hittades i det valda området.")
-            with st.expander("🔍 Vad hände under scanningen?"):
-                if scan_debug:
-                    for line in scan_debug:
-                        st.caption(f"• {line}")
-                    if any("Byggnader att AI-analysera: 0" in l or "area_buildings" in l for l in scan_debug):
-                        st.info("Inga villabyggnader hittades av OSM. Prova ett tätare villaområde.")
-                    elif any("AI bekräftade solceller: 0" in l for l in scan_debug):
-                        st.info("AI analyserade byggnader men hittade inga solceller.")
-                else:
-                    st.caption("Möjliga orsaker: AI-nyckel saknas, Overpass-timeout, eller alla byggnader filtrerades.")
-            return
-
-        display_rows = [_lead_to_display_row(l) for l in leads]
-        sb_rows      = [_lead_to_sb_row(l) for l in leads]
-
-        # Save OSM leads now (AI leads were already saved progressively in on_progress)
-        sb_client = get_supabase()
-        osm_saved = 0
-        for lead in leads:
-            if lead.source != "ai":
-                try:
-                    sb_client.table("scout_leads").insert(
-                        {**_lead_to_sb_row(lead), "user_id": str(user.id)}
-                    ).execute()
-                    osm_saved += 1
-                except Exception as exc:
-                    _log.warning("osm lead insert failed: %s", exc)
-
-        _log.info("scan done: %d total leads (%d AI progressive, %d OSM saved) for user %s",
-                  len(leads), len(found_leads), osm_saved, user.id)
-        st.session_state["scanner_sb_rows"]      = sb_rows
-        st.session_state["scanner_display_rows"] = display_rows
-        st.session_state["scanner_saved"]        = True
-        if not scan_crashed:
-            st.session_state["scanner_stats"] = scan_stats
-
-        # Fetch leads with DB-assigned IDs so we can call confirm_lead()
-        try:
-            _resp = get_supabase().table("scout_leads").select(
-                "id, address, scan_source, image_url, lat, lng, user_confirmed"
-            ).eq("user_id", str(user.id)).in_(
-                "address", [r["address"] for r in sb_rows]
-            ).execute()
-            st.session_state["scanner_leads_with_ids"] = _resp.data or []
-        except Exception as _fetch_exc:
-            _log.warning("fetch leads with ids failed: %s", _fetch_exc)
-            st.session_state["scanner_leads_with_ids"] = []
-
-        if "scan_reviewed" not in st.session_state:
-            st.session_state["scan_reviewed"] = set()
-
-        if scan_errors:
-            with st.expander(f"⚠️ {len(scan_errors)} fel under scanning (leads sparades ändå)"):
-                for err in scan_errors:
-                    st.caption(f"• {err}")
+        _state = _ScanState(budget=_scan_budget)
+        st.session_state["_scan_state"] = _state
+        _sb_client = get_supabase()  # capture on main thread (has Streamlit ctx)
+        threading.Thread(
+            target=_run_scan_worker,
+            kwargs=dict(
+                state=_state, use_bbox=use_bbox, city_name=city_name,
+                south=south, west=west, north=north, east=east,
+                google_key=GOOGLE_API_KEY or "", anthr_key=_anthr_key,
+                mapbox_key=MAPBOX_TOKEN or None, max_leads=max_leads,
+                skip_tile_keys=_skip_tile_keys, user_id=str(user.id),
+                sb_client=_sb_client,
+            ),
+            daemon=True,
+        ).start()
+        _log.info("scan launched in background mode=%s ai=%s max_leads=%s",
+                  "bbox" if use_bbox else "city", bool(_anthr_key), max_leads)
+        st.rerun()
 
     # ── Show results (persisted across reruns) ────────────────────────────────
     sb_rows      = st.session_state.get("scanner_sb_rows")
@@ -1575,15 +1827,19 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
         st.rerun()
 
     st.divider()
+    with st.expander("🏠 Scouta enskild adress"):
+        _page_scout_inline(user)
+
     _bulk_scan_section(user, profile, ai_available)
 
 
-def page_scout(user):
-    st.subheader("Scouta Tak")
+def _page_scout_inline(user):
+    """Single-address satellite lookup — embedded inside Scanner."""
 
     search_query = st.text_input(
-        "Adress eller koordinater:",
+        "Adress eller koordinater",
         placeholder="t.ex. Storgatan 14, Helsingborg",
+        key="scout_inline_query",
     )
 
     if not search_query:
@@ -1652,7 +1908,7 @@ def page_scout(user):
         lc1.link_button("Google", google_search_url)
         lc2.link_button("Hitta.se", hitta_url)
 
-        if st.button("💾 Spara lead", type="primary", use_container_width=True):
+        if st.button("💾 Spara lead", type="primary", use_container_width=True, key="scout_save_btn"):
             save_lead(str(user.id), {
                 "address":           address,
                 "has_solar":         has_solar,
@@ -2606,13 +2862,13 @@ def page_app(user, profile, lead_count: int = 0):
 
     review_label = f"👁 Granska ({review_count})" if review_count else "👁 Granska"
     if is_admin(profile):
-        tab_scanner, tab_scout, tab_leads, tab_review, tab_account = st.tabs(
-            ["🔍 AI Scanner", "🏠 Scouta Tak", "📋 Leads", review_label, "⚙ Konto"]
+        if review_count:
+            st.caption(f"👁 {review_count} leads väntar på granskning")
+        tab_scanner, tab_leads, tab_review, tab_account = st.tabs(
+            ["🔍 Scanner", "📋 Leads", "👁 Granska", "⚙ Konto"]
         )
         with tab_scanner:
             page_scanner(user, profile, lead_count)
-        with tab_scout:
-            page_scout(user)
         with tab_leads:
             page_leads(user)
         with tab_review:

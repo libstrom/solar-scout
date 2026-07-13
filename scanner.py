@@ -178,7 +178,9 @@ def _overpass(query: str, timeout: int = 90) -> list[dict]:
                 _log.warning("Overpass attempt %d failed: %s", attempt + 1, exc)
                 if attempt < 3:
                     time.sleep(_BACKOFF[min(attempt, len(_BACKOFF) - 1)])
-        _log.error("Overpass failed after 4 attempts")
+        _log.error("Overpass failed after 4 attempts — returning empty result")
+        # Return sentinel so callers can detect failure via empty list + log.
+        # Do NOT raise here: callers have fallback paths and partial results.
         return []
     finally:
         if acquired:
@@ -1066,6 +1068,7 @@ def _analyze_building(
     street_view_bytes: bytes | None = None,
     budget: "BudgetTracker | None" = None,
     already_enhanced: bool = False,
+    model: str = "claude-sonnet-4-6",
 ) -> tuple[bool, bool, bool, str]:
     """
     Returns (is_residential_house, has_solar_panels, is_unsure, reasoning).
@@ -1180,7 +1183,7 @@ def _analyze_building(
                 final_content.append({"type": "image", "source": {"type": "base64", "media_type": sv_media, "data": sv_b64}})
             msgs = [{"role": "user", "content": final_content}]
         msg = client.messages.create(
-            model="claude-opus-4-8",
+            model=model,
             max_tokens=220,
             system=system_blocks,
             messages=msgs,
@@ -1314,7 +1317,7 @@ def _process_building(
             _log.debug("_process_building: UNSURE → Street View second pass lat=%s lng=%s", lat, lng)
             is_house, has_solar, is_unsure, reasoning = _analyze_building(
                 anthropic_client, img, few_shot=few_shot, street_view_bytes=sv_bytes,
-                budget=budget, already_enhanced=True
+                budget=budget, already_enhanced=True, model="claude-opus-4-8"
             )
             if not is_house:
                 return None
@@ -1464,7 +1467,11 @@ def scan_buildings_ai(
                 result = None
             except APIQuotaExceededError:
                 raise
-            except Exception:
+            except Exception as _exc:
+                _log.error(
+                    "_process_building raised unhandled exception (building=%s): %s",
+                    futures[future].get("osm_id", "?"), _exc, exc_info=True,
+                )
                 result = None
             if result is not None:
                 leads.append(result)
@@ -1486,6 +1493,13 @@ def scan_buildings_ai(
             except ScanBudgetExceededError as _be:
                 budget.stopped_over_budget = True
                 _log.warning("%s", _be)
+                for f in futures:
+                    f.cancel()
+                break
+            # Mjuk avbrytning från UI:t — behåll redan hittade leads.
+            if getattr(budget, "cancelled", False):
+                budget.stopped_cancelled = True
+                _log.info("scan cancelled by user — keeping %d partial leads", len(leads))
                 for f in futures:
                     f.cancel()
                 break
@@ -1661,6 +1675,19 @@ def scan_city(
     center = geom["location"]
     _log.info("scan_city geocoded bbox=(%s,%s,%s,%s)", south, west, north, east)
 
+    import math as _math
+    _bbox_area_km2 = (
+        (north - south) * (east - west)
+        * (111.32 ** 2)
+        * _math.cos(_math.radians((north + south) / 2))
+    )
+    _log.info("scan_city bbox_area=%.0f km²", _bbox_area_km2)
+    if _bbox_area_km2 > 500:
+        raise ValueError(
+            f"'{city_name}' täcker ~{_bbox_area_km2:.0f} km² — för stort för en automatisk scan. "
+            f"Rita ett område på kartan (t.ex. ett villakvarter) för att scanna en specifik del."
+        )
+
     # OSM solar tags cover the full city viewport (free, instant)
     osm_leads = scan_area_osm(south, west, north, east)
     _log.info("scan_city osm_leads=%d", len(osm_leads))
@@ -1692,10 +1719,10 @@ def scan_city(
     _log.info("scan_city residential_areas=%d", len(residential_areas))
 
     if residential_areas:
-        # Scan all areas — inner loop breaks early when max_leads is reached.
-        # The old max_leads//5 cap caused 0 leads in large cities (e.g. Lund:
-        # 465 areas but only 2 were scanned, missing all villa suburbs).
-        max_areas = len(residential_areas)
+        # Cap areas to avoid multi-hour scans on cities with hundreds of
+        # residential polygons. 100 areas × ~20 buildings × 8% solar ≈ 160
+        # leads, sufficient for any reasonable max_leads value.
+        max_areas = min(len(residential_areas), 100)
         _log.info("scan_city scanning %d/%d areas", max_areas, len(residential_areas))
         for area in residential_areas[:max_areas]:
             # Remaining lead budget for AI scan
@@ -1748,7 +1775,12 @@ def scan_city(
         # Glesbygd-pass: scan hela viewport utan landuse-filter.
         # Hus utanför residential-polygoner (landsbygd, ~20-30% av villor) missas
         # annars helt. Deduplicera via seen_building_ids.
-        if not budget.stopped_over_budget and len(osm_leads) + len(all_ai_leads) < (max_leads or 9999):
+        # Skip for large city viewports (>150 km²) — the full-viewport Overpass
+        # query would time out and silently kill the WebSocket connection.
+        _glesbygd_ok = _bbox_area_km2 <= 150
+        if not _glesbygd_ok:
+            _log.info("scan_city skipping glesbygd-pass (bbox %.0f km² > 150)", _bbox_area_km2)
+        if _glesbygd_ok and not budget.stopped_over_budget and len(osm_leads) + len(all_ai_leads) < (max_leads or 9999):
             remaining = None
             if max_leads is not None:
                 remaining = max_leads - len(osm_leads) - len(all_ai_leads)
