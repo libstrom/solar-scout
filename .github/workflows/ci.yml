@@ -63,6 +63,8 @@ jobs:
     runs-on: ubuntu-latest
     # Don't block merge — still finding flaky baselines. Remove continue-on-error once stable.
     continue-on-error: true
+    # Hard cap instead of pytest --timeout (pytest-timeout is not a dependency).
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -84,7 +86,7 @@ jobs:
           # Optional: set these secrets to also run the authenticated tab test
           E2E_TEST_EMAIL: ${{ secrets.E2E_TEST_EMAIL }}
           E2E_TEST_PASSWORD: ${{ secrets.E2E_TEST_PASSWORD }}
-        run: python -m pytest tests/e2e/ -v --timeout=60 -m e2e
+        run: python -m pytest tests/e2e/ -v -m e2e
 
       - name: Upload Playwright traces on failure
         if: failure()
