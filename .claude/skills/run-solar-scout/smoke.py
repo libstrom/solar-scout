@@ -31,18 +31,21 @@ def run(port: int = 8501, keep: bool = False) -> int:
 
     # nohup is required — plain subprocess.Popen gets killed by the shell
     # on exit in some container environments (exit 144 / SIGSTKFLT).
+    log_fh = open("/tmp/streamlit.log", "w")
     proc = subprocess.Popen(
         ["nohup", "python3", "-m", "streamlit", "run", "app.py",
          f"--server.port={port}", "--server.headless=true",
          "--server.runOnSave=false"],
-        stdout=open("/tmp/streamlit.log", "w"),
+        stdout=log_fh,
         stderr=subprocess.STDOUT,
     )
 
     if not wait_for_port(port, timeout=30):
-        print(f"ERROR: Streamlit did not start within 30s", file=sys.stderr)
-        print(open("/tmp/streamlit.log").read()[-500:], file=sys.stderr)
+        print("ERROR: Streamlit did not start within 30s", file=sys.stderr)
+        with open("/tmp/streamlit.log") as _lf:
+            print(_lf.read()[-500:], file=sys.stderr)
         proc.terminate()
+        log_fh.close()
         return 1
 
     try:
@@ -73,6 +76,7 @@ def run(port: int = 8501, keep: bool = False) -> int:
     finally:
         if not keep:
             proc.terminate()
+        log_fh.close()
 
 
 if __name__ == "__main__":

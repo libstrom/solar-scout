@@ -799,36 +799,52 @@ def _render_api_health():
     })
 
     if now - cache["ts"] > _STATUS_TTL:
-        # LM minkarta WMS — free, no key; just need a valid tile response
-        try:
-            from scanner import lm_wms_url as _lm_url  # noqa: PLC0415
-            _test_url = _lm_url(57.655, 14.700, size_m=20, width=32, height=32)
-            _r = httpx.get(_test_url, timeout=5)
-            cache["lm"] = "ok" if _r.status_code == 200 else f"HTTP {_r.status_code}"
-        except Exception as _e:
-            cache["lm"] = f"fel"
+        # The two network probes below block the Streamlit script thread. Run
+        # them concurrently with a short timeout so the worst case is ~3 s (both
+        # time out in parallel) instead of ~10 s serial. The 120 s TTL means this
+        # happens at most once every two minutes per session.
+        def _probe_lm() -> str:
+            try:
+                from scanner import lm_wms_url as _lm_url  # noqa: PLC0415
+                _test_url = _lm_url(57.655, 14.700, size_m=20, width=32, height=32)
+                _r = httpx.get(_test_url, timeout=3)
+                return "ok" if _r.status_code == 200 else f"HTTP {_r.status_code}"
+            except Exception:
+                return "fel"
 
-        # Anthropic — key presence + last known API error
+        def _probe_google() -> str:
+            if not GOOGLE_API_KEY:
+                return "ingen nyckel"
+            try:
+                _gr = httpx.get(
+                    "https://maps.googleapis.com/maps/api/geocode/json",
+                    params={"address": "Nässjö", "key": GOOGLE_API_KEY},
+                    timeout=3,
+                )
+                return "ok" if _gr.status_code == 200 else f"HTTP {_gr.status_code}"
+            except Exception:
+                return "fel"
+
+        import concurrent.futures  # noqa: PLC0415
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as _ex:
+            _lm_fut = _ex.submit(_probe_lm)
+            _google_fut = _ex.submit(_probe_google)
+            try:
+                cache["lm"] = _lm_fut.result(timeout=4)
+            except Exception:
+                cache["lm"] = "fel"
+            try:
+                cache["google"] = _google_fut.result(timeout=4)
+            except Exception:
+                cache["google"] = "fel"
+
+        # Anthropic — key presence + last known API error (no network call)
         if not ANTHROPIC_API_KEY:
             cache["anthropic"] = "ingen nyckel"
         elif st.session_state.get("_anthropic_quota_hit"):
             cache["anthropic"] = "kvota slut"
         else:
             cache["anthropic"] = "ok"
-
-        # Google Maps — lightweight geocode ping
-        if not GOOGLE_API_KEY:
-            cache["google"] = "ingen nyckel"
-        else:
-            try:
-                _gr = httpx.get(
-                    "https://maps.googleapis.com/maps/api/geocode/json",
-                    params={"address": "Nässjö", "key": GOOGLE_API_KEY},
-                    timeout=5,
-                )
-                cache["google"] = "ok" if _gr.status_code == 200 else f"HTTP {_gr.status_code}"
-            except Exception:
-                cache["google"] = "fel"
 
         cache["ts"] = now
 
@@ -1104,7 +1120,7 @@ class _ScanState:
     quota_detail: str = ""
     stats: object = None
     budget: object = None
-    lock: object = field(default_factory=threading.Lock)
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
 class _StateLogHandler(logging.Handler):
@@ -1247,6 +1263,8 @@ def _scan_progress_fragment():
         else:
             st.caption("Väntar på loggdata…")
     if finished:
+        # scope="app" promotes the fragment rerun to a full-app rerun so the
+        # finalize path runs. Requires Streamlit >= 1.37 (we pin 1.57).
         st.rerun(scope="app")
 
 

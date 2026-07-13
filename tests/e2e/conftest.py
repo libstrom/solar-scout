@@ -46,7 +46,9 @@ def streamlit_server():
     deadline = time.time() + _STARTUP_TIMEOUT
     while time.time() < deadline:
         try:
-            r = httpx.get(f"{BASE_URL}/healthz", timeout=1.0)
+            # Streamlit's real health endpoint is /_stcore/health (returns "ok").
+            # /healthz does not exist and would spin until the timeout.
+            r = httpx.get(f"{BASE_URL}/_stcore/health", timeout=1.0)
             if r.status_code == 200:
                 break
         except Exception:
