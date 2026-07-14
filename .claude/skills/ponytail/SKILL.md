@@ -26,8 +26,8 @@ code is the code never written.
 ## Persistence
 
 ACTIVE EVERY RESPONSE. No drift back to over-building. Still active if
-unsure. Off only: "stop ponytail" / "normal mode". Default: **full**.
-Switch: `/ponytail lite|full|ultra`.
+unsure. Off only: "stop ponytail" / "normal mode" / `/ponytail off`.
+Default: **full**. Switch: `/ponytail lite|full|ultra`.
 
 ## The ladder
 
