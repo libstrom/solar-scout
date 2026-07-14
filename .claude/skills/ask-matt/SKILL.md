@@ -1,11 +1,9 @@
 ---
 name: ask-matt
 description: >
-  Ask which skill or flow fits your situation. A router over this repo's
-  skills — the Matt Pocock engineering flows adapted to solar-scout's actual
-  skill names, plus the domain skills (leads, scan, ship). Use when the user
-  invokes /ask-matt, asks "which skill should I use", "what's the right flow
-  for this", or seems lost about where to start a piece of work.
+  Use when the user invokes /ask-matt, asks "which skill should I use" or
+  "what's the right flow for this", or seems lost about where to start a
+  piece of work.
 disable-model-invocation: true
 ---
 
