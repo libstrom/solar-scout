@@ -65,11 +65,44 @@ CSV_ATTRIBUTION_HEADER = (
 )
 
 
+def _lead_image_url(row) -> str:
+    """Lagringsbar bild-URL för ett lead: confirmed → LM WMS (nyckelfri) → image_url.
+
+    LM-URL:en genereras från lat/lng och är alltid nåbar utan nyckel (CC-BY).
+    Mapbox-URL:er hamnar aldrig i image_url-kolumnen (24h-regeln), så
+    fallbacken är säker att exportera.
+    """
+    url = str(row.get("confirmed_image_url") or "").strip()
+    if url.startswith("http"):
+        return url
+    lat, lng = row.get("lat"), row.get("lng")
+    # pd.notna — DataFrame-rader har NaN (inte None) för saknade koordinater,
+    # och bool(nan) är True → utan checken byggs URL:er med bokstavliga "nan".
+    if pd.notna(lat) and pd.notna(lng) and lat and lng:
+        try:
+            from scanner import lm_wms_url  # noqa: PLC0415 — lazy scanner-import
+            return lm_wms_url(float(lat), float(lng))
+        except Exception as _lm_exc:
+            _log.debug("lm_wms_url misslyckades lat=%s lng=%s: %s", lat, lng, _lm_exc)
+    url = str(row.get("image_url") or "").strip()
+    return url if url.startswith("http") else ""
+
+
 def _to_excel_bytes(df: pd.DataFrame) -> bytes:
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="Leads")
         ws = writer.sheets["Leads"]
+        # Bild-kolumnen: rå URL → klickbar hyperlänk med kort text.
+        # Görs före breddberäkningen så kolumnen inte blir URL-bred.
+        for header_cell in ws[1]:
+            if str(header_cell.value) == "Bild":
+                for cell in ws[header_cell.column_letter][1:]:
+                    url = str(cell.value or "")
+                    if url.startswith("http"):
+                        cell.hyperlink = url
+                        cell.value = "Öppna bild"
+                        cell.style = "Hyperlink"
         for col in ws.columns:
             ws.column_dimensions[col[0].column_letter].width = max(
                 len(str(col[0].value or "")),
@@ -2204,6 +2237,12 @@ def _leads_html_with_thumbs(df_full: "pd.DataFrame") -> None:
     for _, row in df_full.iterrows():
         addr = _html.escape(str(row.get("address") or "–"))
         solar_icon = "☀️" if str(row.get("has_solar", "")) == "Ja" else "—"
+        samtomt_cell = (
+            '<span title="Sol hittad på annan byggnad på/intill tomten — '
+            'huvudtaket är fritt. Kolla bilden innan besök.">⚠️</span>'
+            if bool(row.get("samtomt_solar_extra"))
+            else "—"
+        )
         # Prefer confirmed_image_url → fresh LM WMS → validated image_url only
         img_url = _safe_url(row.get("confirmed_image_url"))
         if not img_url and _has_lm:
@@ -2232,7 +2271,7 @@ def _leads_html_with_thumbs(df_full: "pd.DataFrame") -> None:
                 f'<a href="{safe_maps_href}" target="_blank" rel="noopener noreferrer"'
                 f' title="Öppna i Google Maps satellit">'
                 f'<img src="{safe_img_url}" loading="lazy"'
-                f' style="max-width:96px;width:96px;height:96px;object-fit:cover;'
+                f' style="max-width:56px;width:56px;height:56px;object-fit:cover;'
                 f'border-radius:4px;display:block" /></a>'
             )
             thumb_cell = (
@@ -2251,6 +2290,7 @@ def _leads_html_with_thumbs(df_full: "pd.DataFrame") -> None:
             f"<td class='li'>{thumb_cell}</td>"
             f"<td class='la'>{addr}</td>"
             f"<td class='lc'>{solar_icon}</td>"
+            f"<td class='lc'>{samtomt_cell}</td>"
             f"</tr>"
         )
 
@@ -2270,15 +2310,16 @@ def _leads_html_with_thumbs(df_full: "pd.DataFrame") -> None:
         ".lt-t th{background:#f0f2f6;padding:7px 12px;text-align:left;border-bottom:2px solid #d1d5db}"
         ".lt-t td{padding:5px 12px;border-bottom:1px solid #e5e7eb;vertical-align:middle}"
         ".lt-t td.lc{text-align:center;width:56px}"
-        ".lt-t td.li{width:108px;padding:4px 6px;vertical-align:middle}"
+        ".lt-t td.li{width:68px;padding:3px 6px;vertical-align:middle}"
         ".lt-t td.la{max-width:280px;word-break:break-word}"
         ".lth{display:inline-block;cursor:pointer}"
         "</style>"
         '<div style="overflow-x:auto">'
         '<table class="lt-t"><thead><tr>'
-        "<th style='width:108px'>Tak</th>"
+        "<th style='width:68px'>Tak</th>"
         "<th>Adress</th>"
         "<th style='text-align:center'>Sol</th>"
+        "<th style='text-align:center' title='Sol på annan byggnad på/intill tomten'>Samtomt</th>"
         "</tr></thead>"
         f"<tbody>{''.join(rows_html)}</tbody>"
         "</table></div>"
@@ -2407,14 +2448,46 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
     if "Samtomt sol" in display_df.columns:
         display_df["Samtomt sol"] = display_df["Samtomt sol"].apply(_samtomt_icon)
 
-    with st.expander("❌ Markera felaktiga leads (AI lär sig)"):
+    with st.expander("✏️ Redigera leads — status · notering · fel · ta bort"):
+        _status_labels = list(_LEAD_STATUSES.values())
+        _label_to_key = {v: k for k, v in _LEAD_STATUSES.items()}
+        _orig_status_keys = (
+            df_reset["status"].fillna("ej_kontaktad")
+            if "status" in df_reset.columns
+            else pd.Series(["ej_kontaktad"] * len(df_reset), index=df_reset.index)
+        )
+        _orig_status = _orig_status_keys.map(
+            lambda k: _LEAD_STATUSES.get(k, _LEAD_STATUSES["ej_kontaktad"])
+        )
+        _orig_note = (
+            df_reset["david_note"].fillna("")
+            if "david_note" in df_reset.columns
+            else pd.Series([""] * len(df_reset), index=df_reset.index)
+        ).astype(str)
+
         editable_df = display_df.copy()
-        editable_df.insert(0, "❌ Fel", False)
+        editable_df.insert(0, "🗑", False)
+        editable_df.insert(1, "❌ Fel", False)
+        editable_df["Status"] = _orig_status.values
+        editable_df["✏️ Notering"] = _orig_note.values
         column_config: dict = {
+            "🗑": st.column_config.CheckboxColumn(
+                "🗑",
+                width="small",
+                help="Markera och bekräfta nedan — leadet tas bort permanent.",
+            ),
             "❌ Fel": st.column_config.CheckboxColumn(
                 "❌ Fel",
                 width="small",
                 help="Markera om AI:n hade fel — inga solceller här. AI:n lär sig till nästa scan.",
+            ),
+            "Status": st.column_config.SelectboxColumn(
+                "Status", options=_status_labels, width="medium",
+                help="Klicka i cellen — dropdown med Davids workflow.",
+            ),
+            "✏️ Notering": st.column_config.TextColumn(
+                "✏️ Notering", max_chars=150,
+                help="Skriv direkt i cellen, spara med 💾 nedan.",
             ),
         }
         edited = st.data_editor(
@@ -2426,6 +2499,58 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
             disabled=[c for c in display_df.columns],
             key="leads_editor",
         )
+
+        # 💾 Status/notering — diffa mot original, spara bara ändrade rader
+        if "id" in df_reset.columns and len(edited) == len(df_reset):
+            _status_changed = edited["Status"].values != _orig_status.values
+            _note_changed = edited["✏️ Notering"].fillna("").astype(str).values != _orig_note.values
+            _dirty = _status_changed | _note_changed
+            n_dirty = int(_dirty.sum())
+            if n_dirty > 0 and st.button(
+                f"💾 Spara {n_dirty} ändring(ar)", type="primary", key="btn_bulk_save",
+            ):
+                sb = get_supabase()
+                _fail = 0
+                for idx in df_reset.index[_dirty]:
+                    lid = int(df_reset.loc[idx, "id"])
+                    new_key = _label_to_key.get(edited.loc[idx, "Status"], "ej_kontaktad")
+                    old_key = str(_orig_status_keys.loc[idx])
+                    new_note = str(edited.loc[idx, "✏️ Notering"] or "")[:150]
+                    try:
+                        sb.table("scout_leads").update(
+                            {"status": new_key, "david_note": new_note}
+                        ).eq("id", lid).execute()
+                    except Exception as _bs_exc:
+                        _log.error("bulk save failed lead_id=%s: %s", lid, _bs_exc)
+                        _fail += 1
+                        continue
+                    _addr = str(df_reset.loc[idx].get("address") or "")
+                    _lat, _lng = df_reset.loc[idx].get("lat"), df_reset.loc[idx].get("lng")
+                    if new_key == "mote_bokat" and old_key != "mote_bokat":
+                        if not _send_meeting_email(_addr, new_note, _lat, _lng):
+                            st.warning(f"⚠️ {_addr}: möte sparat men mail till Linus misslyckades — ring honom.")
+                    elif new_key == "kund" and old_key != "kund":
+                        _send_sale_alert(_addr, new_note, _lat, _lng,
+                                         user_email=getattr(user, "email", "") or "")
+                if _fail:
+                    st.error(f"{_fail} lead(s) kunde inte sparas — försök igen.")
+                else:
+                    st.success(f"💾 {n_dirty} lead(s) uppdaterade.")
+                    st.rerun()
+
+            # 🗑 Borttagning — destruktivt, kräver separat bekräftelse
+            del_mask = edited["🗑"] == True  # noqa: E712
+            n_del = int(del_mask.sum())
+            if n_del > 0:
+                del_addrs = edited.loc[del_mask, "Adress"].tolist() if "Adress" in edited.columns else []
+                preview = ", ".join(del_addrs[:3]) + ("…" if len(del_addrs) > 3 else "")
+                st.error(f"🗑 **{n_del} lead(s) markerade för borttagning:** {preview}")
+                if st.button(f"🗑 Ta bort {n_del} permanent", key="btn_del_confirm"):
+                    for lid in df_reset.loc[del_mask.values, "id"]:
+                        delete_lead(int(lid))
+                    st.success(f"🗑 {n_del} lead(s) borttagna.")
+                    st.rerun()
+
         # Hantera felmarkering
         if "id" in df_reset.columns:
             wrong_mask = edited["❌ Fel"] == True  # noqa: E712
@@ -2480,6 +2605,8 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
     export_df = df.drop(columns=["id", "user_id"], errors="ignore").rename(
         columns={"samtomt_solar_extra": "Samtomt sol"}
     )
+    if not df.empty:
+        export_df.insert(0, "Bild", df.apply(_lead_image_url, axis=1).values)
     date_str  = datetime.now().strftime("%y%m%d")
     st.download_button(
         "⬇ Ladda ner Excel",
