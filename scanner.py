@@ -277,7 +277,7 @@ def scan_area_osm(south: float, west: float, north: float, east: float) -> list[
                 "att taket är en villa. Kolla bilden." if unverified else ""
             ),
         ))
-    n_unverified = sum(1 for l in leads if l.needs_review)
+    n_unverified = sum(1 for lead in leads if lead.needs_review)
     _log.info(
         "scan_area_osm result=%d leads (%d needs_review) | skipped: no_solar_tag=%d "
         "building_type=%d amenity=%d flats=%d geom=%d",

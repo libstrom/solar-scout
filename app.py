@@ -76,12 +76,14 @@ def _lead_image_url(row) -> str:
     if url.startswith("http"):
         return url
     lat, lng = row.get("lat"), row.get("lng")
-    if lat and lng:
+    # pd.notna — DataFrame-rader har NaN (inte None) för saknade koordinater,
+    # och bool(nan) är True → utan checken byggs URL:er med bokstavliga "nan".
+    if pd.notna(lat) and pd.notna(lng) and lat and lng:
         try:
             from scanner import lm_wms_url  # noqa: PLC0415 — lazy scanner-import
             return lm_wms_url(float(lat), float(lng))
-        except Exception:
-            pass
+        except Exception as _lm_exc:
+            _log.debug("lm_wms_url misslyckades lat=%s lng=%s: %s", lat, lng, _lm_exc)
     url = str(row.get("image_url") or "").strip()
     return url if url.startswith("http") else ""
 

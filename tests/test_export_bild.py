@@ -48,6 +48,16 @@ def test_lead_image_url_empty_when_nothing():
     assert app._lead_image_url({"confirmed_image_url": None, "lat": None, "lng": None}) == ""
 
 
+def test_lead_image_url_nan_coords_fall_back_to_image_url():
+    """NaN från DataFrame-rader (bool(nan) är True!) får inte bli 'nan'-URL:er."""
+    row = {
+        "confirmed_image_url": None,
+        "lat": float("nan"), "lng": float("nan"),
+        "image_url": "https://ex.se/fallback.jpg",
+    }
+    assert app._lead_image_url(row) == "https://ex.se/fallback.jpg"
+
+
 def test_excel_bild_column_is_hyperlink():
     df = pd.DataFrame({
         "Bild": ["https://minkarta.lantmateriet.se/map/ortofoto?x=1", ""],
