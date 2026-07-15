@@ -133,3 +133,30 @@ def test_overpass_error_returns_empty_list():
     with patch("scanner._overpass", side_effect=Exception("timeout")):
         leads = scan_area_osm(*_BBOX)
     assert leads == []
+
+
+def test_roof_solar_without_building_tag_needs_review():
+    """roof:solar_panel=yes UTAN building-tagg kan inte villa-verifieras —
+    kan sitta på en industrihall (B2B). Ska levereras, men flaggad till
+    Granska-fliken istället för rakt till säljlistan."""
+    fake_elements = [
+        _osm_way(tags={"roof:solar_panel": "yes"}),  # ingen building-tagg
+    ]
+    with patch("scanner._overpass", return_value=fake_elements):
+        leads = scan_area_osm(*_BBOX)
+    assert len(leads) == 1
+    assert leads[0].needs_review is True
+    assert "villa" in leads[0].ai_reasoning.lower()
+
+
+def test_roof_solar_with_villa_building_tag_not_flagged():
+    """roof:solar_panel=yes PÅ verifierad villa (building=house) → ren lead,
+    ingen granskning behövs."""
+    fake_elements = [
+        _osm_way(tags={"roof:solar_panel": "yes", "building": "house"}),
+    ]
+    with patch("scanner._overpass", return_value=fake_elements):
+        leads = scan_area_osm(*_BBOX)
+    assert len(leads) == 1
+    assert leads[0].needs_review is False
+    assert leads[0].building_type == "house"

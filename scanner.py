@@ -262,12 +262,26 @@ def scan_area_osm(south: float, west: float, north: float, east: float) -> list[
             continue
         seen.add(key)
         addr = _tags_to_address(tags)
-        leads.append(Lead(lat=lat, lng=lng, address=addr or key,
-                          confidence=1.0, source="osm", tile_key=key))
+        # Element utan building-tagg kan inte villa-verifieras mot
+        # _VILLA_TYPES_OSM — kan lika gärna sitta på en industrihall.
+        # Flagga för mänsklig granskning istället för att leverera blint
+        # (recall bevaras, B2B-tak går till Granska-fliken, inte till David).
+        unverified = not tags.get("building")
+        leads.append(Lead(
+            lat=lat, lng=lng, address=addr or key,
+            confidence=1.0, source="osm", tile_key=key,
+            building_type=tags.get("building", ""),
+            needs_review=unverified,
+            ai_reasoning=(
+                "OSM solar-tagg utan building-tagg — kunde inte verifiera "
+                "att taket är en villa. Kolla bilden." if unverified else ""
+            ),
+        ))
+    n_unverified = sum(1 for l in leads if l.needs_review)
     _log.info(
-        "scan_area_osm result=%d leads | skipped: no_solar_tag=%d building_type=%d "
-        "amenity=%d flats=%d geom=%d",
-        len(leads), skipped_no_solar_tag, skipped_building_type,
+        "scan_area_osm result=%d leads (%d needs_review) | skipped: no_solar_tag=%d "
+        "building_type=%d amenity=%d flats=%d geom=%d",
+        len(leads), n_unverified, skipped_no_solar_tag, skipped_building_type,
         skipped_amenity, skipped_flats, skipped_geom,
     )
     return leads
