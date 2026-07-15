@@ -13,8 +13,10 @@ Och att den RETURNERAR leads för:
 import sys
 from unittest.mock import MagicMock, patch
 
+# OBS: stubba INTE openpyxl här — scanner importerar det aldrig, och en
+# MagicMock i sys.modules förgiftar pandas ExcelWriter i test_export_bild.py.
 for _mod in ("googlemaps", "streamlit", "supabase", "stripe", "folium",
-             "streamlit_folium", "openpyxl"):
+             "streamlit_folium"):
     sys.modules.setdefault(_mod, MagicMock())
 
 from scanner import scan_area_osm
