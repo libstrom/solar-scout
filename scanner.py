@@ -130,13 +130,19 @@ def _bbox_tiles(south: float, west: float, north: float, east: float, zoom: int 
     return tiles
 
 
-def _center_bbox(lat: float, lng: float, radius_km: float = 1.0):
-    delta_lat = radius_km / 111.0
-    delta_lng = radius_km / (111.0 * math.cos(math.radians(lat)))
-    return lat - delta_lat, lng - delta_lng, lat + delta_lat, lng + delta_lng
-
-
 # ── OSM queries ────────────────────────────────────────────────────────────────
+
+# Per försöks-index: huvudservern får två snabba chanser (dess 504-stormar
+# släpper ofta på omförsök inom sekunder), kumi-spegeln är tredje chans.
+# Spegeln ligger INTE tidigare i listan: när huvudservern stormar är spegeln
+# ofta också överbelastad, och en hängande spegel kostar en hel timeout.
+_OVERPASS_URLS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass-api.de/api/interpreter",
+]
+
 
 def _overpass(query: str, timeout: int = 90) -> list[dict]:
     _BACKOFF = [5, 20, 60]
@@ -147,10 +153,11 @@ def _overpass(query: str, timeout: int = 90) -> list[dict]:
         _log.warning("Overpass semaphore timeout — previous scan still running, proceeding unthrottled")
     try:
         for attempt in range(4):
+            url = _OVERPASS_URLS[attempt % len(_OVERPASS_URLS)]
             try:
-                _log.info("Overpass query start (timeout=%ds attempt=%d)", timeout, attempt + 1)
+                _log.info("Overpass query start (timeout=%ds attempt=%d url=%s)", timeout, attempt + 1, url)
                 resp = httpx.post(
-                    "https://overpass-api.de/api/interpreter",
+                    url,
                     data={"data": query},
                     timeout=timeout,
                     headers={
@@ -177,7 +184,9 @@ def _overpass(query: str, timeout: int = 90) -> list[dict]:
             except Exception as exc:
                 _log.warning("Overpass attempt %d failed: %s", attempt + 1, exc)
                 if attempt < 3:
-                    time.sleep(_BACKOFF[min(attempt, len(_BACKOFF) - 1)])
+                    # Kort paus räcker: 504-stormar släpper ofta inom sekunder,
+                    # och rate limiting hanteras av 429-grenen ovan.
+                    time.sleep(2)
         _log.error("Overpass failed after 4 attempts — returning empty result")
         # Return sentinel so callers can detect failure via empty list + log.
         # Do NOT raise here: callers have fallback paths and partial results.
@@ -285,6 +294,17 @@ def scan_area_osm(south: float, west: float, north: float, east: float) -> list[
         skipped_amenity, skipped_flats, skipped_geom,
     )
     return leads
+
+
+# Hela primära säljområdet (Småland/SE3): Nässjö, Eksjö, Vetlanda och Jönköping
+# med omnejd. Solar-taggar är glesa i OSM, så ett enda Overpass-anrop klarar
+# hela ytan utan timeout.
+REGION_BBOX = (57.30, 14.00, 57.90, 15.30)
+
+
+def scan_region_osm() -> list[Lead]:
+    """Gratisleads för hela säljregionen i ETT Overpass-anrop — noll AI-kostnad."""
+    return scan_area_osm(*REGION_BBOX)
 
 
 # Residential building types we want to KEEP. Note: `farm` here is a residential
@@ -457,6 +477,63 @@ def _get_osm_buildings(south: float, west: float, north: float,
             "area_m2": round(area),
         })
     return buildings
+
+
+def _get_osm_buildings_grid(south: float, west: float, north: float,
+                            east: float, cell_deg: float = 0.06) -> list[dict]:
+    """Alla byggnader i viewporten via ett glest rutnät av Overpass-anrop.
+
+    Ersätter den gamla per-zon-hämtningen (upp till 100 seriella anrop à 1 km-
+    radie som överlappade varandra och drunknade i 429-backoffs). Rutor om
+    ~0.06° (~40 km²) ger Eksjö 1–2 rutor och Jönköping ~8 — och max_count 600
+    per ruta blir 5000 så att tätorter inte trunkeras.
+    """
+    lat_steps = max(1, math.ceil((north - south) / cell_deg))
+    lng_steps = max(1, math.ceil((east - west) / cell_deg))
+    seen: set[str] = set()
+    buildings: list[dict] = []
+    d_lat = (north - south) / lat_steps
+    d_lng = (east - west) / lng_steps
+    for i in range(lat_steps):
+        for j in range(lng_steps):
+            cell = _get_osm_buildings(
+                south + i * d_lat, west + j * d_lng,
+                south + (i + 1) * d_lat, west + (j + 1) * d_lng,
+                max_count=5000,
+            )
+            # Byggnader på cellgränsen kan dyka upp i två celler
+            for b in cell:
+                if b["osm_id"] not in seen:
+                    seen.add(b["osm_id"])
+                    buildings.append(b)
+    _log.info("_get_osm_buildings_grid cells=%d buildings=%d",
+              lat_steps * lng_steps, len(buildings))
+    return buildings
+
+
+_KM_PER_DEG = 111.32
+
+
+def _rank_buildings(buildings: list[dict], residential_areas: list[dict],
+                    radius_km: float = 1.0) -> list[dict]:
+    """Sortera byggnader: största residential-zonen först, glesbygd sist.
+
+    Bevarar den gamla zon-loopens prioritering (störst zon = flest villor)
+    utan dess Overpass-anrop, så att max_leads fortfarande klipper i tätorten
+    först och glesbygdshusen scannas i samma AI-pass istället för ett extra.
+    """
+    r2 = radius_km * radius_km
+
+    def rank(b: dict) -> int:
+        cos_lat = math.cos(math.radians(b["lat"]))
+        for i, area in enumerate(residential_areas):
+            d_lat_km = (b["lat"] - area["lat"]) * _KM_PER_DEG
+            d_lng_km = (b["lng"] - area["lng"]) * _KM_PER_DEG * cos_lat
+            if d_lat_km * d_lat_km + d_lng_km * d_lng_km <= r2:
+                return i
+        return len(residential_areas)
+
+    return sorted(buildings, key=rank)
 
 
 # ── Samtomt-Sol-Flagga (V1.5 Slice 7) ─────────────────────────────────────────
@@ -1719,127 +1796,44 @@ def scan_city(
         return osm_leads[:max_leads], ScanStats()
 
     osm_keys = {f"{l.lat:.4f},{l.lng:.4f}" for l in osm_leads}
-    all_ai_leads: list[Lead] = []
-    merged_stats = ScanStats()
-    seen_building_ids: set[str] = set()
 
     # Load few-shot examples once per full scan — shared across all residential
     # areas so LM WMS is not hit 6× per area (N_areas × 6 images otherwise).
     few_shot = _load_few_shot_images(user_id=user_id)
     _log.info("scan_city few_shot=%d examples loaded", len(few_shot))
 
-    # Query landuse=residential polygons within the city viewport
+    # Residential-polygonerna används numera bara för PRIORITERING, inte för
+    # hämtning — byggnaderna kommer från ett glest rutnät över hela viewporten
+    # (få Overpass-anrop istället för upp till 100 seriella zon-anrop), och
+    # glesbygdshusen ingår i samma pass rankade sist.
     residential_areas = _get_residential_areas(south, west, north, east)
     _log.info("scan_city residential_areas=%d", len(residential_areas))
 
+    buildings = _get_osm_buildings_grid(south, west, north, east)
+    buildings = [b for b in buildings
+                 if f"{b['lat']:.4f},{b['lng']:.4f}" not in osm_keys]
     if residential_areas:
-        # Cap areas to avoid multi-hour scans on cities with hundreds of
-        # residential polygons. 100 areas × ~20 buildings × 8% solar ≈ 160
-        # leads, sufficient for any reasonable max_leads value.
-        max_areas = min(len(residential_areas), 100)
-        _log.info("scan_city scanning %d/%d areas", max_areas, len(residential_areas))
-        for area in residential_areas[:max_areas]:
-            # Remaining lead budget for AI scan
-            remaining = None
-            if max_leads is not None:
-                already_found = len(osm_leads) + len(all_ai_leads)
-                remaining = max_leads - already_found
-                if remaining <= 0:
-                    break
-
-            a_south, a_west, a_north, a_east = _center_bbox(
-                area["lat"], area["lng"], radius_km=1.0
-            )
-            buildings = _get_osm_buildings(a_south, a_west, a_north, a_east)
-
-            # Deduplicate across areas and against OSM leads
-            buildings = [
-                b for b in buildings
-                if b["osm_id"] not in seen_building_ids
-                and f"{b['lat']:.4f},{b['lng']:.4f}" not in osm_keys
-            ]
-            for b in buildings:
-                seen_building_ids.add(b["osm_id"])
-
-            if not buildings:
-                _log.info("scan_city area lat=%s lng=%s no new buildings", area["lat"], area["lng"])
-                continue
-
-            _log.info("scan_city area lat=%s lng=%s buildings=%d", area["lat"], area["lng"], len(buildings))
-            if phase_callback:
-                phase_callback("area_buildings", len(buildings))
-            area_leads, area_stats = scan_buildings_ai(
-                buildings, google_key, anthropic_key, on_progress,
-                mapbox_key=mapbox_key, lm_key=lm_key,
-                max_leads=remaining, few_shot=few_shot,
-                skip_tile_keys=skip_tile_keys,
-                budget=budget,
-            )
-            _log.info("scan_city area_leads=%d", len(area_leads))
-            all_ai_leads.extend(area_leads)
-            merged_stats.yes += area_stats.yes
-            merged_stats.unsure += area_stats.unsure
-            merged_stats.no += area_stats.no
-
-            if budget.stopped_over_budget:
-                break
-            if max_leads is not None and len(osm_leads) + len(all_ai_leads) >= max_leads:
-                break
-
-        # Glesbygd-pass: scan hela viewport utan landuse-filter.
-        # Hus utanför residential-polygoner (landsbygd, ~20-30% av villor) missas
-        # annars helt. Deduplicera via seen_building_ids.
-        # Skip for large city viewports (>150 km²) — the full-viewport Overpass
-        # query would time out and silently kill the WebSocket connection.
-        _glesbygd_ok = _bbox_area_km2 <= 150
-        if not _glesbygd_ok:
-            _log.info("scan_city skipping glesbygd-pass (bbox %.0f km² > 150)", _bbox_area_km2)
-        if _glesbygd_ok and not budget.stopped_over_budget and len(osm_leads) + len(all_ai_leads) < (max_leads or 9999):
-            remaining = None
-            if max_leads is not None:
-                remaining = max_leads - len(osm_leads) - len(all_ai_leads)
-            if remaining is None or remaining > 0:
-                fallback_buildings = _get_osm_buildings(south, west, north, east)
-                fallback_buildings = [
-                    b for b in fallback_buildings
-                    if b["osm_id"] not in seen_building_ids
-                    and f"{b['lat']:.4f},{b['lng']:.4f}" not in osm_keys
-                ]
-                _log.info("scan_city glesbygd fallback buildings=%d", len(fallback_buildings))
-                if fallback_buildings:
-                    glesbygd_leads, glesbygd_stats = scan_buildings_ai(
-                        fallback_buildings, google_key, anthropic_key, on_progress,
-                        mapbox_key=mapbox_key, lm_key=lm_key,
-                        max_leads=remaining, few_shot=few_shot,
-                        skip_tile_keys=skip_tile_keys,
-                        budget=budget,
-                    )
-                    _log.info("scan_city glesbygd_leads=%d", len(glesbygd_leads))
-                    all_ai_leads.extend(glesbygd_leads)
-                    merged_stats.yes += glesbygd_stats.yes
-                    merged_stats.unsure += glesbygd_stats.unsure
-                    merged_stats.no += glesbygd_stats.no
+        buildings = _rank_buildings(buildings, residential_areas)
     else:
-        # Fallback: 1 km radius around city centre
-        _log.info("scan_city no residential areas — fallback to 1km radius")
-        ai_south, ai_west, ai_north, ai_east = _center_bbox(
-            center["lat"], center["lng"], radius_km=1.0
-        )
-        buildings = _get_osm_buildings(ai_south, ai_west, ai_north, ai_east)
-        buildings = [b for b in buildings
-                     if f"{b['lat']:.4f},{b['lng']:.4f}" not in osm_keys]
-        _log.info("scan_city fallback buildings=%d", len(buildings))
+        # Ingen landuse-data — scanna inifrån och ut från stadskärnan
+        c_lat, c_lng = center["lat"], center["lng"]
+        cos_lat = math.cos(math.radians(c_lat))
+        buildings.sort(key=lambda b: (b["lat"] - c_lat) ** 2
+                       + ((b["lng"] - c_lng) * cos_lat) ** 2)
+    _log.info("scan_city buildings=%d — ett sammanhängande AI-pass", len(buildings))
+    if phase_callback:
+        phase_callback("area_buildings", len(buildings))
 
-        remaining = None
-        if max_leads is not None:
-            remaining = max_leads - len(osm_leads)
-        all_ai_leads, merged_stats = scan_buildings_ai(
-            buildings, google_key, anthropic_key, on_progress,
-            mapbox_key=mapbox_key, lm_key=lm_key,
-            max_leads=remaining, few_shot=few_shot,
-            skip_tile_keys=skip_tile_keys,
-            budget=budget,
-        )
+    remaining = None
+    if max_leads is not None:
+        remaining = max_leads - len(osm_leads)
+    all_ai_leads, merged_stats = scan_buildings_ai(
+        buildings, google_key, anthropic_key, on_progress,
+        mapbox_key=mapbox_key, lm_key=lm_key,
+        max_leads=remaining, few_shot=few_shot,
+        skip_tile_keys=skip_tile_keys,
+        budget=budget,
+    )
 
     merged = merge_leads(osm_leads, all_ai_leads)
     _log.info("scan_city done city=%s total_leads=%d (osm=%d ai=%d)",
@@ -1975,74 +1969,26 @@ def scan_bbox(
     merged_stats = ScanStats()
 
     if tile_count > 1000:
-        # Large bbox: chunk by OSM residential polygons — same strategy as scan_city.
-        # This lets users draw whole city districts or municipalities without limits.
+        # Large bbox: gles rutnätshämtning + residential-prioritering — samma
+        # strategi som scan_city. Zonerna styr bara ordningen, inte hämtningen.
         residential_areas = _get_residential_areas(south, west, north, east)
         _log.info("scan_bbox large area: residential_areas=%d", len(residential_areas))
 
+        buildings = _get_osm_buildings_grid(south, west, north, east)
+        buildings = [b for b in buildings
+                     if f"{b['lat']:.4f},{b['lng']:.4f}" not in osm_keys]
         if residential_areas:
-            seen_building_ids: set[str] = set()
-            for area in residential_areas:
-                remaining = None
-                if max_leads is not None:
-                    remaining = max_leads - len(osm_leads) - len(all_ai_leads)
-                    if remaining <= 0:
-                        break
-
-                a_south, a_west, a_north, a_east = _center_bbox(
-                    area["lat"], area["lng"], radius_km=1.0
-                )
-                # Clamp to drawn bbox so we don't spill outside the user's selection
-                a_south = max(a_south, south)
-                a_west  = max(a_west,  west)
-                a_north = min(a_north, north)
-                a_east  = min(a_east,  east)
-
-                buildings = _get_osm_buildings(a_south, a_west, a_north, a_east)
-                buildings = [
-                    b for b in buildings
-                    if b["osm_id"] not in seen_building_ids
-                    and f"{b['lat']:.4f},{b['lng']:.4f}" not in osm_keys
-                ]
-                for b in buildings:
-                    seen_building_ids.add(b["osm_id"])
-
-                if not buildings:
-                    continue
-
-                if phase_callback:
-                    phase_callback("area_buildings", len(buildings))
-                area_leads, area_stats = scan_buildings_ai(
-                    buildings, google_key, anthropic_key, on_progress,
-                    mapbox_key=mapbox_key, lm_key=lm_key,
-                    max_leads=remaining, few_shot=few_shot,
-                    skip_tile_keys=skip_tile_keys,
-                    budget=budget,
-                )
-                all_ai_leads.extend(area_leads)
-                merged_stats.yes    += area_stats.yes
-                merged_stats.unsure += area_stats.unsure
-                merged_stats.no     += area_stats.no
-
-                if budget.stopped_over_budget:
-                    break
-                if max_leads is not None and len(osm_leads) + len(all_ai_leads) >= max_leads:
-                    break
-        else:
-            # No residential polygons (rural/industrial): scan full bbox directly.
-            buildings = _get_osm_buildings(south, west, north, east)
-            buildings = [b for b in buildings
-                         if f"{b['lat']:.4f},{b['lng']:.4f}" not in osm_keys]
-            if phase_callback:
-                phase_callback("buildings_found", len(buildings))
-            remaining = (max_leads - len(osm_leads)) if max_leads is not None else None
-            all_ai_leads, merged_stats = scan_buildings_ai(
-                buildings, google_key, anthropic_key, on_progress,
-                mapbox_key=mapbox_key, lm_key=lm_key,
-                max_leads=remaining, few_shot=few_shot,
-                skip_tile_keys=skip_tile_keys,
-                budget=budget,
-            )
+            buildings = _rank_buildings(buildings, residential_areas)
+        if phase_callback:
+            phase_callback("buildings_found", len(buildings))
+        remaining = (max_leads - len(osm_leads)) if max_leads is not None else None
+        all_ai_leads, merged_stats = scan_buildings_ai(
+            buildings, google_key, anthropic_key, on_progress,
+            mapbox_key=mapbox_key, lm_key=lm_key,
+            max_leads=remaining, few_shot=few_shot,
+            skip_tile_keys=skip_tile_keys,
+            budget=budget,
+        )
     else:
         # Small bbox (≤ ~2 km²): direct scan, no chunking needed
         buildings = _get_osm_buildings(south, west, north, east)

@@ -14,9 +14,11 @@ import sys
 from unittest.mock import MagicMock, patch, call
 import pytest
 
-# Stub out unavailable packages before importing scanner
+# Stub out unavailable packages before importing scanner.
+# OBS: stubba INTE openpyxl — scanner importerar det aldrig, och en MagicMock
+# i sys.modules förgiftar pandas ExcelWriter i test_export_bild.py.
 for _mod in ("googlemaps", "streamlit", "supabase", "stripe", "folium",
-             "streamlit_folium", "openpyxl"):
+             "streamlit_folium"):
     sys.modules.setdefault(_mod, MagicMock())
 
 import scanner  # noqa: E402
@@ -400,8 +402,10 @@ class TestAreaCap:
         assert "5" in building_query
         assert len(result) <= 5
 
-    def test_scan_city_passes_default_area_cap_to_get_osm_buildings(self):
-        """scan_city anropar _get_osm_buildings utan att överrida max_count (default 600)."""
+    def test_scan_city_grid_requests_finite_max_count(self):
+        """scan_city hämtar via rutnätet med ett ändligt max_count per cell —
+        aldrig obegränsat (Overpass-svar på tiotusentals ways skulle annars
+        kunna svälta minnet/timeouta)."""
         fake_gmaps = MagicMock()
         fake_gmaps.geocode.return_value = _make_geocode_result()
 
@@ -426,72 +430,64 @@ class TestAreaCap:
             )
 
         assert calls_to_get_osm_buildings, "_get_osm_buildings was never called"
-        # Default cap should be 600 (or at least not None / unlimited)
         for cap in calls_to_get_osm_buildings:
             assert cap is not None
-            assert cap <= 600, f"area cap {cap} exceeds MAX expected 600"
+            assert cap <= 5000, f"cellens max_count {cap} är orimligt stort"
 
 
 # ── 5. all_areas — regression för max_leads//5-buggen ─────────────────────────
 
 class TestAllAreas:
-    """scan_city ska scanna alla areas tills max_leads nås — inte stanna efter max_leads//5.
+    """scan_city ska mata ALLA viewportens byggnader till ett enda AI-pass.
 
-    Regression för buggen som gav 0 leads i stora städer (Lund, Malmö):
-    med max_leads=10 begränsades scan till max(1, 10//5)=2 areas. Om de 2
-    första råkade vara campus/lägenhetszoner → 0 leads trots att villa-suburbs
-    med solpaneler finns längre ut.
+    Regression för två gamla buggar i zon-loopen: (1) max_leads//5 begränsade
+    antalet areas → 0 leads i stora städer, (2) upp till 100 seriella
+    Overpass-anrop → 429-backoffs dominerade wall-clock. Nya arkitekturen
+    hämtar via glest rutnät och kör ETT sammanhängande scan_buildings_ai.
     """
 
-    def test_scans_beyond_first_two_areas_when_no_leads_found(self):
-        """Med 10 areas och 0 leads i area 1-2 ska area 3+ scannas.
-
-        Gamla beteendet: max_areas = max(1, 10//5) = 2 → stannar efter area 2.
-        Nya beteendet: scanna alla tills max_leads nås.
-
-        Varje area får unika buildings (olika osm_id) för att undvika
-        seen_building_ids-dedupliceringen som annars filtrerar bort dem.
-        """
+    def test_all_viewport_buildings_reach_single_ai_pass(self):
+        """10 byggnader utspridda i viewporten → alla 10 ska nå scan_buildings_ai,
+        i ett enda anrop (inga zoner som klipper bort förorter)."""
         fake_gmaps = MagicMock()
         fake_gmaps.geocode.return_value = _make_geocode_result()
 
+        ten_buildings = [
+            _make_building(f"BLD_{i}", 59.30 + i * 0.01, 18.05)
+            for i in range(10)
+        ]
         ten_areas = [
             {"lat": 59.30 + i * 0.01, "lng": 18.05, "area_deg2": 0.01}
             for i in range(10)
         ]
 
-        area_scan_count = [0]
-
-        def fake_get_osm_buildings(south, west, north, east, **kwargs):
-            # Unique building per area call — avoids seen_building_ids dedup
-            area_idx = area_scan_count[0]
-            return [_make_building(f"BLD_AREA_{area_idx}", 59.30 + area_idx * 0.01, 18.05)]
+        scan_ai_calls = []
 
         def fake_scan_buildings_ai(buildings, *args, max_leads=None, **kwargs):
-            area_scan_count[0] += 1
-            # Only area 5 (call #5) produces a lead
-            if area_scan_count[0] == 5:
-                return [_make_lead(59.35, 18.05)], scanner.ScanStats()
+            scan_ai_calls.append(list(buildings))
             return [], scanner.ScanStats()
 
         with patch("googlemaps.Client", return_value=fake_gmaps), \
              patch.object(scanner, "scan_area_osm", return_value=[]), \
              patch.object(scanner, "_get_residential_areas", return_value=ten_areas), \
              patch.object(scanner, "_get_osm_buildings",
-                          side_effect=fake_get_osm_buildings), \
+                          return_value=ten_buildings), \
              patch.object(scanner, "scan_buildings_ai",
                           side_effect=fake_scan_buildings_ai):
 
-            leads, stats = scan_city(
+            scan_city(
                 city_name="Teststad",
                 google_key="fake",
                 anthropic_key="fake",
                 max_leads=10,
             )
 
-        assert len(leads) >= 1, "Ska hitta lead i area 5"
-        assert area_scan_count[0] >= 5, (
-            f"Bara {area_scan_count[0]} areas scannades — gamla buggen begränsade till 2"
+        assert len(scan_ai_calls) == 1, (
+            f"Förväntade ETT AI-pass, fick {len(scan_ai_calls)}"
+        )
+        scanned_ids = {b["osm_id"] for b in scan_ai_calls[0]}
+        assert scanned_ids == {f"BLD_{i}" for i in range(10)}, (
+            f"Alla 10 byggnader ska nå AI-passet. Fick: {scanned_ids}"
         )
 
     def test_stops_scanning_areas_when_max_leads_reached(self):
@@ -537,44 +533,30 @@ class TestAllAreas:
 # ── 6. glesbygd fallback ───────────────────────────────────────────────────────
 
 class TestGlesbygdFallback:
-    """scan_city ska köra ett glesbygd-pass med hela viewport om leads < max_leads.
+    """Glesbygdshus (utanför landuse=residential) ska ingå i AI-passet — sist.
 
-    Hus UTANFÖR landuse=residential-polygoner (~20-30% på landsbygden) skannas
-    annars aldrig. Fallback-passet kallar _get_osm_buildings direkt på hela
-    city-viewporten och deduplikerar via seen_building_ids.
+    ~20-30% av villorna ligger utanför residential-polygonerna. Nya
+    arkitekturen tar med dem i samma rutnätshämtning och rankar dem efter
+    tätortshusen, så max_leads klipper i tätorten först.
     """
 
-    def test_glesbygd_fallback_scans_buildings_outside_residential_areas(self):
-        """Om residential_areas ger 0 leads ska glesbygd-passet köras med hela viewport.
-
-        Setup:
-          - 1 residential_area som ger 0 leads (0 byggnader)
-          - _get_osm_buildings(viewport) returnerar 3 byggnader (glesbygd)
-          - Verifiera att scan_buildings_ai anropas med dessa 3 byggnader
-        """
+    def test_glesbygd_buildings_included_and_ranked_last(self):
+        """3 glesbygdshus + 1 tätortshus → alla 4 i AI-passet, tätort först."""
         fake_gmaps = MagicMock()
         fake_gmaps.geocode.return_value = _make_geocode_result(
             south=59.30, west=18.00, north=59.40, east=18.10
         )
 
-        fake_area = {"lat": 59.35, "lng": 18.05, "area_deg2": 0.01}
-
-        # Three buildings that live outside the residential area
+        # Residential-zon i sydväst; tätortshuset ligger i den, glesbygdshusen
+        # ~5 km bort i nordost (utanför 1 km-radien).
+        fake_area = {"lat": 59.32, "lng": 18.02, "area_deg2": 0.01}
+        urban_building = _make_building("URBAN_1", 59.32, 18.02)
         glesbygd_buildings = [
             _make_building(f"RURAL_{i}", 59.38 + i * 0.001, 18.08)
             for i in range(3)
         ]
 
-        # Track calls to _get_osm_buildings and scan_buildings_ai
-        get_osm_calls = []
         scan_ai_calls = []
-
-        def fake_get_osm_buildings(south, west, north, east, **kwargs):
-            get_osm_calls.append((south, west, north, east))
-            # Area call (small bbox ~1 km radius) → 0 buildings
-            # Viewport call (large bbox 59.30..59.40) → glesbygd_buildings
-            is_viewport = (abs(south - 59.30) < 0.01 and abs(north - 59.40) < 0.01)
-            return glesbygd_buildings if is_viewport else []
 
         def fake_scan_buildings_ai(buildings, *args, max_leads=None, **kwargs):
             scan_ai_calls.append(list(buildings))
@@ -584,25 +566,24 @@ class TestGlesbygdFallback:
              patch.object(scanner, "scan_area_osm", return_value=[]), \
              patch.object(scanner, "_get_residential_areas", return_value=[fake_area]), \
              patch.object(scanner, "_get_osm_buildings",
-                          side_effect=fake_get_osm_buildings), \
+                          return_value=glesbygd_buildings + [urban_building]), \
              patch.object(scanner, "scan_buildings_ai",
                           side_effect=fake_scan_buildings_ai):
 
-            result = scan_city(
+            scan_city(
                 city_name="Teststad",
                 google_key="fake",
                 anthropic_key="fake",
             )
 
-        # At least one scan_buildings_ai call should include the glesbygd buildings
-        all_scanned_ids = [
-            b["osm_id"]
-            for call in scan_ai_calls
-            for b in call
-        ]
+        all_scanned_ids = [b["osm_id"] for call in scan_ai_calls for b in call]
         assert any(bid.startswith("RURAL_") for bid in all_scanned_ids), (
             "Glesbygd-byggnader (RURAL_*) ska ha skannats av scan_buildings_ai. "
             f"Faktiska IDs: {all_scanned_ids}"
+        )
+        assert all_scanned_ids[0] == "URBAN_1", (
+            f"Tätortshuset ska rankas först (max_leads klipper i tätorten). "
+            f"Ordning: {all_scanned_ids}"
         )
 
     def test_glesbygd_fallback_deduplicates_already_seen_buildings(self):
@@ -651,33 +632,27 @@ class TestGlesbygdFallback:
             "SEEN_ID ska inte passas till scan_buildings_ai mer än en gång"
         )
 
-    def test_glesbygd_fallback_skipped_when_max_leads_already_reached(self):
-        """Om max_leads redan är uppnått INNAN glesbygd-passet, ska det inte köras."""
+    def test_max_leads_forwarded_to_single_ai_pass(self):
+        """max_leads (minus OSM-leads) ska skickas vidare till AI-passet så att
+        scan_buildings_ai kan stoppa i tid — inget separat glesbygd-pass finns
+        längre som kan spränga taket."""
         fake_gmaps = MagicMock()
         fake_gmaps.geocode.return_value = _make_geocode_result(
             south=59.30, west=18.00, north=59.40, east=18.10
         )
-
         fake_area = {"lat": 59.35, "lng": 18.05, "area_deg2": 0.01}
-        area_building = _make_building("AREA_BLD", 59.35, 18.05)
+        building = _make_building("BLD1", 59.35, 18.05)
 
-        viewport_call_count = [0]
-
-        def fake_get_osm_buildings(south, west, north, east, **kwargs):
-            is_viewport = (abs(south - 59.30) < 0.01 and abs(north - 59.40) < 0.01)
-            if is_viewport:
-                viewport_call_count[0] += 1
-            return [area_building] if not is_viewport else []
+        seen_max_leads = []
 
         def fake_scan_buildings_ai(buildings, *args, max_leads=None, **kwargs):
-            # First call fills up max_leads=1
+            seen_max_leads.append(max_leads)
             return [_make_lead(59.35, 18.05)], scanner.ScanStats()
 
         with patch("googlemaps.Client", return_value=fake_gmaps), \
              patch.object(scanner, "scan_area_osm", return_value=[]), \
              patch.object(scanner, "_get_residential_areas", return_value=[fake_area]), \
-             patch.object(scanner, "_get_osm_buildings",
-                          side_effect=fake_get_osm_buildings), \
+             patch.object(scanner, "_get_osm_buildings", return_value=[building]), \
              patch.object(scanner, "scan_buildings_ai",
                           side_effect=fake_scan_buildings_ai):
 
@@ -689,6 +664,53 @@ class TestGlesbygdFallback:
             )
 
         assert len(result) <= 1
-        assert viewport_call_count[0] == 0, (
-            "Viewport-call (glesbygd-pass) ska inte köras när max_leads redan är uppnått"
+        assert seen_max_leads == [1], (
+            f"AI-passet ska få max_leads=1, fick {seen_max_leads}"
         )
+
+
+# ── 7. rutnätshämtning + region-gratisleads ────────────────────────────────────
+
+class TestGridAndRegion:
+    def test_grid_deduplicates_buildings_across_cells(self):
+        """Byggnader på cellgränser dyker upp i flera celler — ska dedupas på osm_id."""
+        b1 = _make_building("DUP", 59.35, 18.05)
+        b2 = _make_building("UNIQ", 59.36, 18.06)
+        with patch.object(scanner, "_get_osm_buildings", return_value=[b1, b2]):
+            # 0.1°×0.1° viewport med cell_deg=0.06 → 2×2 = 4 celler
+            result = scanner._get_osm_buildings_grid(59.30, 18.00, 59.40, 18.10)
+        ids = [b["osm_id"] for b in result]
+        assert sorted(ids) == ["DUP", "UNIQ"], f"Dubbletter kvar: {ids}"
+
+    def test_grid_single_cell_for_small_viewport(self):
+        """En liten viewport (mindre än en cell) ska ge exakt ett hämtanrop."""
+        calls = []
+
+        def fake_get(south, west, north, east, max_count=600):
+            calls.append((south, west, north, east))
+            return []
+
+        with patch.object(scanner, "_get_osm_buildings", side_effect=fake_get):
+            scanner._get_osm_buildings_grid(59.30, 18.00, 59.33, 18.03)
+        assert len(calls) == 1
+        # Cellen ska täcka hela viewporten
+        assert calls[0] == (59.30, 18.00, 59.33, 18.03)
+
+    def test_rank_buildings_residential_first_largest_zone_first(self):
+        """Byggnader sorteras: största zonen först, glesbygd sist."""
+        # areas är sorterade störst-först av _get_residential_areas
+        areas = [
+            {"lat": 59.30, "lng": 18.00, "area_deg2": 0.02},   # störst
+            {"lat": 59.35, "lng": 18.05, "area_deg2": 0.01},   # mindre
+        ]
+        in_big = _make_building("BIG", 59.301, 18.001)
+        in_small = _make_building("SMALL", 59.351, 18.051)
+        rural = _make_building("RURAL", 59.50, 18.30)
+        ranked = scanner._rank_buildings([rural, in_small, in_big], areas)
+        assert [b["osm_id"] for b in ranked] == ["BIG", "SMALL", "RURAL"]
+
+    def test_scan_region_osm_sweeps_region_bbox(self):
+        """scan_region_osm ska anropa scan_area_osm med hela REGION_BBOX."""
+        with patch.object(scanner, "scan_area_osm", return_value=[]) as mock_osm:
+            scanner.scan_region_osm()
+        mock_osm.assert_called_once_with(*scanner.REGION_BBOX)
