@@ -431,6 +431,22 @@ def _get_osm_buildings(south: float, west: float, north: float,
     elements = _overpass(building_q, timeout=120)
     addr_nodes = _overpass(addr_q, timeout=120)
 
+    # Rutnätsindex över adressnoderna — linjär skanning per byggnad är annars
+    # O(byggnader × noder), vilket blir minuter av CPU i en stor tätortscell
+    # (5000 byggnader × tiotusentals adressnoder). Bin ~111 m; 3×3 grannbins
+    # täcker ADDRESS_SNAP_RADIUS_M=25 med marginal.
+    _BIN = 0.001
+    addr_idx: dict[tuple[int, int], list[dict]] = {}
+    for n in addr_nodes:
+        addr_idx.setdefault(
+            (math.floor(n["lat"] / _BIN), math.floor(n["lon"] / _BIN)), []
+        ).append(n)
+
+    def _addr_candidates(lat: float, lng: float) -> list[dict]:
+        bi, bj = math.floor(lat / _BIN), math.floor(lng / _BIN)
+        return [n for di in (-1, 0, 1) for dj in (-1, 0, 1)
+                for n in addr_idx.get((bi + di, bj + dj), [])]
+
     buildings = []
     for el in elements:
         geom = el.get("geometry") or []
@@ -463,7 +479,7 @@ def _get_osm_buildings(south: float, west: float, north: float,
         if area < MIN_BUILDING_AREA_M2 or area > MAX_BUILDING_AREA_M2:
             continue
 
-        addr = _tags_to_address(tags) or _nearest_addr_node(lat, lng, addr_nodes)
+        addr = _tags_to_address(tags) or _nearest_addr_node(lat, lng, _addr_candidates(lat, lng))
         # Don't require an address — scan the building anyway and resolve via
         # reverse geocode after AI confirms solar. Use coords as placeholder.
         if not addr:

@@ -1568,8 +1568,8 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
             except Exception as _e:
                 _log.warning("region dedup fetch failed: %s", _e)
                 _have = set()
-            _new = [l for l in _region_leads if l.tile_key not in _have]
-            _rows = [{**_lead_to_sb_row(l), "user_id": str(user.id)} for l in _new]
+            _new = [lead for lead in _region_leads if lead.tile_key not in _have]
+            _rows = [{**_lead_to_sb_row(lead), "user_id": str(user.id)} for lead in _new]
             _saved = 0
             if _rows:
                 _sb = get_supabase()
@@ -1584,7 +1584,7 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                             _saved += 1
                         except Exception as _ins_exc:
                             _log.warning("region lead insert failed: %s", _ins_exc)
-            _n_review = sum(1 for l in _new if l.needs_review)
+            _n_review = sum(1 for lead in _new if lead.needs_review)
             _log_event(
                 "region_osm_sweep",
                 f"{len(_region_leads)} träffar, {_saved} nya sparade ({_n_review} till granskning)",
