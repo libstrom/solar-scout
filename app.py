@@ -7,6 +7,7 @@ import io
 import os
 import re
 import time
+import uuid
 import threading
 import logging
 import urllib.parse
@@ -1138,6 +1139,7 @@ def _bulk_scan_section(user, profile, ai_available):
 
 @dataclass
 class _ScanState:
+    scan_id: str = ""                                 # korrelations-id i app_events
     leads_live: list = field(default_factory=list)    # appended progressively (live count)
     result_leads: list = field(default_factory=list)  # final merged list (set on finish)
     logs: list = field(default_factory=list)          # (ts, level, msg) for the dev console
@@ -1312,6 +1314,29 @@ def _finalize_background_scan(state, user) -> None:
     """Runs on the Streamlit thread once the worker finished. Persists results."""
     st.session_state.pop("_scan_state", None)
     budget = state.budget
+
+    # Spårbarhet: hela scan-utfallet till app_events, korrelerat via scan_id.
+    # Körs exakt en gång (state poppas ovan). Felsökning i efterhand:
+    #   select * from app_events where detail like 'scan_id=<id>%' order by created_at;
+    _n_leads = len(state.result_leads or state.leads_live)
+    _debug_tail = " | ".join(state.scan_debug[-10:])
+    _err_tail = " | ".join(state.scan_errors[-5:])
+    if state.error_kind:
+        _log_event(
+            "scan_error",
+            f"{state.error_kind}: {state.error_msg or state.quota_api} — {_n_leads} leads innan stopp",
+            detail=f"scan_id={state.scan_id} | {_debug_tail} | fel: {_err_tail}",
+            user_email=getattr(user, "email", "") or "",
+        )
+    else:
+        _spent = f"{budget.spent_sek:.0f} kr" if budget is not None else "?"
+        _log_event(
+            "scan_done",
+            f"{_n_leads} leads, kostnad ~{_spent}",
+            detail=f"scan_id={state.scan_id} | {_debug_tail}"
+                   + (f" | fel: {_err_tail}" if _err_tail else ""),
+            user_email=getattr(user, "email", "") or "",
+        )
 
     if budget is not None and getattr(budget, "stopped_over_budget", False):
         st.warning(
@@ -1524,6 +1549,58 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
                     st.rerun()
 
         start = st.button("Starta scanning", type="primary", use_container_width=True)
+        region_free = st.button(
+            "⚡ Region-gratisleads (0 kr)",
+            use_container_width=True,
+            help="Hämtar alla OSM-taggade solcellstak i hela säljområdet "
+                 "(Nässjö–Eksjö–Vetlanda–Jönköping) i ett enda svep. "
+                 "Ingen AI-kostnad, klart på sekunder.",
+        )
+        if region_free:
+            from scanner import scan_region_osm  # noqa: PLC0415
+            with st.spinner("Hämtar OSM-taggade solcellstak i hela regionen…"):
+                _region_leads = scan_region_osm()
+            try:
+                _existing = get_supabase().table("scout_leads").select("tile_key").eq(
+                    "user_id", str(user.id)
+                ).execute()
+                _have = {r["tile_key"] for r in (_existing.data or []) if r.get("tile_key")}
+            except Exception as _e:
+                _log.warning("region dedup fetch failed: %s", _e)
+                _have = set()
+            _new = [lead for lead in _region_leads if lead.tile_key not in _have]
+            _rows = [{**_lead_to_sb_row(lead), "user_id": str(user.id)} for lead in _new]
+            _saved = 0
+            if _rows:
+                _sb = get_supabase()
+                try:
+                    _sb.table("scout_leads").insert(_rows).execute()
+                    _saved = len(_rows)
+                except Exception:
+                    # Batchen föll — spara det som går rad för rad
+                    for _row in _rows:
+                        try:
+                            _sb.table("scout_leads").insert(_row).execute()
+                            _saved += 1
+                        except Exception as _ins_exc:
+                            _log.warning("region lead insert failed: %s", _ins_exc)
+            _n_review = sum(1 for lead in _new if lead.needs_review)
+            _log_event(
+                "region_osm_sweep",
+                f"{len(_region_leads)} träffar, {_saved} nya sparade ({_n_review} till granskning)",
+                user_email=getattr(user, "email", "") or "",
+            )
+            if _saved:
+                st.success(
+                    f"⚡ {_saved} nya gratisleads sparade av {len(_region_leads)} träffar "
+                    f"i regionen. {_n_review} kräver granskning (Granska-fliken), "
+                    f"resten ligger direkt i Leads-fliken."
+                )
+            else:
+                st.info(
+                    f"Inga nya träffar — alla {len(_region_leads)} OSM-taggade tak "
+                    f"i regionen finns redan sparade."
+                )
 
     with col_map:
         try:
@@ -1725,8 +1802,15 @@ def page_scanner(user, profile: dict | None = None, lead_count: int = 0):
         _scan_budget = _BudgetTracker(budget_sek=_BUDGET_SEK)
         st.session_state["_budget_tracker"] = _scan_budget
 
-        _state = _ScanState(budget=_scan_budget)
+        _state = _ScanState(budget=_scan_budget, scan_id=uuid.uuid4().hex[:8])
         st.session_state["_scan_state"] = _state
+        _log_event(
+            "scan_start",
+            f"{'bbox' if use_bbox else city_name} max_leads={max_leads} ai={bool(_anthr_key)}",
+            detail=f"scan_id={_state.scan_id} bbox={south},{west},{north},{east}" if use_bbox
+                   else f"scan_id={_state.scan_id}",
+            user_email=getattr(user, "email", "") or "",
+        )
         _sb_client = get_supabase()  # capture on main thread (has Streamlit ctx)
         threading.Thread(
             target=_run_scan_worker,

@@ -55,17 +55,37 @@ streamlit run app.py
 1. Google Maps geocoding → viewport bbox
 2. OSM solar-tags → gratisleads (instant)
 3. _get_residential_areas() → Overpass → landuse=residential polygoner
-4. Per zon: _get_osm_buildings() → filtrera bort icke-villor
-5. scan_buildings_ai() med ThreadPoolExecutor(max_workers=4):
+   (används BARA för prioritering, inte hämtning)
+4. _get_osm_buildings_grid() → hela viewporten i ett glest rutnät
+   (~0.06°-celler, få Overpass-anrop) → filtrera bort icke-villor
+5. _rank_buildings() → största residential-zonen först, glesbygd sist
+   (max_leads klipper därmed i tätorten först)
+6. ETT scan_buildings_ai()-pass med ThreadPoolExecutor(max_workers=4):
    └─ _fetch_satellite() → _enhance_contrast() (CLAHE 4×4) →
       _prefilter_building() (Haiku, 10 tokens) →
       _analyze_building() (Opus 4.8, cached few-shot) →
       Om UNSURE: Street View → andra analys
-6. Glesbygd-pass: hela viewport utan landuse-filter (fångar 20-30% av villor)
 7. Returnera (leads, ScanStats)
 ```
 
+**Historik:** t.o.m. 2026-07 hämtades byggnader per residential-zon (upp till
+100 seriella Overpass-anrop + separat glesbygd-pass) — Overpass-429/504-backoffs
+dominerade wall-clock. Rutnätet ersätter allt det.
+
+`_overpass()` roterar servrar per försök: overpass-api.de ×2 → kumi.systems-spegeln → overpass-api.de. Spegeln ligger medvetet trea — vid 504-stormar är den ofta också överbelastad.
+
+`scan_region_osm()` / `REGION_BBOX` = hela säljområdet (Nässjö–Eksjö–Vetlanda–Jönköping) i ett enda solar-tagg-anrop — driver knappen "⚡ Region-gratisleads" i scan-fliken.
+
 `on_progress`-callbacken i `app.py` sparar varje AI-lead progressivt till Supabase direkt — en krasch förlorar inga redan hittade leads.
+
+### Spårbarhet (app_events)
+
+Varje scan får ett `scan_id` (8 hex). `_log_event` skriver `scan_start` / `scan_done` / `scan_error` (+ `region_osm_sweep`, login-händelser) till `app_events`-tabellen med scan_debug/fel-svansar i `detail`. Felsökning i efterhand:
+```sql
+select * from app_events order by created_at desc limit 50;
+select * from app_events where detail like 'scan_id=<id>%' order by created_at;
+```
+Live-loggar under pågående scan finns i dev-konsolen i UI (`_StateLogHandler`, 800 rader).
 
 ### Auth-flöde
 
@@ -144,7 +164,7 @@ Kolumner som koden skriver/läser: `id`, `user_id`, `lat`, `lng`, `address`, `co
 - **Mapbox 24h-regel**: Mapbox-bilder får ALDRIG lagras — bara visas i UI
 - **LM WMS / LM minkarta**: lagringsbar (CC-BY), alltid OK att spara `image_url`
 - **Haiku pre-filter**: `_prefilter_building()` körs före Opus för att spara ~60% kostnad
-- **Glesbygd-pass**: `scan_city()` kör ett extra pass på hela viewport för hus utanför OSM residential-polygoner
+- **Glesbygd ingår i huvudpasset**: hus utanför residential-polygoner hämtas av rutnätet och rankas sist av `_rank_buildings` — inget separat pass
 - **OSM-attribution**: CSV-export måste innehålla attribution-header (ODbL); se `docs/adr/0001-osm-odbl-csv.md`
 
 ## Agent skills
