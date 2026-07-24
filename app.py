@@ -531,6 +531,15 @@ def save_lead(user_id: str, data: dict, profile: dict | None = None):
             decrement_credits(user_id)
 
 
+def _is_true(val) -> bool:
+    """Sant bara för ett faktiskt sant värde. NULL/NaN/saknat → False.
+
+    `bool(nan)` är True, så en naken bool() på ett Supabase-fält som är None
+    (obesvarad flagga) hade räknat ogranskade leads som bekräftade.
+    """
+    return bool(pd.notna(val) and val)
+
+
 def _count_flag(df: "pd.DataFrame", col: str) -> int:
     """Antal rader där boolean-kolumnen är sann. Saknad kolumn eller NULL → 0.
 
@@ -540,6 +549,13 @@ def _count_flag(df: "pd.DataFrame", col: str) -> int:
     if col not in df.columns:
         return 0
     return int(df[col].fillna(False).astype(bool).sum())
+
+
+def _filter_flag(df: "pd.DataFrame", col: str) -> "pd.DataFrame":
+    """Rader där boolean-kolumnen är sann. Saknad kolumn → tom DataFrame."""
+    if col not in df.columns:
+        return df.iloc[0:0]
+    return df[df[col].fillna(False).astype(bool)]
 
 
 def load_leads(user_id: str, include_false_positives: bool = False) -> pd.DataFrame:
@@ -2331,10 +2347,13 @@ def _leads_html_with_thumbs(df_full: "pd.DataFrame") -> None:
     rows_html: list[str] = []
     for _, row in df_full.iterrows():
         addr = _html.escape(str(row.get("address") or "–"))
-        # Bekräftad av dig = ✅, väntar på granskning = 🔍, annars soltak-ikon
-        if bool(row.get("user_confirmed")):
+        # Bekräftad av dig = ✅, väntar på granskning = 🔍, annars soltak-ikon.
+        # _is_true() krävs: Supabase ger None för obesvarade flaggor, pandas gör
+        # dem till NaN, och bool(nan) är True — ogranskade leads hade annars
+        # visats som bekräftade.
+        if _is_true(row.get("user_confirmed")):
             solar_icon = "✅"
-        elif bool(row.get("needs_review")):
+        elif _is_true(row.get("needs_review")):
             solar_icon = "🔍"
         else:
             solar_icon = "☀️"
@@ -2461,10 +2480,12 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
             help="Dölj leads där solceller redan hittades på annan del av tomten (t.ex. garage)",
         )
 
+    # Saknas kolumnen (äldre schema) matchar ingen rad filtret — visa tomt
+    # istället för hela listan, så urvalet aldrig ljuger om vad som visas.
     if filter_status == "Bekräftade":
-        df = df[df["user_confirmed"].fillna(False).astype(bool)] if "user_confirmed" in df.columns else df
+        df = _filter_flag(df, "user_confirmed")
     elif filter_status == "Att granska":
-        df = df[df["needs_review"].fillna(False).astype(bool)] if "needs_review" in df.columns else df
+        df = _filter_flag(df, "needs_review")
 
     if hide_samtomt and "samtomt_solar_extra" in df.columns:
         df = df[~df["samtomt_solar_extra"].astype(bool)]

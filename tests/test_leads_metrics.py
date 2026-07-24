@@ -67,6 +67,31 @@ def test_count_flag_empty_dataframe():
     assert app._count_flag(pd.DataFrame(), "user_confirmed") == 0
 
 
+def test_is_true_rejects_nan_and_none():
+    """Statusikonen valde ✅ för ogranskade leads: bool(nan) är True."""
+    assert app._is_true(True) is True
+    assert app._is_true(False) is False
+    assert app._is_true(None) is False
+    assert app._is_true(float("nan")) is False
+
+
+def test_filter_flag_missing_column_returns_empty():
+    """Äldre schema utan kolumnen får inte visa HELA listan under ett filter
+    som utger sig för att visa ett urval."""
+    df = _df([{"address": "Testgatan 1"}, {"address": "Testgatan 2"}])
+    assert len(app._filter_flag(df, "user_confirmed")) == 0
+
+
+def test_filter_flag_keeps_only_true_rows():
+    df = _df([
+        {"address": "A", "user_confirmed": True},
+        {"address": "B", "user_confirmed": None},
+        {"address": "C", "user_confirmed": False},
+    ])
+    result = app._filter_flag(df, "user_confirmed")
+    assert list(result["address"]) == ["A"]
+
+
 def test_no_has_solar_column_reference_left():
     """`has_solar` finns inte i scout_leads — regression mot att den smyger
     tillbaka in i leads-vyn och nollar mätvärdena igen."""
