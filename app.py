@@ -531,6 +531,33 @@ def save_lead(user_id: str, data: dict, profile: dict | None = None):
             decrement_credits(user_id)
 
 
+def _is_true(val) -> bool:
+    """Sant bara för ett faktiskt sant värde. NULL/NaN/saknat → False.
+
+    `bool(nan)` är True, så en naken bool() på ett Supabase-fält som är None
+    (obesvarad flagga) hade räknat ogranskade leads som bekräftade.
+    """
+    return bool(pd.notna(val) and val)
+
+
+def _count_flag(df: "pd.DataFrame", col: str) -> int:
+    """Antal rader där boolean-kolumnen är sann. Saknad kolumn eller NULL → 0.
+
+    Supabase returnerar None för obesvarade flaggor, och pandas gör dem till
+    NaN — `bool(nan)` är True, så en rå `.sum()` skulle räkna dem som träffar.
+    """
+    if col not in df.columns:
+        return 0
+    return int(df[col].fillna(False).astype(bool).sum())
+
+
+def _filter_flag(df: "pd.DataFrame", col: str) -> "pd.DataFrame":
+    """Rader där boolean-kolumnen är sann. Saknad kolumn → tom DataFrame."""
+    if col not in df.columns:
+        return df.iloc[0:0]
+    return df[df[col].fillna(False).astype(bool)]
+
+
 def load_leads(user_id: str, include_false_positives: bool = False) -> pd.DataFrame:
     sb = get_supabase()
     try:
@@ -2320,7 +2347,16 @@ def _leads_html_with_thumbs(df_full: "pd.DataFrame") -> None:
     rows_html: list[str] = []
     for _, row in df_full.iterrows():
         addr = _html.escape(str(row.get("address") or "–"))
-        solar_icon = "☀️" if str(row.get("has_solar", "")) == "Ja" else "—"
+        # Bekräftad av dig = ✅, väntar på granskning = 🔍, annars soltak-ikon.
+        # _is_true() krävs: Supabase ger None för obesvarade flaggor, pandas gör
+        # dem till NaN, och bool(nan) är True — ogranskade leads hade annars
+        # visats som bekräftade.
+        if _is_true(row.get("user_confirmed")):
+            solar_icon = "✅"
+        elif _is_true(row.get("needs_review")):
+            solar_icon = "🔍"
+        else:
+            solar_icon = "☀️"
         samtomt_cell = (
             '<span title="Sol hittad på annan byggnad på/intill tomten — '
             'huvudtaket är fritt. Kolla bilden innan besök.">⚠️</span>'
@@ -2402,7 +2438,7 @@ def _leads_html_with_thumbs(df_full: "pd.DataFrame") -> None:
         '<table class="lt-t"><thead><tr>'
         "<th style='width:68px'>Tak</th>"
         "<th>Adress</th>"
-        "<th style='text-align:center'>Sol</th>"
+        "<th style='text-align:center' title='✅ bekräftad av dig · 🔍 väntar på granskning · ☀️ AI-träff'>Status</th>"
         "<th style='text-align:center' title='Sol på annan byggnad på/intill tomten'>Samtomt</th>"
         "</tr></thead>"
         f"<tbody>{''.join(rows_html)}</tbody>"
@@ -2420,18 +2456,22 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
         st.info("Inga leads ännu. Kör en scanning i fliken 'AI Scanner' för att hitta tak.")
         return
 
-    total = len(df)
-    solar = (df["has_solar"] == "Ja").sum() if "has_solar" in df.columns else 0
+    # Varje lead i listan ÄR ett soltak — appen sparar bara träffar. Det som
+    # skiljer dem åt är granskningsstatus, inte om de har solceller.
+    # (Den gamla `has_solar`-kolumnen finns inte i scout_leads: mätvärdena
+    # visade därför alltid 0 och filtret tömde listan.)
+    _bekraftade = _count_flag(df, "user_confirmed")
+    _granska = _count_flag(df, "needs_review")
 
     m1, m2, m3 = st.columns(3)
-    m1.metric("Totalt scoutable", total)
-    m2.metric("Med solceller", solar)
-    m3.metric("Utan solceller", total - solar)
+    m1.metric("Solcellstak totalt", len(df))
+    m2.metric("Bekräftade", _bekraftade, help="Du har tryckt ✅ Rätt tak")
+    m3.metric("Att granska", _granska, help="Väntar på ditt omdöme i Granska-fliken")
 
     col_filter1, col_filter2 = st.columns(2)
     with col_filter1:
-        filter_solar = st.radio(
-            "Filtrera", ["Alla", "Med solceller", "Utan solceller"], horizontal=True
+        filter_status = st.radio(
+            "Filtrera", ["Alla", "Bekräftade", "Att granska"], horizontal=True
         )
     with col_filter2:
         hide_samtomt = st.checkbox(
@@ -2440,10 +2480,12 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
             help="Dölj leads där solceller redan hittades på annan del av tomten (t.ex. garage)",
         )
 
-    if filter_solar == "Med solceller":
-        df = df[df["has_solar"] == "Ja"]
-    elif filter_solar == "Utan solceller":
-        df = df[df["has_solar"] != "Ja"]
+    # Saknas kolumnen (äldre schema) matchar ingen rad filtret — visa tomt
+    # istället för hela listan, så urvalet aldrig ljuger om vad som visas.
+    if filter_status == "Bekräftade":
+        df = _filter_flag(df, "user_confirmed")
+    elif filter_status == "Att granska":
+        df = _filter_flag(df, "needs_review")
 
     if hide_samtomt and "samtomt_solar_extra" in df.columns:
         df = df[~df["samtomt_solar_extra"].astype(bool)]
@@ -2520,10 +2562,10 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
 
     # ── Markera felaktiga leads (FP-editor) ────────────────────────────────────
     display_cols = [c for c in
-        ["address", "has_solar", "samtomt_solar_extra", "notes", "created_at"]
+        ["address", "user_confirmed", "samtomt_solar_extra", "notes", "created_at"]
         if c in df.columns]
     rename_map = {
-        "address": "Adress", "has_solar": "Solceller",
+        "address": "Adress", "user_confirmed": "Bekräftad",
         "samtomt_solar_extra": "Samtomt sol",
         "notes": "Noteringar",
         "created_at": "Sparad",
