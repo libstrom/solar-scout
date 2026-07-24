@@ -544,6 +544,24 @@ def load_leads(user_id: str, include_false_positives: bool = False) -> pd.DataFr
         return pd.DataFrame()
 
 
+def _bool_series(df: pd.DataFrame, col: str) -> pd.Series:
+    """Kolumnen som bool-serie. Saknad kolumn eller NULL → False."""
+    if col not in df.columns:
+        return pd.Series(False, index=df.index)
+    return df[col].fillna(False).astype(bool)
+
+
+def _lead_state_icon(row) -> str:
+    """✅ bekräftad · 🔍 att granska · ❌ fel · — orörd."""
+    if bool(row.get("false_positive")):
+        return "❌"
+    if row.get("user_confirmed") is True:
+        return "✅"
+    if bool(row.get("needs_review")):
+        return "🔍"
+    return "—"
+
+
 def delete_lead(lead_id: int):
     sb = get_supabase()
     try:
@@ -800,7 +818,6 @@ def _lead_to_display_row(lead) -> dict:
 def _lead_to_sb_row(lead) -> dict:
     return {
         "address":             lead.address,
-        "has_solar":           "Ja",
         "air_to_air":          "False",
         "air_to_water":        "False",
         "notes":               f"Detekterad via {lead.source.upper()} (konfidens {lead.confidence:.0%})",
@@ -2254,7 +2271,6 @@ def page_review(user):
                 sb.table("scout_leads").update({
                     "user_confirmed": True,
                     "needs_review": False,
-                    "has_solar": "Ja",
                 }).eq("id", lead_id).execute()
             except Exception as _rev_exc:
                 _log.error("page_review bekräfta misslyckades lead_id=%s: %s", lead_id, _rev_exc)
@@ -2320,7 +2336,7 @@ def _leads_html_with_thumbs(df_full: "pd.DataFrame") -> None:
     rows_html: list[str] = []
     for _, row in df_full.iterrows():
         addr = _html.escape(str(row.get("address") or "–"))
-        solar_icon = "☀️" if str(row.get("has_solar", "")) == "Ja" else "—"
+        state_icon = _lead_state_icon(row)
         samtomt_cell = (
             '<span title="Sol hittad på annan byggnad på/intill tomten — '
             'huvudtaket är fritt. Kolla bilden innan besök.">⚠️</span>'
@@ -2373,7 +2389,7 @@ def _leads_html_with_thumbs(df_full: "pd.DataFrame") -> None:
             f"<tr>"
             f"<td class='li'>{thumb_cell}</td>"
             f"<td class='la'>{addr}</td>"
-            f"<td class='lc'>{solar_icon}</td>"
+            f"<td class='lc'>{state_icon}</td>"
             f"<td class='lc'>{samtomt_cell}</td>"
             f"</tr>"
         )
@@ -2402,7 +2418,7 @@ def _leads_html_with_thumbs(df_full: "pd.DataFrame") -> None:
         '<table class="lt-t"><thead><tr>'
         "<th style='width:68px'>Tak</th>"
         "<th>Adress</th>"
-        "<th style='text-align:center'>Sol</th>"
+        "<th style='text-align:center' title='✅ bekräftad · 🔍 att granska · ❌ fel'>Läge</th>"
         "<th style='text-align:center' title='Sol på annan byggnad på/intill tomten'>Samtomt</th>"
         "</tr></thead>"
         f"<tbody>{''.join(rows_html)}</tbody>"
@@ -2414,24 +2430,36 @@ def _leads_html_with_thumbs(df_full: "pd.DataFrame") -> None:
 
 def page_leads(user):  # noqa: keep user param for confirm_lead calls
     st.subheader("Leadslista")
-    df = load_leads(str(user.id))
+    # Hämta även false positives — de behövs för "Fel"-mätvärdet och -filtret,
+    # men räknas inte in i "Totalt" och visas inte i "Alla".
+    df_all = load_leads(str(user.id), include_false_positives=True)
 
-    if df.empty:
+    if df_all.empty:
         st.info("Inga leads ännu. Kör en scanning i fliken 'AI Scanner' för att hitta tak.")
         return
 
-    total = len(df)
-    solar = (df["has_solar"] == "Ja").sum() if "has_solar" in df.columns else 0
+    # Alla leads i listan har solceller — det är hela poängen med en scan.
+    # Det som skiljer dem åt är granskningsläget: user_confirmed True = bekräftad,
+    # NULL = ej granskad, false_positive True = AI:n hade fel.
+    _fp = _bool_series(df_all, "false_positive")
+    _confirmed = _bool_series(df_all, "user_confirmed") & ~_fp
+    _unreviewed = (
+        df_all["user_confirmed"].isna()
+        if "user_confirmed" in df_all.columns
+        else pd.Series(True, index=df_all.index)
+    )
+    _to_review = _bool_series(df_all, "needs_review") & _unreviewed & ~_fp
 
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Totalt scoutable", total)
-    m2.metric("Med solceller", solar)
-    m3.metric("Utan solceller", total - solar)
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Totalt", int((~_fp).sum()))
+    m2.metric("Bekräftade", int(_confirmed.sum()), help="Du eller Linus har sagt ja i Granska")
+    m3.metric("Att granska", int(_to_review.sum()), help="AI:n var osäker — väntar på granskning")
+    m4.metric("Fel", int(_fp.sum()), help="Markerade som felaktiga (inga solceller)")
 
     col_filter1, col_filter2 = st.columns(2)
     with col_filter1:
-        filter_solar = st.radio(
-            "Filtrera", ["Alla", "Med solceller", "Utan solceller"], horizontal=True
+        filter_state = st.radio(
+            "Filtrera", ["Alla", "Bekräftade", "Att granska", "Fel"], horizontal=True
         )
     with col_filter2:
         hide_samtomt = st.checkbox(
@@ -2440,10 +2468,14 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
             help="Dölj leads där solceller redan hittades på annan del av tomten (t.ex. garage)",
         )
 
-    if filter_solar == "Med solceller":
-        df = df[df["has_solar"] == "Ja"]
-    elif filter_solar == "Utan solceller":
-        df = df[df["has_solar"] != "Ja"]
+    if filter_state == "Bekräftade":
+        df = df_all[_confirmed]
+    elif filter_state == "Att granska":
+        df = df_all[_to_review]
+    elif filter_state == "Fel":
+        df = df_all[_fp]
+    else:
+        df = df_all[~_fp]
 
     if hide_samtomt and "samtomt_solar_extra" in df.columns:
         df = df[~df["samtomt_solar_extra"].astype(bool)]
@@ -2520,10 +2552,10 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
 
     # ── Markera felaktiga leads (FP-editor) ────────────────────────────────────
     display_cols = [c for c in
-        ["address", "has_solar", "samtomt_solar_extra", "notes", "created_at"]
+        ["address", "samtomt_solar_extra", "notes", "created_at"]
         if c in df.columns]
     rename_map = {
-        "address": "Adress", "has_solar": "Solceller",
+        "address": "Adress",
         "samtomt_solar_extra": "Samtomt sol",
         "notes": "Noteringar",
         "created_at": "Sparad",
@@ -2785,15 +2817,19 @@ def page_leads(user):  # noqa: keep user param for confirm_lead calls
                     with col_fp:
                         st.write("")  # vertical alignment spacer
                         if st.button("❌ Inte solceller", key=f"fp_{lid}", use_container_width=True):
+                            _fp_ok = True
                             try:
                                 _sb.table("scout_leads").update({
                                     "false_positive": True,
-                                    "has_solar": "Nej",
                                     "user_confirmed": False,
                                 }).eq("id", lid).execute()
-                            except Exception:
-                                pass
-                            st.rerun()
+                            except Exception as _fp_exc:
+                                _fp_ok = False
+                                _log.error("markera false positive misslyckades id=%s: %s", lid, _fp_exc)
+                                st.error("Kunde inte spara — leaden är kvar i listan. Försök igen.")
+                            # rerun utanför try — st.rerun() kastar ett Exception som annars fångas
+                            if _fp_ok:
+                                st.rerun()
 
                     new_note = st.session_state.get(_note_key, cur_note)
 
